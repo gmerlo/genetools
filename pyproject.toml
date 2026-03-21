@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "genetools"
+version = "0.1.0"
+description = "Post-processing toolkit for GENE gyrokinetic simulations"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "numpy>=1.21",
+    "matplotlib>=3.4",
+    "f90nml>=1.4",
+    "h5py>=3.0",
+]
+
+[project.optional-dependencies]
+adios2 = ["adios2"]
+dev = ["pytest>=7", "pytest-cov"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

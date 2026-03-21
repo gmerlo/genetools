@@ -1,0 +1,6 @@
+numpy>=1.21
+matplotlib>=3.4
+f90nml>=1.4
+h5py>=3.0
+# Optional — only needed for ADIOS2 BP file support:
+# adios2
