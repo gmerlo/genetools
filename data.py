@@ -283,3 +283,148 @@ else:
                 "BPReader requires the 'adios2' Python package. "
                 "Install it via: pip install adios2"
             )
+
+
+# ---------------------------------------------------------------------------
+# Multi-segment reader
+# ---------------------------------------------------------------------------
+
+class MultiSegmentReader:
+    """
+    Transparent wrapper that stitches multiple run-segment readers into one.
+
+    Exposes exactly the same interface as :class:`BinaryReader` so that all
+    diagnostics (Contours, ShearingRate, Spectra) work without modification.
+
+    **Overlap handling (restarts)**
+    When two segments share time values, the *later segment wins* — its
+    version of a time step replaces the earlier one.  This matches GENE's
+    restart behaviour where the new segment rewinds slightly.
+
+    **Variable grids / precisions**
+    Each segment reader retains its own grid and dtype from the corresponding
+    params file.  Arrays yielded by :meth:`stream_selected` have the native
+    shape of the segment they come from.
+
+    The ``ni``, ``nj``, ``nk`` attributes always reflect the **first segment**
+    and are used by Contours only as fallback default slice indices.
+
+    Parameters
+    ----------
+    readers : list of _BaseReader
+        Segment readers in file order (e.g. ``_0001``, ``_0002``, ...).
+    tol : float, optional
+        Relative tolerance for deduplicating overlapping times (default 1e-6).
+
+    Examples
+    --------
+    >>> msr = MultiSegmentReader([
+    ...     BinaryReader('field', folder, ext, params.get(fn))
+    ...     for fn, ext in enumerate(runs)
+    ... ])
+    >>> times = msr.read_all_times()
+    >>> for t, arrays in msr.stream_selected([0, 10, 50]):
+    ...     phi = arrays[0]
+    """
+
+    def __init__(self, readers: list, tol: float = 1e-6):
+        if not readers:
+            raise ValueError("MultiSegmentReader requires at least one reader.")
+        self.readers  = readers
+        self.tol      = tol
+        self.ni       = readers[0].ni
+        self.nj       = readers[0].nj
+        self.nk       = readers[0].nk
+        self.n_arrays = readers[0].n_arrays
+        self._global_times = None
+        self._global_map   = None
+
+    def _build_timeline(self) -> None:
+        """Scan all segments, deduplicate overlapping times (later wins), sort."""
+        entries = []
+        for seg_idx, reader in enumerate(self.readers):
+            for local_iter, t in enumerate(reader.read_all_times()):
+                entries.append((float(t), seg_idx, local_iter))
+
+        # Sort by time first, then by segment (later segment = higher index)
+        entries.sort(key=lambda e: (e[0], e[1]))
+
+        # Remove duplicates — keep entry from later segment
+        keep = [True] * len(entries)
+        for i in range(len(entries) - 1, 0, -1):
+            tol_abs = self.tol * max(1.0, abs(entries[i][0]))
+            if abs(entries[i][0] - entries[i-1][0]) <= tol_abs:
+                # Both refer to same time — discard the earlier segment's entry
+                if entries[i][1] >= entries[i-1][1]:
+                    keep[i-1] = False
+                else:
+                    keep[i] = False
+
+        kept = [e for e, k in zip(entries, keep) if k]
+        self._global_times = np.array([e[0] for e in kept], dtype=np.float64)
+        self._global_map   = [(e[1], e[2]) for e in kept]
+
+    def _ensure_timeline(self) -> None:
+        if self._global_times is None:
+            self._build_timeline()
+
+    def read_all_times(self) -> np.ndarray:
+        """
+        Return the merged, deduplicated, sorted time array across all segments.
+
+        Returns
+        -------
+        np.ndarray
+            Shape ``(n_total_iters,)``.
+        """
+        self._ensure_timeline()
+        return self._global_times.copy()
+
+    def stream_selected(self, global_indices):
+        """
+        Yield ``(time, arrays)`` for the requested global indices.
+
+        Routes each index to the correct segment reader automatically.
+        Arrays have the native shape and dtype of their source segment.
+
+        Parameters
+        ----------
+        global_indices : sequence of int
+            Indices into the merged timeline from :meth:`read_all_times`.
+
+        Yields
+        ------
+        time : float
+        arrays : list of np.ndarray
+        """
+        self._ensure_timeline()
+
+        from collections import defaultdict
+
+        # Group by segment so each file is opened only once
+        seg_requests = defaultdict(list)
+        for g_idx in global_indices:
+            seg_idx, local_iter = self._global_map[g_idx]
+            seg_requests[seg_idx].append((g_idx, local_iter))
+
+        # Read segments in order; within each segment read iters sequentially
+        results = {}
+        for seg_idx in sorted(seg_requests.keys()):
+            pairs        = sorted(seg_requests[seg_idx], key=lambda x: x[1])
+            local_iters  = [li for _, li in pairs]
+            g_indices    = [gi for gi, _ in pairs]
+            reader       = self.readers[seg_idx]
+            for (t, arrays), g_idx in zip(reader.stream_selected(local_iters), g_indices):
+                results[g_idx] = (t, arrays)
+
+        for g_idx in global_indices:
+            yield results[g_idx]
+
+    def __repr__(self) -> str:
+        self._ensure_timeline()
+        return (
+            f"MultiSegmentReader("
+            f"{len(self.readers)} segments, "
+            f"{len(self._global_times)} unique steps, "
+            f"t=[{self._global_times[0]:.3f}, {self._global_times[-1]:.3f}])"
+        )
