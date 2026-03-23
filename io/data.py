@@ -114,6 +114,23 @@ class _BaseReader:
         """
         raise NotImplementedError
 
+    def segment_of(self, global_idx: int) -> int:
+        """Return segment index for *global_idx* (always 0 for single readers)."""
+        return 0
+
+    def stream_selected_with_seg(self, iteration_indices):
+        """
+        Like :meth:`stream_selected` but also yields segment index (always 0).
+
+        Yields
+        ------
+        time : float
+        arrays : list of np.ndarray
+        seg_idx : int  (always 0 for single-segment readers)
+        """
+        for t, arrays in self.stream_selected(iteration_indices):
+            yield t, arrays, 0
+
 
 # ---------------------------------------------------------------------------
 # Fortran unformatted binary reader
@@ -235,6 +252,11 @@ if _ADIOS2_AVAILABLE:
         Inherits all parameters from :class:`_BaseReader`.
         """
 
+        def __init__(self, file_type: str, folder: str, ext: str,
+                     params: dict, species: str = None):
+            super().__init__(file_type, folder, ext, params, species)
+            self._file_type = file_type   # 'field' or 'mom'
+
         def read_all_times(self) -> np.ndarray:
             """
             Read every ``'time'`` variable from the BP file.
@@ -250,28 +272,55 @@ if _ADIOS2_AVAILABLE:
                     times.append(step.read("time", np_type=self.real_dtype))
             return np.array(times, dtype=self.real_dtype)
 
+        # Variable names written by GENE for each file type, in array order
+        _FIELD_VARS = ["phi", "A_par", "B_par"]
+        _MOM_VARS   = ["dens", "T_par", "T_perp", "q_par", "q_perp",
+                       "u_par", "densI1", "T_parI1", "T_ppI1"]
+
+        def _var_names(self) -> list:
+            """Return the ordered list of variable names for this file type."""
+            if self._file_type == "field":
+                return self._FIELD_VARS[:self.n_arrays]
+            return self._MOM_VARS[:self.n_arrays]
+
         def stream_selected(self, iteration_indices):
             """
             Stream only the requested iterations from the BP file.
 
-            Uses a set for O(1) membership tests. Iterations not in
-            *iteration_indices* are skipped without reading their payload.
+            Yields ``(time, [array_0, array_1, ...])`` in the same order as
+            *iteration_indices*, matching the contract of :class:`BinaryReader`.
 
-            Yields ``(time, [array_0, array_1, ...])`` — same contract as
-            :class:`BinaryReader`.
+            ADIOS2 only supports forward sequential access, so the file is
+            walked once in ascending step order. Results that arrive before
+            their turn in the requested order are buffered and yielded as soon
+            as the caller's order is satisfied.
             """
-            iter_set = set(iteration_indices)
+            iteration_indices = list(iteration_indices)
+            if not iteration_indices:
+                return
+
+            iter_set  = set(iteration_indices)
+            var_names = self._var_names()
+            buffer    = {}          # step_idx -> (time, data)
+            next_out  = 0           # next position in iteration_indices to yield
+
             with adios2.open(self.filename, "r") as fh:
                 for step_idx, step in enumerate(fh):
                     if step_idx not in iter_set:
                         continue
-                    time = step.read("time", np_type=self.real_dtype)
+                    time = float(step.read("time", np_type=self.real_dtype))
                     data = []
-                    for k in range(self.n_arrays):
-                        arr = step.read(f"array_{k}", np_type=self.cpx_dtype)
+                    for name in var_names:
+                        arr = step.read(name, np_type=self.cpx_dtype)
                         arr = arr.reshape((self.ni, self.nj, self.nk), order="F")
                         data.append(arr)
-                    yield float(time), data
+                    buffer[step_idx] = (time, data)
+
+                    # yield as many consecutive results as are ready
+                    while (next_out < len(iteration_indices) and
+                           iteration_indices[next_out] in buffer):
+                        yield buffer.pop(iteration_indices[next_out])
+                        next_out += 1
 
 else:
 
@@ -380,12 +429,20 @@ class MultiSegmentReader:
         self._ensure_timeline()
         return self._global_times.copy()
 
+    def segment_of(self, global_idx: int) -> int:
+        """Return the segment index that owns *global_idx*."""
+        self._ensure_timeline()
+        return self._global_map[global_idx][0]
+
     def stream_selected(self, global_indices):
         """
         Yield ``(time, arrays)`` for the requested global indices.
 
         Routes each index to the correct segment reader automatically.
         Arrays have the native shape and dtype of their source segment.
+
+        Memory-efficient: buffers at most one segment's worth of results
+        at a time rather than accumulating all results before yielding.
 
         Parameters
         ----------
@@ -398,27 +455,75 @@ class MultiSegmentReader:
         arrays : list of np.ndarray
         """
         self._ensure_timeline()
+        yield from self._stream_with_seg(global_indices, include_seg=False)
 
+    def stream_selected_with_seg(self, global_indices):
+        """
+        Like :meth:`stream_selected` but also yields the segment index.
+
+        Yields
+        ------
+        time : float
+        arrays : list of np.ndarray
+        seg_idx : int
+            Index into the original readers list that produced this step.
+        """
+        self._ensure_timeline()
+        yield from self._stream_with_seg(global_indices, include_seg=True)
+
+    def _stream_with_seg(self, global_indices, include_seg: bool):
+        """
+        Core streaming implementation.
+
+        Reads each segment file exactly once, in segment order.
+        Yields results in the original *global_indices* order using a
+        minimal reorder buffer — at most one extra copy per segment
+        boundary rather than holding all snapshots simultaneously.
+        """
         from collections import defaultdict
 
-        # Group by segment so each file is opened only once
+        global_indices = list(global_indices)
+        if not global_indices:
+            return
+
+        # Map each global index to its (seg_idx, local_iter)
+        # and build a position map for output ordering
+        request_pos = {g_idx: pos for pos, g_idx in enumerate(global_indices)}
+
+        # Group by segment, preserving local iteration order within each
         seg_requests = defaultdict(list)
         for g_idx in global_indices:
             seg_idx, local_iter = self._global_map[g_idx]
             seg_requests[seg_idx].append((g_idx, local_iter))
 
-        # Read segments in order; within each segment read iters sequentially
-        results = {}
-        for seg_idx in sorted(seg_requests.keys()):
-            pairs        = sorted(seg_requests[seg_idx], key=lambda x: x[1])
-            local_iters  = [li for _, li in pairs]
-            g_indices    = [gi for gi, _ in pairs]
-            reader       = self.readers[seg_idx]
-            for (t, arrays), g_idx in zip(reader.stream_selected(local_iters), g_indices):
-                results[g_idx] = (t, arrays)
+        # Read segments in ascending order (each file opened once)
+        # Buffer results only when needed for reordering
+        buffer = {}          # g_idx -> (t, arrays[, seg_idx])
+        next_to_yield = 0    # position in global_indices to yield next
 
-        for g_idx in global_indices:
-            yield results[g_idx]
+        for seg_idx in sorted(seg_requests.keys()):
+            pairs       = sorted(seg_requests[seg_idx], key=lambda x: x[1])
+            local_iters = [li for _, li in pairs]
+            g_idxs      = [gi for gi, _ in pairs]
+            reader      = self.readers[seg_idx]
+
+            for (t, arrays), g_idx in zip(
+                    reader.stream_selected(local_iters), g_idxs):
+                entry = (t, arrays, seg_idx) if include_seg else (t, arrays)
+                buffer[g_idx] = entry
+
+                # Yield as many consecutive results as are ready
+                while (next_to_yield < len(global_indices) and
+                       global_indices[next_to_yield] in buffer):
+                    yield buffer.pop(global_indices[next_to_yield])
+                    next_to_yield += 1
+
+        # Flush any remaining buffered results (should be empty for sorted input)
+        while next_to_yield < len(global_indices):
+            g_idx = global_indices[next_to_yield]
+            if g_idx in buffer:
+                yield buffer.pop(g_idx)
+            next_to_yield += 1
 
     def __repr__(self) -> str:
         self._ensure_timeline()

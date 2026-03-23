@@ -1,44 +1,79 @@
+
 """
 genetools — Post-processing toolkit for GENE gyrokinetic simulations.
 
-Modules
--------
-params
-    Load and parse GENE Fortran-90 namelist parameter files.
-data
-    Stream field and moment data from binary or ADIOS2 BP files.
-nrg
-    Read and plot energy/flux diagnostic files.
-utils
-    File-system helpers for GENE run directories.
-geometry
-    Parse geometry files (local and global).
-spectra
-    Compute and store time-averaged flux spectra.
-coordinates
-    Build coordinate arrays (kx, ky, z).
-contours
-    Contour and 2-D visualisations.
+Sub-packages
+------------
+genetools.io
+    File I/O, geometry, and coordinates.
+genetools.diagnostics
+    Diagnostics: nrg, contours, shearing rate, flux spectra.
 
 Quick start
 -----------
->>> from genetools.params import Params
->>> from genetools.nrg import NrgReader
->>> params = Params('/path/to/run/').get()
->>> reader = NrgReader('/path/to/run/', params)
->>> times, data = reader.read_all()
->>> reader.plot()
+>>> from genetools.io import Params, set_runs, BinaryReader, MultiSegmentReader
+>>> from genetools.io import Geometry, Coordinates
+>>> from genetools.diagnostics import NrgReader, Contours, ShearingRate, Spectra
+
+>>> folder = '/path/to/run/'
+>>> runs   = set_runs(folder)
+>>> params = Params(folder, runs)
+>>> geom   = Geometry(folder, runs, params)
+>>> coord  = Coordinates(folder, runs, params)
+
+>>> # NRG diagnostics
+>>> NrgReader(folder, params.get(0)).plot()
+
+>>> # Field contours
+>>> field_reader = MultiSegmentReader([
+...     BinaryReader('field', folder, ext, params.get(fn))
+...     for fn, ext in enumerate(runs)
+... ])
+>>> Contours().plot_timeseries_2d(field_reader, t_start=10., t_stop=2000.,
+...     field=0, ifft='xy', params=params.get(0))
+
+Backward-compatible flat imports
+---------------------------------
+The original flat module names are preserved via the sub-package structure.
+You can import everything from the top level:
+
+>>> from genetools import BinaryReader, Params, Geometry, Coordinates
+>>> from genetools import NrgReader, Contours, ShearingRate, Spectra
 """
 
-from .params import Params
-from .data import BinaryReader, BPReader
-from .nrg import NrgReader
-from .utils import set_runs
+from . import io
+from . import diagnostics
+
+# Flat convenience imports — mirrors original API
+from .io import (
+    BinaryReader,
+    BPReader,
+    MultiSegmentReader,
+    Params,
+    set_runs,
+    Geometry,
+    Coordinates,
+)
+from .diagnostics import (
+    NrgReader,
+    Contours,
+    ShearingRate,
+    Spectra,
+)
+
+__version__ = "0.2.0"
 
 __all__ = [
-    "Params",
+    "io",
+    "diagnostics",
     "BinaryReader",
     "BPReader",
-    "NrgReader",
+    "MultiSegmentReader",
+    "Params",
     "set_runs",
+    "Geometry",
+    "Coordinates",
+    "NrgReader",
+    "ShearingRate",
+    "Spectra",
 ]

@@ -44,6 +44,8 @@ import glob
 import numpy as np
 import matplotlib.pyplot as plt
 
+from genetools.io.params import Params
+
 # ---------------------------------------------------------------------------
 # Column index constants (0-based) — kept as named values so changes are
 # made in exactly one place.
@@ -78,15 +80,35 @@ class NrgReader:
     """
     Read and visualise GENE energy diagnostic (``nrg``) files.
 
-    Files are detected automatically from *folder* and sorted by the first
-    simulation time they contain before concatenation.
+    There are two ways to construct a reader:
+
+    **With explicit extensions and params** (consistent with other readers):
+
+        reader = NrgReader(folder, params, extensions=runs)
+
+    **Auto-discover** — no params needed; files are discovered automatically
+    and params are read from the corresponding ``parameters`` file:
+
+        reader = NrgReader(folder)
+
+    In both cases, files are sorted by the **first time value they contain**
+    (not by filename), so the ordering is always based on the actual
+    simulation timeline.  Overlapping times from restarts are deduplicated —
+    the later segment wins.
 
     Parameters
     ----------
     folder : str
         Run directory containing ``nrg*`` files.
-    params : dict
-        Parameter dictionary for this run (from :class:`~genetools.params.Params`).
+    params : dict, optional
+        Parameter dictionary for this run (from :class:`~genetools.io.Params`).
+        If omitted, params are read automatically from the ``parameters*``
+        file corresponding to the first discovered nrg file.
+    extensions : list of str, optional
+        Explicit list of run suffixes, e.g. ``['_0001', '_0002']``.
+        If provided, files are constructed as ``nrg<ext>`` for each suffix.
+        If omitted, all ``nrg*`` files in *folder* are discovered automatically.
+        Ignored if *params* is also omitted (auto-discover mode).
 
     Attributes
     ----------
@@ -95,28 +117,97 @@ class NrgReader:
     data : np.ndarray or None
         3-D array of shape ``(n_species, n_cols, n_times)`` after
         :meth:`read_all` is called.
+
+    Examples
+    --------
+    >>> from genetools.io import set_runs, Params
+    >>> from genetools.diagnostics import NrgReader
+
+    >>> # Fully automatic — no setup needed
+    >>> NrgReader('/path/to/run/').plot()
+
+    >>> # Explicit — consistent with field/moment readers
+    >>> runs   = set_runs('/path/to/run/')
+    >>> params = Params('/path/to/run/', runs).get(0)
+    >>> NrgReader('/path/to/run/', params, extensions=runs).plot()
     """
 
-    def __init__(self, folder: str, params: dict):
+    def __init__(self, folder: str, params: dict = None, extensions=None):
         self.folder = folder
+
+        if params is None:
+            # Auto-discover mode: find all nrg files and read params from
+            # the parameters file that matches the first nrg file found.
+            self.nrg_files = self._discover_files()
+            params = self._read_params(self.nrg_files[0])
+        else:
+            self.nrg_files = self._build_file_list(extensions)
+
         self.n_rows_per_block: int = params["box"]["n_spec"]
-        self.n_cols_per_row: int = params["info"]["nrgcols"]
-        self.specnames: list = [d["name"] for d in params["species"]]
-        self.nrg_files: list = self._detect_files()
+        self.n_cols_per_row: int  = params["info"]["nrgcols"]
+        self.specnames: list      = [d["name"] for d in params["species"]]
         self.times = None
-        self.data = None
+        self.data  = None
 
     # ------------------------------------------------------------------
     # File discovery
     # ------------------------------------------------------------------
 
-    def _detect_files(self) -> list:
-        """Return a list of all ``nrg*`` files found in :attr:`folder`."""
+    def _discover_files(self) -> list:
+        """
+        Discover all ``nrg*`` files in :attr:`folder`.
+
+        Returns them in an arbitrary initial order — they will be sorted
+        by the first timestamp they contain in :meth:`read_all`.
+        """
         pattern = os.path.join(self.folder, "nrg*")
         files = glob.glob(pattern)
         if not files:
             raise FileNotFoundError(f"No 'nrg' files found in '{self.folder}'")
         return files
+
+    def _build_file_list(self, extensions) -> list:
+        """
+        Build file list from explicit *extensions*.
+
+        If *extensions* is None, falls back to :meth:`_discover_files`.
+        """
+        if extensions is None:
+            return self._discover_files()
+        files = []
+        for ext in extensions:
+            fpath = os.path.join(self.folder, f"nrg{ext}")
+            if not os.path.isfile(fpath):
+                raise FileNotFoundError(f"nrg file not found: {fpath}")
+            files.append(fpath)
+        if not files:
+            raise FileNotFoundError(
+                f"No nrg files for extensions {extensions} in '{self.folder}'")
+        return files
+
+    @staticmethod
+    def _read_params(nrg_filepath: str) -> dict:
+        """
+        Read the ``parameters*`` file that corresponds to *nrg_filepath*.
+
+        The suffix is extracted from the nrg filename (e.g. ``nrg_0001`` →
+        ``_0001``) and the matching ``parameters_0001`` file is loaded.
+        If no suffixed parameters file exists, the plain ``parameters`` file
+        in the same folder is used.
+        """
+        folder = os.path.dirname(nrg_filepath)
+        basename = os.path.basename(nrg_filepath)
+        # Extract suffix: everything after "nrg" (e.g. "_0001", ".dat", "")
+        suffix = basename[len("nrg"):]
+        # Try suffixed parameters file first, then fall back to plain
+        for candidate in (f"parameters{suffix}", "parameters"):
+            fpath = os.path.join(folder, candidate)
+            if os.path.isfile(fpath):
+                return Params(fpath).get(0)
+        raise FileNotFoundError(
+            f"No parameters file found in '{folder}' "
+            f"for nrg suffix '{suffix}'"
+        )
 
     # ------------------------------------------------------------------
     # Reading
@@ -144,14 +235,30 @@ class NrgReader:
         times_array = np.concatenate([b[1] for b in file_blocks])
         data_flat = np.concatenate([b[2] for b in file_blocks], axis=0)
 
-        n_times = len(times_array) // self.n_rows_per_block
+        n_times_raw = len(times_array) // self.n_rows_per_block
 
         # Reshape to (n_times, n_species, n_cols), then transpose
-        data_array = data_flat.reshape((n_times, self.n_rows_per_block, self.n_cols_per_row))
+        data_array = data_flat.reshape(
+            (n_times_raw, self.n_rows_per_block, self.n_cols_per_row))
         data_array = np.transpose(data_array, (1, 2, 0))  # → (n_species, n_cols, n_times)
 
-        self.times = times_array[:: self.n_rows_per_block]
-        self.data = data_array
+        raw_times = times_array[:: self.n_rows_per_block]
+
+        # Sort by time then deduplicate overlapping times (restarts).
+        # np.unique returns sorted unique values; we use return_index to
+        # get the LAST occurrence of each duplicate (later segment wins)
+        # by reversing, finding first unique, then mapping back.
+        sort_idx = np.argsort(raw_times, kind='stable')
+        sorted_times = raw_times[sort_idx]
+        sorted_data  = data_array[:, :, sort_idx]
+
+        # Keep last occurrence of each unique time value
+        rev_idx = np.arange(len(sorted_times) - 1, -1, -1)
+        _, first_in_rev = np.unique(sorted_times[rev_idx], return_index=True)
+        keep = np.sort(rev_idx[first_in_rev])
+
+        self.times = sorted_times[keep]
+        self.data  = sorted_data[:, :, keep]
         return self.times, self.data
 
     def _read_file(self, filepath: str) -> tuple:
