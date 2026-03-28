@@ -48,8 +48,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import h5py
 
-# numpy <2.0 compatibility
-_trapz = getattr(np, 'trapz', None) or getattr(np, 'trapezoid')
+from genetools.compat import trapz as _trapz
 
 
 # ---------------------------------------------------------------------------

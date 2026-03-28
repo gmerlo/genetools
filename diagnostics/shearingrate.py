@@ -47,6 +47,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import h5py
 
+from genetools.compat import trapz as _trapz
+
 
 # ---------------------------------------------------------------------------
 # Finite-difference derivative helper (global geometry)
@@ -362,7 +364,7 @@ class ShearingRate:
         dt = times[-1] - times[0]
         if dt == 0 or len(times) == 1:
             return arr[0]
-        return np.trapz(arr, x=times, axis=0) / dt
+        return _trapz(arr, x=times, axis=0) / dt
 
     def plot(self, coord=None, t_start=None, t_stop=None) -> None:
         """

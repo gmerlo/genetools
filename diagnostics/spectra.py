@@ -10,8 +10,7 @@ try:
 except ImportError:
     NUMBA_AVAILABLE = False
 
-# numpy <2.0 compatibility
-_trapz = getattr(np, 'trapz', None) or getattr(np, 'trapezoid')
+from genetools.compat import trapz as _trapz
 
 
 class Spectra:
