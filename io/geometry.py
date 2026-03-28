@@ -117,20 +117,16 @@ def _read_local(fid, tmp_geom: dict) -> dict:
     dict
         Partial geometry dict (without curvature/area).
     """
-    n_cols = 16
-    rows = []
-    for line in fid:
-        line = line.strip()
-        if not line:
-            continue
-        vals = line.split()
-        if len(vals) == n_cols:
-            rows.append([float(v) for v in vals])
- 
-    if not rows:
+    # Read remaining numeric data efficiently via np.loadtxt
+    try:
+        coeffs = np.loadtxt(fid)
+    except Exception:
         raise ValueError("No numeric data found in local geometry file.")
- 
-    coeffs = np.array(rows)   # shape (nz, 16)
+
+    if coeffs.ndim == 1:
+        coeffs = coeffs.reshape(1, -1)
+    if coeffs.shape[0] == 0 or coeffs.shape[1] < 16:
+        raise ValueError("No numeric data found in local geometry file.")
  
     gxx, gxy, gxz = coeffs[:, 0], coeffs[:, 1], coeffs[:, 2]
     gyy, gyz, gzz = coeffs[:, 3], coeffs[:, 4], coeffs[:, 5]

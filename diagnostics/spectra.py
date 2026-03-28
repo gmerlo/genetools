@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 try:
     from numba import njit, prange
-    NUMBA_AVAILABLE = False
+    NUMBA_AVAILABLE = True
 except ImportError:
     NUMBA_AVAILABLE = False
 
@@ -39,30 +39,46 @@ class Spectra:
                 saved_times = f["time"][...] if "time" in f else np.array([], dtype=np.float32)
         else:
             saved_times = np.array([], dtype=np.float32)
-        def is_saved(t):
-            t32  = np.float32(t)
-            tol  = max(1e-6, abs(t32) * 1e-6)
-            return np.any(np.abs(saved_times - t32) <= tol)
-        idx_fld_filtered = [i for i in idx_fld if not is_saved(times_fld[i])]
-        idx_mom_filtered = [i for i in idx_mom if not is_saved(times_mom[i])]
+
+        if saved_times.size == 0:
+            return idx_fld.tolist(), idx_mom.tolist()
+
+        saved_sorted = np.sort(saved_times.astype(np.float32))
+
+        def _filter_unsaved(indices, all_times):
+            if len(indices) == 0:
+                return []
+            candidate = np.float32(all_times[indices])
+            tol = np.maximum(1e-6, np.abs(candidate) * 1e-6)
+            pos = np.searchsorted(saved_sorted, candidate)
+            found = np.zeros(len(candidate), dtype=bool)
+            for offset in (0, -1):
+                idx_check = np.clip(pos + offset, 0, len(saved_sorted) - 1)
+                found |= np.abs(saved_sorted[idx_check] - candidate) <= tol
+            return [i for i, f in zip(indices, found) if not f]
+
+        idx_fld_filtered = _filter_unsaved(idx_fld, times_fld)
+        idx_mom_filtered = _filter_unsaved(idx_mom, times_mom)
         return idx_fld_filtered, idx_mom_filtered
 
     # ------------------------------------------------------------------
     # Spectral computation
     # ------------------------------------------------------------------
 
-    def compute_spectra(self, fields, moments, ky3, J_norm, Bfield, params):
+    def compute_spectra(self, fields, moments, ky3, J_norm, Bfield, params,
+                        ky_weight=None):
         """
-        Compute ES and EM flux spectra for all species in parallel.
+        Compute ES and EM flux spectra for all species.
 
         Parameters
         ----------
-        fields   : list of np.ndarray  (nx, nky, nz)
-        moments  : list of list        one inner list per species, 9 moment arrays each
-        ky3      : np.ndarray          (1, nky, 1) broadcast array, precomputed
-        J_norm   : np.ndarray          (nz,) normalised Jacobian, precomputed
-        Bfield   : np.ndarray          (nz,) equilibrium B field from geometry
-        params   : dict
+        fields     : list of np.ndarray  (nx, nky, nz)
+        moments    : list of list        one inner list per species, 9 moment arrays each
+        ky3        : np.ndarray          (1, nky, 1) broadcast array, precomputed
+        J_norm     : np.ndarray          (nz,) normalised Jacobian, precomputed
+        Bfield     : np.ndarray          (nz,) equilibrium B field from geometry
+        params     : dict
+        ky_weight  : np.ndarray          (nky,) precomputed [1,2,2,...,2]
 
         Returns
         -------
@@ -70,14 +86,15 @@ class Spectra:
         """
         species  = params["species"]
         n_fields = params["info"]["n_fields"]
-        
-        def _one_species(i_sp):
+
+        results = []
+        for i_sp in range(len(species)):
             sp         = species[i_sp]
             mom        = moments[i_sp]
             n0, T0, q0 = sp['dens'], sp['temp'], sp['charge']
-        
-            G_es = self.averages(-1j*ky3*fields[0] * np.conj(mom[0])*n0, J_norm)
-            Q_es = self.averages(-1j*ky3*fields[0] * np.conj(0.5*mom[1]+mom[2]+1.5*mom[0])*n0*T0, J_norm)
+
+            G_es = self.averages(-1j*ky3*fields[0] * np.conj(mom[0])*n0, J_norm, ky_weight)
+            Q_es = self.averages(-1j*ky3*fields[0] * np.conj(0.5*mom[1]+mom[2]+1.5*mom[0])*n0*T0, J_norm, ky_weight)
 
             if n_fields > 1:
                 B_x  = 1j*ky3*fields[1]
@@ -87,28 +104,25 @@ class Spectra:
                     dBpar_dy = -1j*ky3*fields[2] / Bfield[np.newaxis, np.newaxis, :]
                     tmp1 += dBpar_dy * np.conj(mom[6])*n0*T0/q0
                     tmp2 += dBpar_dy * np.conj(mom[7]+mom[8])*n0*T0**2/q0
-                G_em = self.averages(tmp1, J_norm)
-                Q_em = self.averages(tmp2, J_norm)
+                G_em = self.averages(tmp1, J_norm, ky_weight)
+                Q_em = self.averages(tmp2, J_norm, ky_weight)
             else:
                 G_em = Q_em = (None, None, None)
 
-            return [Q_es, Q_em, G_es, G_em]
+            results.append([Q_es, Q_em, G_es, G_em])
 
-        n_species = len(species)
-        if n_species == 1:
-            return [_one_species(0)]
-        with ThreadPoolExecutor(max_workers=n_species) as ex:
-            return list(ex.map(_one_species, range(n_species)))
+        return results
 
     @staticmethod
-    def averages(flux, J_norm):
+    def averages(flux, J_norm, ky_weight=None):
         """
         Compute kx spectrum, ky spectrum, and z profile of a flux array.
 
         Parameters
         ----------
-        flux   : np.ndarray  (nx, nky, nz) complex
-        J_norm : np.ndarray  (nz,) normalised Jacobian, precomputed
+        flux      : np.ndarray  (nx, nky, nz) complex
+        J_norm    : np.ndarray  (nz,) normalised Jacobian, precomputed
+        ky_weight : np.ndarray  (nky,) precomputed weight [1,2,2,...,2]
 
         Returns
         -------
@@ -118,11 +132,12 @@ class Spectra:
         """
         if flux is None:
             return (None, None, None)
-        flux = flux.copy()
-        flux[:, 1:, :] *= 2
-        J      = J_norm[np.newaxis, np.newaxis, :]
-        sum_z  = np.sum(flux.real * J, axis=(0, 1))
-        avg_z  = np.sum(flux.real * J, axis=2)
+        # Apply ky weight (1 for ky=0, 2 for ky>0) without copying
+        W = ky_weight[np.newaxis, :, np.newaxis] if ky_weight is not None else 1.0
+        J = J_norm[np.newaxis, np.newaxis, :]
+        weighted = flux.real * (W * J)
+        sum_z  = np.sum(weighted, axis=(0, 1))
+        avg_z  = np.sum(weighted, axis=2)
         sp_ky  = np.sum(avg_z, axis=0)
         tmp    = np.sum(avg_z, axis=1)
         nx     = tmp.shape[0]
@@ -142,13 +157,13 @@ class Spectra:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _init_h5(f, coords, species_names, fluxes):
-        """Create all datasets in a newly opened HDF5 file."""
+    def _init_h5(f, coords, species_names, fluxes, n_alloc=1):
+        """Create all datasets in a newly opened HDF5 file, pre-allocated."""
         f.create_dataset("kx",   data=coords["kx"])
         f.create_dataset("ky",   data=coords["ky"])
         f.create_dataset("z",    data=coords["z"])
-        f.create_dataset("time", data=np.array([], dtype=np.float32),
-                         maxshape=(None,))
+        f.create_dataset("time", shape=(n_alloc,), dtype=np.float32,
+                         maxshape=(None,), chunks=True)
         for i_sp, name in enumerate(species_names):
             Q_es, Q_em, G_es, G_em = fluxes[i_sp]
             for label, flux in zip(["Q_es", "Q_em", "G_es", "G_em"],
@@ -156,31 +171,40 @@ class Spectra:
                 for axis_name, arr in zip(["kx", "ky", "z"], flux):
                     dsname = f"{name}_{label}_{axis_name}"
                     if arr is None:
-                        f.create_dataset(dsname, data=np.empty((0, 0)),
-                                         maxshape=(None, None))
+                        f.create_dataset(dsname, shape=(n_alloc, 0),
+                                         maxshape=(None, None), chunks=True)
                     else:
-                        f.create_dataset(dsname, data=np.empty((0, arr.size)),
-                                         maxshape=(None, arr.size))
+                        f.create_dataset(dsname, shape=(n_alloc, arr.size),
+                                         maxshape=(None, arr.size), chunks=True)
 
     @staticmethod
-    def _append_to_open_file(f, fluxes, species_names, time_value):
-        """Append one time step to an already-open HDF5 file handle."""
-        tds = f["time"]
-        tds.resize((tds.shape[0] + 1,))
-        tds[-1] = np.float32(time_value)
+    def _write_to_open_file(f, fluxes, species_names, time_value, row_idx):
+        """Write one time step at *row_idx* in an already-open HDF5 file."""
+        n_current = f["time"].shape[0]
+        if row_idx >= n_current:
+            new_size = row_idx + 1
+            f["time"].resize((new_size,))
+            for i_sp, name in enumerate(species_names):
+                Q_es, Q_em, G_es, G_em = fluxes[i_sp]
+                for label, flux in zip(["Q_es", "Q_em", "G_es", "G_em"],
+                                       [Q_es,    Q_em,   G_es,   G_em]):
+                    for axis_name, arr in zip(["kx", "ky", "z"], flux):
+                        dsname = f"{name}_{label}_{axis_name}"
+                        ds = f[dsname]
+                        if arr is None:
+                            ds.resize((new_size, 0))
+                        else:
+                            ds.resize((new_size, ds.shape[1]))
+
+        f["time"][row_idx] = np.float32(time_value)
         for i_sp, name in enumerate(species_names):
             Q_es, Q_em, G_es, G_em = fluxes[i_sp]
             for label, flux in zip(["Q_es", "Q_em", "G_es", "G_em"],
                                    [Q_es,    Q_em,   G_es,   G_em]):
                 for axis_name, arr in zip(["kx", "ky", "z"], flux):
                     dsname = f"{name}_{label}_{axis_name}"
-                    dset   = f[dsname]
-                    if arr is None:
-                        dset.resize((dset.shape[0] + 1, 0))
-                    else:
-                        arr = np.asarray(arr, float)
-                        dset.resize((dset.shape[0] + 1, dset.shape[1]))
-                        dset[-1, :] = arr
+                    if arr is not None:
+                        f[dsname][row_idx, :] = np.asarray(arr, float)
 
     # ------------------------------------------------------------------
     # Main entry points
@@ -208,66 +232,87 @@ class Spectra:
         params        = params_list[0]
         species_names = [sp['name'] for sp in params['species']]
 
-        # Change 3: precompute invariants once outside the time loop
-        ky3    = coords["ky"][np.newaxis, :, np.newaxis]          # (1, nky, 1)
+        # Precompute invariants once outside the time loop
+        ky_arr = coords["ky"]
+        ky3    = ky_arr[np.newaxis, :, np.newaxis]                # (1, nky, 1)
         J_norm = geom['Jacobian'] / np.sum(geom['Jacobian'])      # (nz,)
         Bfield = geom['Bfield']                                    # (nz,)
 
+        # ky weight: 1 for ky=0, 2 for ky>0 (one-sided spectrum)
+        ky_weight = np.ones(len(ky_arr))
+        ky_weight[1:] = 2.0
+
         idx_fld, idx_mom = self.sync_indices(fld_reader, mom_readers,
                                              t_start, t_stop, params)
-        
-        
+
         if len(idx_fld) == 0 or len(idx_mom) == 0:
             return
 
+        n_missing = len(idx_fld)
         it_field = fld_reader.stream_selected(idx_fld)
         it_moms  = [r.stream_selected(idx_mom) for r in mom_readers]
 
-        # Change 6: open HDF5 once for all time steps
+        # Open HDF5 once for all time steps
         with h5py.File(self.outfile, "a") as hf:
             initialised = "time" in hf
+            # Track write position: start after existing data
+            write_idx = hf["time"].shape[0] if initialised else 0
 
-            for tm, fields in it_field:
-                print('doing', tm)
-                # Change 5: read all species moment files in parallel
-                if len(it_moms) == 1:
-                    moments_data = [next(it_moms[0])[1]]
-                else:
-                    with ThreadPoolExecutor(max_workers=len(it_moms)) as ex:
-                        moments_data = [r[1] for r in ex.map(next, it_moms)]
+            # Reuse a single executor for moment file reading
+            n_mom_readers = len(it_moms)
+            use_executor = n_mom_readers > 1
+            executor = ThreadPoolExecutor(max_workers=n_mom_readers) if use_executor else None
 
-                # Change 4: species computed in parallel (inside compute_spectra)
-                fluxes = self.compute_spectra(fields, moments_data,
-                                              ky3, J_norm, Bfield, params)
+            try:
+                for tm, fields in it_field:
+                    # Read all species moment files in parallel
+                    if not use_executor:
+                        moments_data = [next(it_moms[0])[1]]
+                    else:
+                        moments_data = [r[1] for r in executor.map(next, it_moms)]
 
-                if not initialised:
-                    self._init_h5(hf, coords, species_names, fluxes)
-                    initialised = True
-                self._append_to_open_file(hf, fluxes, species_names, tm)
+                    fluxes = self.compute_spectra(fields, moments_data,
+                                                  ky3, J_norm, Bfield, params,
+                                                  ky_weight)
+
+                    if not initialised:
+                        self._init_h5(hf, coords, species_names, fluxes,
+                                      n_alloc=n_missing)
+                        initialised = True
+
+                    self._write_to_open_file(hf, fluxes, species_names, tm,
+                                             write_idx)
+                    write_idx += 1
+            finally:
+                if executor is not None:
+                    executor.shutdown(wait=False)
 
     def load_time_average(self, t_start=None, t_stop=None):
         if not os.path.exists(self.outfile):
             return {}
         with h5py.File(self.outfile, "r") as f:
-            time       = f["time"][...]
+            time = f["time"][...]
             sorted_idx = np.argsort(time)
-            time       = time[sorted_idx]
-            mask       = np.ones(len(time), dtype=bool)
+            time = time[sorted_idx]
+
+            mask = np.ones(len(time), dtype=bool)
             if t_start is not None:
                 mask &= time >= t_start
             if t_stop is not None:
                 mask &= time <= t_stop
+
+            # Compute final index array once for HDF5 fancy indexing
+            final_idx = sorted_idx[mask]
             time = time[mask]
+
             flux_avg = {}
             for key in f.keys():
-                if key == "time" or key in ["kx", "ky", "z"]:
+                if key in ("time", "kx", "ky", "z"):
                     continue
-                data = f[key][...][sorted_idx][mask]
+                data = f[key][final_idx]
                 if len(time) <= 1:
-                    print('at', time)
-                    flux_avg[key] = data[0]
+                    flux_avg[key] = data[0] if len(time) == 1 else data
                 else:
-                    print('time avg:',time[0], time[-1])
                     flux_avg[key] = _trapz(data, x=time, axis=0) / (time[-1] - time[0])
         return flux_avg
 

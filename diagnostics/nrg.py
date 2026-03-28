@@ -263,11 +263,11 @@ class NrgReader:
 
     def _read_file(self, filepath: str) -> tuple:
         """
-        Parse a single ``nrg`` file using :func:`numpy.loadtxt` for speed.
+        Parse a single ``nrg`` file.
 
         The file alternates between single-value time lines and multi-value
-        data rows.  We read the entire file at once and split based on column
-        count.
+        data rows.  We read the entire file, classify lines by token count,
+        and use ``np.fromstring`` for fast numeric conversion.
 
         Parameters
         ----------
@@ -281,30 +281,29 @@ class NrgReader:
         data_array : np.ndarray
             Shape ``(n_blocks * n_rows_per_block, n_cols_per_row)``.
         """
-        # Read all lines and classify by token count.
-        # Time lines have exactly 1 token; data lines have n_cols_per_row tokens.
-        # Using explicit line iteration is the only reliable approach because
-        # np.loadtxt rejects files where the column count changes between rows.
-        time_values = []
-        data_rows = []
-
         with open(filepath, "r") as fh:
-            for lineno, line in enumerate(fh, 1):
-                tokens = line.split()
-                if not tokens:
-                    continue  # skip blank lines
-                if len(tokens) == 1:
-                    time_values.append(float(tokens[0]))
-                elif len(tokens) == self.n_cols_per_row:
-                    data_rows.append([float(t) for t in tokens])
-                else:
-                    raise ValueError(
-                        f"{filepath} line {lineno}: expected 1 or "
-                        f"{self.n_cols_per_row} tokens, got {len(tokens)}"
-                    )
+            raw = fh.read()
 
-        time_values = np.array(time_values, dtype=float)
-        data_rows = np.array(data_rows, dtype=float)  # (n_blocks*n_spec, n_cols)
+        lines = raw.split('\n')
+        time_lines = []
+        data_lines = []
+
+        ncols = self.n_cols_per_row
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            # Fast heuristic: time lines have no internal whitespace after strip,
+            # or exactly 1 token. Count spaces to classify.
+            if ' ' not in stripped and '\t' not in stripped:
+                time_lines.append(stripped)
+            else:
+                data_lines.append(stripped)
+
+        time_values = np.array(time_lines, dtype=float)
+        # Parse data rows in bulk: join all data lines, parse as flat array, reshape
+        data_flat = np.fromstring('\n'.join(data_lines), dtype=float, sep=' ')
+        data_rows = data_flat.reshape(-1, ncols)
 
         # Validate
         expected_data_rows = len(time_values) * self.n_rows_per_block

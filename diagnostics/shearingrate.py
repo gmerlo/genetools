@@ -208,65 +208,69 @@ class ShearingRate:
     # HDF5 helpers
     # ------------------------------------------------------------------
 
-    def _already_saved(self, time: float) -> bool:
-        """Return True if *time* is already present in the output file."""
-        if not os.path.exists(self.outfile):
-            return False
-        with h5py.File(self.outfile, "r") as f:
+    @staticmethod
+    def _load_saved_times(outfile: str) -> np.ndarray:
+        """Load all saved times from the HDF5 file (empty array if none)."""
+        if not os.path.exists(outfile):
+            return np.array([], dtype=np.float32)
+        with h5py.File(outfile, "r") as f:
             if "time" not in f:
-                return False
-            saved = f["time"][...]
-            t32  = np.float32(time)
-            tol  = max(1e-6, abs(t32) * 1e-6)
-            return bool(np.any(np.abs(saved.astype(np.float32) - t32) <= tol))
+                return np.array([], dtype=np.float32)
+            return f["time"][...].astype(np.float32)
 
-    def _append(self, result: dict, time: float, nx: int, x_local: bool) -> None:
-        """Append one time step of results to the HDF5 file."""
-        file_exists = os.path.exists(self.outfile)
+    @staticmethod
+    def _is_already_saved(time: float, saved_times: np.ndarray) -> bool:
+        """Check if *time* is in *saved_times* (pre-loaded array)."""
+        if saved_times.size == 0:
+            return False
+        t32 = np.float32(time)
+        tol = max(1e-6, abs(t32) * 1e-6)
+        return bool(np.any(np.abs(saved_times - t32) <= tol))
 
-        with h5py.File(self.outfile, "a") as f:
-            if not file_exists:
-                # Create all datasets as unlimited along the time axis
-                f.create_dataset("time",        data=np.array([time]),
-                                 maxshape=(None,), chunks=(1,))
-                f.create_dataset("phi_zonal_x", data=result["phi_zonal_x"][np.newaxis, :],
-                                 maxshape=(None, nx), chunks=(1, nx))
-                f.create_dataset("E_r",         data=result["E_r"][np.newaxis, :],
-                                 maxshape=(None, nx), chunks=(1, nx))
-                f.create_dataset("v_ExB",       data=result["v_ExB"][np.newaxis, :],
-                                 maxshape=(None, nx), chunks=(1, nx))
-                f.create_dataset("omega_ExB",   data=result["omega_ExB"][np.newaxis, :],
-                                 maxshape=(None, nx), chunks=(1, nx))
-                f.create_dataset("shearing_rms", data=np.array([result["shearing_rms"]]),
-                                 maxshape=(None,), chunks=(1,))
-                if x_local and result["phi_zonal_fsavg"] is not None:
-                    nkx = len(result["phi_zonal_fsavg"])
-                    f.create_dataset("abs_phi_zonal_kx",
-                                     data=np.abs(result["phi_zonal_fsavg"])[np.newaxis, :],
-                                     maxshape=(None, nkx), chunks=(1, nkx))
-                return
+    @staticmethod
+    def _init_h5(f, result: dict, time: float, nx: int, x_local: bool) -> None:
+        """Create all datasets in a newly opened HDF5 file handle."""
+        f.create_dataset("time",        data=np.array([time]),
+                         maxshape=(None,), chunks=(1,))
+        f.create_dataset("phi_zonal_x", data=result["phi_zonal_x"][np.newaxis, :],
+                         maxshape=(None, nx), chunks=(1, nx))
+        f.create_dataset("E_r",         data=result["E_r"][np.newaxis, :],
+                         maxshape=(None, nx), chunks=(1, nx))
+        f.create_dataset("v_ExB",       data=result["v_ExB"][np.newaxis, :],
+                         maxshape=(None, nx), chunks=(1, nx))
+        f.create_dataset("omega_ExB",   data=result["omega_ExB"][np.newaxis, :],
+                         maxshape=(None, nx), chunks=(1, nx))
+        f.create_dataset("shearing_rms", data=np.array([result["shearing_rms"]]),
+                         maxshape=(None,), chunks=(1,))
+        if x_local and result["phi_zonal_fsavg"] is not None:
+            nkx = len(result["phi_zonal_fsavg"])
+            f.create_dataset("abs_phi_zonal_kx",
+                             data=np.abs(result["phi_zonal_fsavg"])[np.newaxis, :],
+                             maxshape=(None, nkx), chunks=(1, nkx))
 
-            # Append mode — resize and write last row
-            n = f["time"].shape[0]
+    @staticmethod
+    def _append_to_open_file(f, result: dict, time: float, x_local: bool) -> None:
+        """Append one time step to an already-open HDF5 file handle."""
+        n = f["time"].shape[0]
 
-            def _append_ds(name, value):
-                ds = f[name]
-                if ds.ndim == 1:
-                    ds.resize((n + 1,))
-                    ds[n] = value
-                else:
-                    ds.resize((n + 1, ds.shape[1]))
-                    ds[n, :] = value
+        def _append_ds(name, value):
+            ds = f[name]
+            if ds.ndim == 1:
+                ds.resize((n + 1,))
+                ds[n] = value
+            else:
+                ds.resize((n + 1, ds.shape[1]))
+                ds[n, :] = value
 
-            _append_ds("time",         time)
-            _append_ds("phi_zonal_x",  result["phi_zonal_x"])
-            _append_ds("E_r",          result["E_r"])
-            _append_ds("v_ExB",        result["v_ExB"])
-            _append_ds("omega_ExB",    result["omega_ExB"])
-            _append_ds("shearing_rms", result["shearing_rms"])
-            if x_local and "abs_phi_zonal_kx" in f:
-                _append_ds("abs_phi_zonal_kx",
-                           np.abs(result["phi_zonal_fsavg"]))
+        _append_ds("time",         time)
+        _append_ds("phi_zonal_x",  result["phi_zonal_x"])
+        _append_ds("E_r",          result["E_r"])
+        _append_ds("v_ExB",        result["v_ExB"])
+        _append_ds("omega_ExB",    result["omega_ExB"])
+        _append_ds("shearing_rms", result["shearing_rms"])
+        if x_local and "abs_phi_zonal_kx" in f:
+            _append_ds("abs_phi_zonal_kx",
+                       np.abs(result["phi_zonal_fsavg"]))
 
     # ------------------------------------------------------------------
     # Public interface
@@ -299,26 +303,34 @@ class ShearingRate:
         t_start, t_stop : float
             Time window to process.
         """
-        for seg_idx, reader in enumerate(field_readers):
-            p     = params.get(seg_idx)
-            coord = coords[seg_idx]
-            geom  = geoms[seg_idx]
-            nx    = p["box"]["nx0"]
-            x_local = p["general"].get("x_local", True)
+        saved_times = self._load_saved_times(self.outfile)
 
-            times = reader.read_all_times()
-            mask  = (times >= t_start) & (times <= t_stop)
-            indices = np.where(mask)[0].tolist()
+        with h5py.File(self.outfile, "a") as hf:
+            initialised = "time" in hf
 
-            for t, arrays in reader.stream_selected(indices):
-                if self._already_saved(t):
-                    #print(f"  t={t:.3f} already saved, skipping.")
-                    continue
+            for seg_idx, reader in enumerate(field_readers):
+                p     = params.get(seg_idx)
+                coord = coords[seg_idx]
+                geom  = geoms[seg_idx]
+                nx    = p["box"]["nx0"]
+                x_local = p["general"].get("x_local", True)
 
-                phi    = arrays[0]          # first field is always phi
-                result = compute_exb(phi, p, geom, coord)
-                self._append(result, t, nx, x_local)
-                #print(f"  t={t:.3f}  ω_ExB_rms={result['shearing_rms']:.4e}")
+                times = reader.read_all_times()
+                mask  = (times >= t_start) & (times <= t_stop)
+                indices = np.where(mask)[0].tolist()
+
+                for t, arrays in reader.stream_selected(indices):
+                    if self._is_already_saved(t, saved_times):
+                        continue
+
+                    phi    = arrays[0]
+                    result = compute_exb(phi, p, geom, coord)
+
+                    if not initialised:
+                        self._init_h5(hf, result, t, nx, x_local)
+                        initialised = True
+                    else:
+                        self._append_to_open_file(hf, result, t, x_local)
 
     def load(self) -> dict:
         """

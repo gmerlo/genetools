@@ -173,15 +173,61 @@ class BinaryReader(_BaseReader):
 
         Fortran wraps each record with a 4-byte integer marker before *and*
         after the payload that stores the byte length of the payload.
+
+        Optimisation: after scanning the first full iteration (1 + n_arrays
+        records), if all records within that group have fixed sizes, the
+        remaining offsets are computed arithmetically instead of scanning
+        byte-by-byte.
         """
+        size = mm.size()
+        if size == 0:
+            return []
+
+        # Scan first record to bootstrap
         index = []
         pos = 0
-        size = mm.size()
+        first_nbytes = int(np.frombuffer(mm[pos: pos + 4], dtype=np.int32)[0])
+        index.append((pos + 4, first_nbytes))
+        pos = pos + 4 + first_nbytes + 4
+
+        # Scan more records to detect periodicity
         while pos < size:
             nbytes = int(np.frombuffer(mm[pos: pos + 4], dtype=np.int32)[0])
             start = pos + 4
             index.append((start, nbytes))
-            pos = start + nbytes + 4  # skip trailing marker
+            pos = start + nbytes + 4
+            # Check if we've found a repeating pattern: the current record
+            # has the same size as the first → likely start of next iteration
+            if nbytes == first_nbytes and len(index) > 1:
+                break
+
+        # Determine stride (bytes per full iteration group)
+        group_len = len(index) - 1  # last record starts next group
+        if group_len < 1:
+            # Only one record type, finish scanning
+            while pos < size:
+                nbytes = int(np.frombuffer(mm[pos: pos + 4], dtype=np.int32)[0])
+                index.append((pos + 4, nbytes))
+                pos += 4 + nbytes + 4
+            return index
+
+        # Compute stride = sum of (4 + payload + 4) for each record in group
+        stride = sum(4 + index[i][1] + 4 for i in range(group_len))
+        record_sizes = [index[i][1] for i in range(group_len)]
+
+        # Remove the extra record we read (it's the first of the next group)
+        index.pop()
+        pos_group_start = index[0][0] - 4  # byte offset of first group
+
+        # Fill remaining groups arithmetically
+        n_full_groups = (size - pos_group_start) // stride
+        for g in range(1, n_full_groups):
+            base = pos_group_start + g * stride
+            rec_pos = base
+            for rec_size in record_sizes:
+                index.append((rec_pos + 4, rec_size))
+                rec_pos += 4 + rec_size + 4
+
         return index
 
     # ------------------------------------------------------------------
@@ -202,12 +248,18 @@ class BinaryReader(_BaseReader):
             idx = self._get_record_index(mm)
             records_per_iter = 1 + self.n_arrays
             n_iters = len(idx) // records_per_iter
-            times = np.empty(n_iters, dtype=self.real_dtype)
-            for it in range(n_iters):
-                start, nbytes = idx[it * records_per_iter]
-                times[it] = np.frombuffer(mm[start: start + nbytes], dtype=self.real_dtype)[0]
+            nbytes_time = idx[0][1]
+
+            # Gather all time-record byte offsets and read in one shot
+            offsets = np.array([idx[it * records_per_iter][0] for it in range(n_iters)],
+                              dtype=np.int64)
+            buf = np.empty(n_iters, dtype=self.real_dtype)
+            byte_width = np.dtype(self.real_dtype).itemsize
+            for i, off in enumerate(offsets):
+                buf[i] = np.frombuffer(mm[off: off + byte_width],
+                                       dtype=self.real_dtype)[0]
             mm.close()
-        return times
+        return buf
 
     def stream_selected(self, iteration_indices):
         """
@@ -390,28 +442,52 @@ class MultiSegmentReader:
 
     def _build_timeline(self) -> None:
         """Scan all segments, deduplicate overlapping times (later wins), sort."""
-        entries = []
+        # Collect all entries into NumPy arrays for fast sort/dedup
+        all_times = []
+        all_segs = []
+        all_iters = []
         for seg_idx, reader in enumerate(self.readers):
-            for local_iter, t in enumerate(reader.read_all_times()):
-                entries.append((float(t), seg_idx, local_iter))
+            t_arr = reader.read_all_times()
+            n = len(t_arr)
+            all_times.append(t_arr.astype(np.float64))
+            all_segs.append(np.full(n, seg_idx, dtype=np.int32))
+            all_iters.append(np.arange(n, dtype=np.int32))
+
+        times = np.concatenate(all_times)
+        segs = np.concatenate(all_segs)
+        iters = np.concatenate(all_iters)
 
         # Sort by time first, then by segment (later segment = higher index)
-        entries.sort(key=lambda e: (e[0], e[1]))
+        order = np.lexsort((segs, times))
+        times = times[order]
+        segs = segs[order]
+        iters = iters[order]
 
         # Remove duplicates — keep entry from later segment
-        keep = [True] * len(entries)
-        for i in range(len(entries) - 1, 0, -1):
-            tol_abs = self.tol * max(1.0, abs(entries[i][0]))
-            if abs(entries[i][0] - entries[i-1][0]) <= tol_abs:
-                # Both refer to same time — discard the earlier segment's entry
-                if entries[i][1] >= entries[i-1][1]:
-                    keep[i-1] = False
-                else:
-                    keep[i] = False
+        n = len(times)
+        if n == 0:
+            self._global_times = np.array([], dtype=np.float64)
+            self._global_map = []
+            return
 
-        kept = [e for e, k in zip(entries, keep) if k]
-        self._global_times = np.array([e[0] for e in kept], dtype=np.float64)
-        self._global_map   = [(e[1], e[2]) for e in kept]
+        keep = np.ones(n, dtype=bool)
+        tol_abs = self.tol * np.maximum(1.0, np.abs(times))
+
+        # Compare adjacent entries
+        if n > 1:
+            dt = np.abs(np.diff(times))
+            same = dt <= tol_abs[1:]
+            for i in range(n - 1, 0, -1):
+                if same[i - 1]:
+                    if segs[i] >= segs[i - 1]:
+                        keep[i - 1] = False
+                    else:
+                        keep[i] = False
+
+        self._global_times = times[keep]
+        kept_segs = segs[keep]
+        kept_iters = iters[keep]
+        self._global_map = list(zip(kept_segs.tolist(), kept_iters.tolist()))
 
     def _ensure_timeline(self) -> None:
         if self._global_times is None:
