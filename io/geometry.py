@@ -48,6 +48,8 @@ import os
 import re
 import numpy as np
 from scipy.interpolate import CubicSpline
+
+from genetools.io._zgrid import build_zgrid
  
  
 # ---------------------------------------------------------------------------
@@ -294,19 +296,11 @@ def _compute_curvature(geom: dict, params: dict) -> dict:
     K_x = -geom['dBdy'] - (gamma2 / gamma1) * geom['dBdz']
     K_y =  geom['dBdx'] - (gamma3 / gamma1) * geom['dBdz']
  
-    # z grid (same as coordinates.py)
+    # z grid
     nz   = params['box']['nz0']
     npol = params['geometry'].get('n_pol', 1)
     edge = params['geometry'].get('edge_opt', 0)
- 
-    z = np.linspace(-np.pi * npol, np.pi * npol, nz + 1)[:-1]
- 
-    if edge != 0:
-        k = np.arange(nz)
-        z = np.sinh(
-            (-np.pi + k * 2*np.pi / nz)
-            * np.log(edge*np.pi + np.sqrt(edge**2 * np.pi**2 + 1)) / np.pi
-        ) / edge
+    z = build_zgrid(nz, npol, edge)
  
     # Local shear: d(gxy/gxx)/dz via cubic spline
     if nz > 1:

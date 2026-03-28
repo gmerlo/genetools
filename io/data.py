@@ -23,6 +23,8 @@ Example
 """
 
 import mmap
+from abc import ABC, abstractmethod
+
 import numpy as np
 
 try:
@@ -59,7 +61,7 @@ def _build_dims(params: dict, file_type: str) -> tuple:
 # Base class
 # ---------------------------------------------------------------------------
 
-class _BaseReader:
+class _BaseReader(ABC):
     """
     Abstract base for GENE data readers.
 
@@ -92,10 +94,11 @@ class _BaseReader:
     # Public interface (must be implemented by sub-classes)
     # ------------------------------------------------------------------
 
+    @abstractmethod
     def read_all_times(self) -> np.ndarray:
         """Return a 1-D array of all simulation times in the file."""
-        raise NotImplementedError
 
+    @abstractmethod
     def stream_selected(self, iteration_indices):
         """
         Yield ``(time, arrays)`` for the given *iteration_indices*.
@@ -112,7 +115,6 @@ class _BaseReader:
         arrays : list of np.ndarray
             One complex array per field/moment, each shaped ``(ni, nj, nk)``.
         """
-        raise NotImplementedError
 
     def segment_of(self, global_idx: int) -> int:
         """Return segment index for *global_idx* (always 0 for single readers)."""
@@ -382,7 +384,7 @@ if _ADIOS2_AVAILABLE:
 
 else:
 
-    class BPReader(_BaseReader):  # type: ignore[no-redef]
+    class BPReader:  # type: ignore[no-redef]
         """Placeholder raised when the ``adios2`` Python package is not installed."""
 
         def __init__(self, *args, **kwargs):

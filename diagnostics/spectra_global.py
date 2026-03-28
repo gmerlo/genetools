@@ -303,7 +303,6 @@ class SpectraGlobal:
 
                 # Compute v_E = -i*ky*phi (no IFFT — global is real-space x)
                 phi = fields[0]
-                v_E = np.zeros_like(phi)
                 ky3 = ky[np.newaxis, :, np.newaxis]
                 v_E = -1j * ky3 * phi
 

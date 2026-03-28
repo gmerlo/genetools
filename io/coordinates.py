@@ -1,5 +1,6 @@
 import numpy as np
-#from scipy.special import roots_laguerre
+
+from genetools.io._zgrid import build_zgrid
 
 
 # ----------------------------------------------------------------------
@@ -117,13 +118,8 @@ def load_coord_single_run(folder, file_number, params):
     npol = geom["n_pol"]
     edge = geom["edge_opt"]
 
-    z = np.linspace(-np.pi * npol, np.pi * npol, nz + 1)[:-1]
+    z = build_zgrid(nz, npol, edge)
     dz = z[1] - z[0] if nz > 1 else 0
-
-    if edge != 0:
-        logterm = np.log(edge * np.pi + np.sqrt((edge * np.pi)**2 + 1)) / np.pi
-        arg = (-np.pi + 2 * np.pi * np.arange(nz) / nz) * logterm
-        z = np.sinh(arg) / edge
 
     # ==============================================================
     # VP
