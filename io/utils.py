@@ -61,7 +61,7 @@ def set_runs(folder, exclude=None) -> list:
 
     nrg_files = sorted(folder.glob("nrg*"))
     if not nrg_files:
-        return []
+        raise FileNotFoundError(f"No 'nrg' files found in '{folder}'.")
 
     numeric_suffixes = []
     has_dat = False

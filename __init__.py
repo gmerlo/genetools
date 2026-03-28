@@ -78,6 +78,7 @@ __all__ = [
     "Geometry",
     "Coordinates",
     "NrgReader",
+    "Contours",
     "ShearingRate",
     "Spectra",
     "Profiles",

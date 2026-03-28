@@ -53,7 +53,7 @@ def load_coord_single_run(folder, file_number, params):
         lx = box["lx"]
 
         if nx == 1:
-            kx = np.array([[box.get("kx_center", 0)]])
+            kx = np.array([box.get("kx_center", 0)])
             kx_2 = []
             x = np.array([0.0])
             dx = 0.0
@@ -138,9 +138,9 @@ def load_coord_single_run(folder, file_number, params):
     mu_type = box["mu_grid_type"]
 
     if mu_type == "gau_lag":
-        mu=0
-        mu_weight=0
-        #mu, mu_weight = roots_laguerre(nw)
+        mu = np.array([])
+        mu_weight = np.array([])
+        # TODO: mu, mu_weight = roots_laguerre(nw)
     elif mu_type == "eq_vperp":
         deltamu = box["lw"] / nw**2
         idx = np.arange(1, nw + 1)

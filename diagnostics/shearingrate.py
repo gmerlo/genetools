@@ -71,6 +71,14 @@ def _central_diff(f: np.ndarray) -> np.ndarray:
         Derivative array, same shape as *f*.
     """
     d = np.empty_like(f)
+    n = len(f)
+    if n < 2:
+        d[:] = 0.0
+        return d
+    if n == 2:
+        d[0] = f[1] - f[0]
+        d[1] = f[1] - f[0]
+        return d
     d[1:-1] = (f[2:] - f[:-2]) * 0.5
     d[0]    = (-3*f[0] + 4*f[1] - f[2])   * 0.5   # forward
     d[-1]   = ( 3*f[-1] - 4*f[-2] + f[-3]) * 0.5  # backward

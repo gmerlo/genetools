@@ -6,8 +6,9 @@ from genetools.io.utils import set_runs
 
 
 class TestSetRuns:
-    def test_empty_folder_returns_empty_list(self, tmp_path):
-        assert set_runs(tmp_path) == []
+    def test_empty_folder_raises(self, tmp_path):
+        with pytest.raises(FileNotFoundError):
+            set_runs(tmp_path)
 
     def test_missing_folder_raises(self):
         with pytest.raises(FileNotFoundError):

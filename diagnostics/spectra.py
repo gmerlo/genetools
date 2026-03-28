@@ -353,7 +353,7 @@ class Spectra:
                 for label in labels:
                     arr = _get(f"{sp}_{label}_kx")
                     if arr is not None:
-                        ax.plot(kx_half[:len(arr)], arr if scale is "linear" else np.abs(arr), label=label)
+                        ax.plot(kx_half[:len(arr)], arr if scale == "linear" else np.abs(arr), label=label)
                 ax.set_xlabel("kx")
                 ax.set_ylabel("Flux")
                 ax.set_xscale(scale)
@@ -372,7 +372,7 @@ class Spectra:
                 for label in labels:
                     arr = _get(f"{sp}_{label}_ky")
                     if arr is not None:
-                        ax.plot(ky[:len(arr)], arr if scale is "linear" else np.abs(arr), label=label)
+                        ax.plot(ky[:len(arr)], arr if scale == "linear" else np.abs(arr), label=label)
                 ax.set_xlabel("ky")
                 ax.set_ylabel("Flux")
                 ax.set_xscale(scale)
