@@ -53,13 +53,27 @@ class TestNrgReader:
     def test_multiple_files_concatenated(self, tmp_path):
         n_cols = 10
         n_spec = 1
-        for fname in ["nrg_0001", "nrg_0002"]:
-            write_nrg_file(tmp_path / fname, n_times=3, n_spec=n_spec, n_cols=n_cols)
+        # Write two nrg files with non-overlapping times
+        fpath1 = tmp_path / "nrg_0001"
+        fpath2 = tmp_path / "nrg_0002"
+        # File 1: times 0.0, 0.1, 0.2
+        write_nrg_file(fpath1, n_times=3, n_spec=n_spec, n_cols=n_cols)
+        # File 2: different times — manually write with offset
+        rng = np.random.default_rng(99)
+        times2 = np.array([0.3, 0.4, 0.5])
+        data2 = rng.random((3, n_spec, n_cols))
+        lines = []
+        for it in range(3):
+            lines.append(f"{times2[it]:.6e}")
+            for sp in range(n_spec):
+                lines.append("  ".join(f"{v:.6e}" for v in data2[it, sp, :]))
+        fpath2.write_text("\n".join(lines) + "\n")
+
         params = make_params(n_spec=n_spec, nrgcols=n_cols)
         params["species"] = [{"name": "sp0"}]
         reader = NrgReader(str(tmp_path), params)
         times, data = reader.read_all()
-        assert data.shape[2] == 6  # 3 + 3 times
+        assert data.shape[2] == 6  # 3 + 3 times (no overlap → no dedup)
 
     def test_plot_does_not_crash(self, tmp_path):
         """Smoke test: plot() should run without raising."""
