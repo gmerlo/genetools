@@ -54,6 +54,7 @@ from .io import (
     Geometry,
     Coordinates,
     load_equilibrium_profiles,
+    EquilibriumProfiles,
 )
 from .diagnostics import (
     NrgReader,
@@ -85,4 +86,5 @@ __all__ = [
     "Fluxes2D",
     "SpectraGlobal",
     "load_equilibrium_profiles",
+    "EquilibriumProfiles",
 ]
