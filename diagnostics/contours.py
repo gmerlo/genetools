@@ -75,7 +75,7 @@ class Contours:
         return effective
 
     @staticmethod
-    def _get_axes(coord, effective_ifft, x_local):
+    def _get_axes(coord, effective_ifft, x_local, nky=None):
         """
         Return (x_ax, y_ax, z_ax, x_label, y_label, z_label).
 
@@ -89,7 +89,14 @@ class Contours:
             x_ax, x_label = np.asarray(coord["kx"]), "kx [rho_ref]"
 
         if effective_ifft in ("y", "xy"):
-            y_ax, y_label = np.asarray(coord["y"]),  "y  [rho_ref]"
+            # Compute y-axis matching the irfft output size: ny_full = 2*(nky-1)
+            ky_arr = np.asarray(coord["ky"])
+            _nky = nky if nky is not None else len(ky_arr)
+            ny_full = 2 * (_nky - 1) if _nky > 1 else 1
+            kymin = float(ky_arr[0]) if len(ky_arr) > 0 else 1.0
+            Ly = 2 * np.pi / kymin if kymin > 0 else 1.0
+            y_ax = np.linspace(-Ly / 2, Ly / 2, ny_full, endpoint=False)
+            y_label = "y  [rho_ref]"
         else:
             y_ax, y_label = np.asarray(coord["ky"]), "ky [rho_ref]"
 
@@ -120,7 +127,7 @@ class Contours:
         f_xz : np.ndarray (nx, nz)       float32
         """
         nx      = field_3d.shape[0]
-        ny_full = 2 * (nky - 1)
+        ny_full = 2 * (nky - 1) if nky > 1 else 0
 
         # ── XY slice — extract z first, transform in 2D ────────────────
         f_xy = field_3d[:, :, iz]               # view (nx, nky), no copy
@@ -136,7 +143,7 @@ class Contours:
         if effective_ifft in ("x", "xy"):
             f_xy = _ifft_x_2d(f_xy, nx)         # (nx, nky) complex
 
-        if effective_ifft in ("y", "xy"):
+        if effective_ifft in ("y", "xy") and ny_full > 0:
             f_xy = _irfft_y_2d(f_xy, ny_full).astype(np.float32)
         else:
             f_xy = f_xy.real.astype(np.float32)
@@ -258,7 +265,7 @@ class Contours:
 
             if coord is not None:
                 x_ax, y_ax, z_ax, x_label, y_label, z_label = \
-                    self._get_axes(coord, effective_ifft, x_local)
+                    self._get_axes(coord, effective_ifft, x_local, nky=nky)
             else:
                 x_ax = y_ax = z_ax = None
                 x_label, y_label, z_label = "x index", "y index", "z index"
