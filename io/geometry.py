@@ -312,10 +312,17 @@ def _compute_curvature(geom: dict, params: dict) -> dict:
     if nz > 1:
         try:
             ratio = gxy / gxx
-            cs    = CubicSpline(z, ratio)
-            sloc  = cs(z, 1)   # first derivative
-        except Exception:
-            sloc = np.full(nz, np.nan)
+            # CubicSpline expects y shape (n, ...) where n == len(x).
+            # For local geometry ratio is (nz,); for global it's (nx, nz).
+            if ratio.ndim == 2:
+                # Global: transpose to (nz, nx), spline, transpose back
+                cs   = CubicSpline(z, ratio.T)
+                sloc = cs(z, 1).T   # first derivative, back to (nx, nz)
+            else:
+                cs   = CubicSpline(z, ratio)
+                sloc = cs(z, 1)     # first derivative
+        except ValueError:
+            sloc = np.full_like(gxy, np.nan)
     else:
         sloc = np.nan
  

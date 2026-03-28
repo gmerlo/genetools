@@ -333,8 +333,17 @@ class Spectra:
             kx            = f["kx"][...]
             ky            = f["ky"][...]
             z             = f["z"][...]
-            species_names = sorted({name.split("_")[0]
-                                    for name in f.keys() if "_" in name})
+            # Extract species names by stripping known flux suffixes
+            _suffixes = ("_Q_es_kx", "_Q_em_kx", "_G_es_kx", "_G_em_kx",
+                         "_Q_es_ky", "_Q_em_ky", "_G_es_ky", "_G_em_ky",
+                         "_Q_es_z",  "_Q_em_z",  "_G_es_z",  "_G_em_z")
+            species_set = set()
+            for name in f.keys():
+                for sfx in _suffixes:
+                    if name.endswith(sfx):
+                        species_set.add(name[:-len(sfx)])
+                        break
+            species_names = sorted(species_set)
 
         nx2     = len(kx) // 2 + 1
         kx_half = kx[:nx2]

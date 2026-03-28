@@ -284,36 +284,47 @@ class NrgReader:
         with open(filepath, "r") as fh:
             raw = fh.read()
 
-        lines = raw.split('\n')
-        time_lines = []
-        data_lines = []
+        non_empty = [line.strip() for line in raw.split('\n')
+                     if line.strip()]
 
         ncols = self.n_cols_per_row
-        for line in lines:
-            stripped = line.strip()
-            if not stripped:
-                continue
-            # Fast heuristic: time lines have no internal whitespace after strip,
-            # or exactly 1 token. Count spaces to classify.
-            if ' ' not in stripped and '\t' not in stripped:
-                time_lines.append(stripped)
-            else:
-                data_lines.append(stripped)
+        n_spec = self.n_rows_per_block
+        block_size = 1 + n_spec  # 1 time line + n_spec data rows
 
-        time_values = np.array(time_lines, dtype=float)
-        # Parse data rows in bulk: join all data lines, parse as flat array, reshape
-        data_flat = np.fromstring('\n'.join(data_lines), dtype=float, sep=' ')
-        data_rows = data_flat.reshape(-1, ncols)
+        if ncols > 1:
+            # Multi-column: classify by token count (fast path)
+            time_lines = []
+            data_lines = []
+            for line in non_empty:
+                if len(line.split()) == 1:
+                    time_lines.append(line)
+                else:
+                    data_lines.append(line)
+            time_values = np.array(time_lines, dtype=float)
+            data_flat = np.fromstring('\n'.join(data_lines), dtype=float, sep=' ')
+            data_rows = data_flat.reshape(-1, ncols)
+        else:
+            # Single-column: use structural position (every block_size-th line
+            # is a time line, followed by n_spec data lines)
+            time_lines = []
+            data_lines = []
+            for i, line in enumerate(non_empty):
+                if i % block_size == 0:
+                    time_lines.append(line)
+                else:
+                    data_lines.append(line)
+            time_values = np.array(time_lines, dtype=float)
+            data_rows = np.array(data_lines, dtype=float).reshape(-1, 1)
 
         # Validate
-        expected_data_rows = len(time_values) * self.n_rows_per_block
+        expected_data_rows = len(time_values) * n_spec
         if len(data_rows) != expected_data_rows:
             raise ValueError(
                 f"{filepath}: expected {expected_data_rows} data rows "
                 f"but found {len(data_rows)}"
             )
 
-        times_array = np.repeat(time_values, self.n_rows_per_block)
+        times_array = np.repeat(time_values, n_spec)
         return times_array, data_rows
 
     # ------------------------------------------------------------------
