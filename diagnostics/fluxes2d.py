@@ -55,6 +55,7 @@ import matplotlib.pyplot as plt
 import h5py
 
 from genetools.compat import trapz as _trapz
+from genetools.diagnostics._base import CachingDiagnostic
 
 
 # ---------------------------------------------------------------------------
@@ -254,7 +255,7 @@ def _compute_em_fluxes(v_A: np.ndarray, moments: list,
 # Main class
 # ---------------------------------------------------------------------------
 
-class Fluxes2D:
+class Fluxes2D(CachingDiagnostic):
     """
     Compute, cache, and plot radial flux profile diagnostics.
 
@@ -268,27 +269,11 @@ class Fluxes2D:
     """
 
     def __init__(self, outfile: str = "fluxes_2D.h5"):
-        self.outfile = outfile
+        super().__init__(outfile)
 
     # ------------------------------------------------------------------
     # HDF5 helpers
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _load_saved_times(outfile: str) -> np.ndarray:
-        if not os.path.exists(outfile):
-            return np.array([], dtype=np.float64)
-        with h5py.File(outfile, "r") as f:
-            if "time" not in f:
-                return np.array([], dtype=np.float64)
-            return f["time"][...]
-
-    @staticmethod
-    def _is_already_saved(time: float, saved_times: np.ndarray) -> bool:
-        if saved_times.size == 0:
-            return False
-        tol = max(1e-6, abs(time) * 1e-6)
-        return bool(np.any(np.abs(saved_times - time) <= tol))
 
     @staticmethod
     def _init_h5(f, species_names: list, nx: int, x: np.ndarray,
@@ -322,46 +307,6 @@ class Fluxes2D:
                 ds = f[f"{name}/{key}"]
                 ds.resize((ds.shape[0], n + 1))
                 ds[:, n] = val
-
-    # ------------------------------------------------------------------
-    # Time synchronisation (same logic as Spectra)
-    # ------------------------------------------------------------------
-
-    def _sync_indices(self, fld_reader, mom_readers, t_start, t_stop,
-                      params):
-        """Return filtered field and moment indices for unsaved timesteps."""
-        istep_fld = int(params["in_out"]["istep_field"])
-        istep_mom = int(params["in_out"]["istep_mom"])
-        L         = int(np.lcm(istep_fld, istep_mom))
-        stride_fld = L // istep_fld
-        stride_mom = L // istep_mom
-
-        times_fld = fld_reader.read_all_times()
-        idx_fld = np.where(
-            (times_fld >= t_start) & (times_fld <= t_stop))[0][::stride_fld]
-        times_mom = mom_readers[0].read_all_times()
-        idx_mom = np.where(
-            (times_mom >= t_start) & (times_mom <= t_stop))[0][::stride_mom]
-
-        saved_times = self._load_saved_times(self.outfile)
-        if saved_times.size == 0:
-            return idx_fld.tolist(), idx_mom.tolist()
-
-        saved_sorted = np.sort(saved_times.astype(np.float64))
-
-        def _filter(indices, all_times):
-            if len(indices) == 0:
-                return []
-            cand = all_times[indices]
-            tol = np.maximum(1e-6, np.abs(cand) * 1e-6)
-            pos = np.searchsorted(saved_sorted, cand)
-            found = np.zeros(len(cand), dtype=bool)
-            for offset in (0, -1):
-                ic = np.clip(pos + offset, 0, len(saved_sorted) - 1)
-                found |= np.abs(saved_sorted[ic] - cand) <= tol
-            return [i for i, f in zip(indices, found) if not f]
-
-        return _filter(idx_fld, times_fld), _filter(idx_mom, times_mom)
 
     # ------------------------------------------------------------------
     # Build global prefactors
@@ -473,7 +418,7 @@ class Fluxes2D:
         has_em = n_fields > 1
 
         # Sync field + moment indices
-        idx_fld, idx_mom = self._sync_indices(
+        idx_fld, idx_mom = self._sync_field_mom_indices(
             fld_reader, mom_readers, t_start, t_stop, params)
 
         if len(idx_fld) == 0 or len(idx_mom) == 0:

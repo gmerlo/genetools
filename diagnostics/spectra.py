@@ -11,11 +11,12 @@ except ImportError:
     NUMBA_AVAILABLE = False
 
 from genetools.compat import trapz as _trapz
+from genetools.diagnostics._base import CachingDiagnostic
 
 
-class Spectra:
+class Spectra(CachingDiagnostic):
     def __init__(self, outfile="flux_spectra.h5"):
-        self.outfile = outfile
+        super().__init__(outfile)
 
     # ------------------------------------------------------------------
     # Synchronisation

@@ -49,6 +49,7 @@ import matplotlib.pyplot as plt
 import h5py
 
 from genetools.compat import trapz as _trapz
+from genetools.diagnostics._base import CachingDiagnostic
 
 
 # ---------------------------------------------------------------------------
@@ -137,7 +138,7 @@ def _compute_fsa_profiles(moments: list, x_local: bool, J_norm: np.ndarray,
 # Main class
 # ---------------------------------------------------------------------------
 
-class Profiles:
+class Profiles(CachingDiagnostic):
     """
     Compute, cache, and plot radial profile diagnostics.
 
@@ -151,29 +152,11 @@ class Profiles:
     """
 
     def __init__(self, outfile: str = "profiles.h5"):
-        self.outfile = outfile
+        super().__init__(outfile)
 
     # ------------------------------------------------------------------
     # HDF5 helpers
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _load_saved_times(outfile: str) -> np.ndarray:
-        """Load all saved times from the HDF5 file (empty array if none)."""
-        if not os.path.exists(outfile):
-            return np.array([], dtype=np.float64)
-        with h5py.File(outfile, "r") as f:
-            if "time" not in f:
-                return np.array([], dtype=np.float64)
-            return f["time"][...]
-
-    @staticmethod
-    def _is_already_saved(time: float, saved_times: np.ndarray) -> bool:
-        """Check if *time* is in *saved_times*."""
-        if saved_times.size == 0:
-            return False
-        tol = max(1e-6, abs(time) * 1e-6)
-        return bool(np.any(np.abs(saved_times - time) <= tol))
 
     @staticmethod
     def _init_h5(f, species_names: list, nx: int):
@@ -245,7 +228,7 @@ class Profiles:
             # Global: J is (nx, nz)
             J_norm = J / J.sum(axis=1, keepdims=True)  # (nx, nz)
 
-        saved_times = self._load_saved_times(self.outfile)
+        saved_times = self._load_saved_times()
 
         # Use the first species reader to determine time indices
         first_reader = next(iter(mom_readers.values()))

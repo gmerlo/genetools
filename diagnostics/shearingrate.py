@@ -48,6 +48,7 @@ import matplotlib.pyplot as plt
 import h5py
 
 from genetools.compat import trapz as _trapz
+from genetools.diagnostics._base import CachingDiagnostic
 
 
 # ---------------------------------------------------------------------------
@@ -198,7 +199,7 @@ def compute_exb(phi: np.ndarray, params: dict, geom: dict, coord: dict) -> dict:
 # Main class
 # ---------------------------------------------------------------------------
 
-class ShearingRate:
+class ShearingRate(CachingDiagnostic):
     """
     Compute, cache, and plot ExB shearing rate diagnostics.
 
@@ -212,30 +213,11 @@ class ShearingRate:
     """
 
     def __init__(self, outfile: str = "shearing_rate.h5"):
-        self.outfile = outfile
+        super().__init__(outfile)
 
     # ------------------------------------------------------------------
     # HDF5 helpers
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _load_saved_times(outfile: str) -> np.ndarray:
-        """Load all saved times from the HDF5 file (empty array if none)."""
-        if not os.path.exists(outfile):
-            return np.array([], dtype=np.float32)
-        with h5py.File(outfile, "r") as f:
-            if "time" not in f:
-                return np.array([], dtype=np.float32)
-            return f["time"][...].astype(np.float32)
-
-    @staticmethod
-    def _is_already_saved(time: float, saved_times: np.ndarray) -> bool:
-        """Check if *time* is in *saved_times* (pre-loaded array)."""
-        if saved_times.size == 0:
-            return False
-        t32 = np.float32(time)
-        tol = max(1e-6, abs(t32) * 1e-6)
-        return bool(np.any(np.abs(saved_times - t32) <= tol))
 
     @staticmethod
     def _init_h5(f, result: dict, time: float, nx: int, x_local: bool) -> None:
@@ -313,7 +295,7 @@ class ShearingRate:
         t_start, t_stop : float
             Time window to process.
         """
-        saved_times = self._load_saved_times(self.outfile)
+        saved_times = self._load_saved_times()
 
         with h5py.File(self.outfile, "a") as hf:
             initialised = "time" in hf
@@ -361,18 +343,6 @@ class ShearingRate:
             data[k] = v[idx] if v.ndim >= 1 else v
 
         return data
-
-    @staticmethod
-    def _time_average(arr: np.ndarray, times: np.ndarray) -> np.ndarray:
-        """
-        Trapezoidal time average of *arr* (shape n_times x nx) over *times*.
- 
-        Returns a 1-D array of shape ``(nx,)``.
-        """
-        dt = times[-1] - times[0]
-        if dt == 0 or len(times) == 1:
-            return arr[0]
-        return _trapz(arr, x=times, axis=0) / dt
 
     def plot(self, coord=None, t_start=None, t_stop=None) -> None:
         """
