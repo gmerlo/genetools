@@ -53,12 +53,16 @@ from .io import (
     set_runs,
     Geometry,
     Coordinates,
+    load_equilibrium_profiles,
 )
 from .diagnostics import (
     NrgReader,
     Contours,
     ShearingRate,
     Spectra,
+    Profiles,
+    Fluxes2D,
+    SpectraGlobal,
 )
 
 __version__ = "0.2.0"
@@ -76,4 +80,8 @@ __all__ = [
     "NrgReader",
     "ShearingRate",
     "Spectra",
+    "Profiles",
+    "Fluxes2D",
+    "SpectraGlobal",
+    "load_equilibrium_profiles",
 ]

@@ -17,10 +17,16 @@ from .nrg import NrgReader
 from .contours import Contours
 from .shearingrate import ShearingRate
 from .spectra import Spectra
- 
+from .profiles import Profiles
+from .fluxes2d import Fluxes2D
+from .spectra_global import SpectraGlobal
+
 __all__ = [
     "NrgReader",
     "Contours",
     "ShearingRate",
     "Spectra",
+    "Profiles",
+    "Fluxes2D",
+    "SpectraGlobal",
 ]

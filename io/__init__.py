@@ -27,6 +27,7 @@ from .params import Params
 from .utils import set_runs
 from .geometry import Geometry
 from .coordinates import Coordinates
+from .profiles_loader import load_equilibrium_profiles
 
 __all__ = [
     "BinaryReader",
@@ -36,4 +37,5 @@ __all__ = [
     "set_runs",
     "Geometry",
     "Coordinates",
+    "load_equilibrium_profiles",
 ]
