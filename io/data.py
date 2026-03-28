@@ -191,6 +191,7 @@ class BinaryReader(_BaseReader):
         pos = pos + 4 + first_nbytes + 4
 
         # Scan more records to detect periodicity
+        found_repeat = False
         while pos < size:
             nbytes = int(np.frombuffer(mm[pos: pos + 4], dtype=np.int32)[0])
             start = pos + 4
@@ -199,7 +200,13 @@ class BinaryReader(_BaseReader):
             # Check if we've found a repeating pattern: the current record
             # has the same size as the first → likely start of next iteration
             if nbytes == first_nbytes and len(index) > 1:
+                found_repeat = True
                 break
+
+        # If the loop exhausted without finding a repeat (single iteration
+        # or irregular file), return the index as-is — no arithmetic fill.
+        if not found_repeat:
+            return index
 
         # Determine stride (bytes per full iteration group)
         group_len = len(index) - 1  # last record starts next group
@@ -602,9 +609,14 @@ class MultiSegmentReader:
 
     def __repr__(self) -> str:
         self._ensure_timeline()
+        n_steps = len(self._global_times)
+        if n_steps == 0:
+            return (
+                f"MultiSegmentReader("
+                f"{len(self.readers)} segments, 0 unique steps)")
         return (
             f"MultiSegmentReader("
             f"{len(self.readers)} segments, "
-            f"{len(self._global_times)} unique steps, "
+            f"{n_steps} unique steps, "
             f"t=[{self._global_times[0]:.3f}, {self._global_times[-1]:.3f}])"
         )

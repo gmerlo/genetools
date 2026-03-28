@@ -81,6 +81,51 @@ class TestBinaryReader:
         assert pytest.approx(times[0]) == 1.5
 
 
+    def test_single_iteration_file(self, tmp_path):
+        """B1 regression: single-iteration files must be read correctly."""
+        ni, nj, nk, n_arrays = 2, 2, 2, 2
+        reader, expected_times, expected_arrays = self._make_reader(
+            tmp_path, ni=ni, nj=nj, nk=nk, n_arrays=n_arrays, n_iters=1
+        )
+        times = reader.read_all_times()
+        assert len(times) == 1
+        assert pytest.approx(times[0]) == expected_times[0]
+        results = list(reader.stream_selected([0]))
+        assert len(results) == 1
+        assert len(results[0][1]) == n_arrays
+        for k in range(n_arrays):
+            np.testing.assert_allclose(results[0][1][k], expected_arrays[0][k])
+
+
+class TestMultiSegmentReader:
+    def test_repr_empty_timeline(self, tmp_path):
+        """B7 regression: repr must not crash when timeline is empty."""
+        from genetools.io.data import MultiSegmentReader
+
+        # Create a reader with real data, then force empty timeline
+        _, _, _ = make_binary_file(tmp_path, n_iters=1, ni=2, nj=2, nk=2)
+        params = make_params(nx0=2, nky0=2, nz0=2, n_fields=1)
+        reader = BinaryReader("field", str(tmp_path) + "/", "_0001", params)
+        msr = MultiSegmentReader([reader])
+        # Force empty timeline to test the guard
+        msr._global_times = np.array([], dtype=np.float64)
+        msr._global_map = []
+        r = repr(msr)
+        assert "0 unique steps" in r
+
+    def test_repr_with_data(self, tmp_path):
+        """repr should show time range when data exists."""
+        from genetools.io.data import MultiSegmentReader
+
+        _, _, _ = make_binary_file(tmp_path, n_iters=3, ni=2, nj=2, nk=2)
+        params = make_params(nx0=2, nky0=2, nz0=2, n_fields=1)
+        reader = BinaryReader("field", str(tmp_path) + "/", "_0001", params)
+        msr = MultiSegmentReader([reader])
+        r = repr(msr)
+        assert "3 unique steps" in r
+        assert "t=[" in r
+
+
 class TestBPReaderImportError:
     def test_raises_import_error_when_adios2_missing(self):
         """When adios2 is not installed, BPReader.__init__ should raise ImportError."""
