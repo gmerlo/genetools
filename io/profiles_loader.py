@@ -8,8 +8,8 @@ columns of floats.
 
 Public interface
 ----------------
-``EquilibriumProfiles(folder, ext, species_names)``
-    Load equilibrium profiles for one or more species.
+``EquilibriumProfiles(folder, ext, params)``
+    Load equilibrium profiles for all species found in params.
 
 ``load_equilibrium_profiles(folder, ext, species_name)``
     Load equilibrium profiles for one species (backward-compatible function).
@@ -17,7 +17,7 @@ Public interface
 Example
 -------
 >>> from genetools.io.profiles_loader import EquilibriumProfiles
->>> profs = EquilibriumProfiles('/path/to/run/', '_0001', ['ions', 'electrons'])
+>>> profs = EquilibriumProfiles('/path/to/run/', '_0001', params)
 >>> profs['ions']['T']    # temperature profile, shape (nx,)
 >>> profs.plot()          # plot all species
 """
@@ -69,7 +69,9 @@ def _load_single(folder: str, ext: str, species_name: str) -> dict:
 
 class EquilibriumProfiles:
     """
-    Load and plot equilibrium profiles for one or more species.
+    Load and plot equilibrium profiles for all species.
+
+    Species names are extracted automatically from the ``params`` dictionary.
 
     Parameters
     ----------
@@ -77,21 +79,22 @@ class EquilibriumProfiles:
         Run directory containing ``profiles_{species}{ext}`` files.
     ext : str
         File-name suffix, e.g. ``'_0001'``.
-    species_names : list of str
-        Species names to load, e.g. ``['ions', 'electrons']``.
+    params : dict
+        Parameter dictionary (from :class:`~genetools.io.params.Params`).
+        Species names are read from ``params['species']``.
 
     Examples
     --------
-    >>> profs = EquilibriumProfiles('/path/to/run/', '_0001', ['ions', 'electrons'])
+    >>> profs = EquilibriumProfiles('/path/to/run/', '_0001', params)
     >>> profs['ions']['T']      # temperature array
     >>> profs['ions']['omt']    # R/L_T gradient
     >>> profs.plot()            # 2x2 figure: T, n, R/L_T, R/L_n
     """
 
-    def __init__(self, folder: str, ext: str, species_names: list):
+    def __init__(self, folder: str, ext: str, params: dict):
         self.folder = folder
         self.ext = ext
-        self.species_names = list(species_names)
+        self.species_names = [sp["name"] for sp in params["species"]]
         self._data = {}
         for name in self.species_names:
             self._data[name] = _load_single(folder, ext, name)
@@ -159,9 +162,9 @@ def load_equilibrium_profiles(folder: str, ext: str, species_name: str) -> dict:
     """
     Load equilibrium profiles for one species from a GENE text file.
 
-    This is a convenience wrapper around :class:`EquilibriumProfiles` for
+    This is a convenience wrapper around :func:`_load_single` for
     loading a single species. For multiple species with plotting, use
-    the class directly.
+    :class:`EquilibriumProfiles`.
 
     Parameters
     ----------
