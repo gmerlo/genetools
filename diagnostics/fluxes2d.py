@@ -360,6 +360,67 @@ class Fluxes2D(CachingDiagnostic):
         return prefactors
 
     # ------------------------------------------------------------------
+    # Convenience entry point
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def from_runs(cls, folder: str, runs: list, params, geom: list,
+                  coords: list, t_start: float, t_stop: float,
+                  equilibrium_profiles: dict = None,
+                  outfile: str = "fluxes_2D.h5"):
+        """
+        Build multi-segment readers and compute flux profiles in one call.
+
+        Parameters
+        ----------
+        folder : str
+            Run directory.
+        runs : list of str
+            Run suffixes from :func:`~genetools.io.utils.set_runs`.
+        params : Params
+            Parameter object.
+        geom : list of dict
+            Geometry dicts from :func:`~genetools.io.geometry.Geometry`.
+        coords : list of dict
+            Coordinate dicts from :func:`~genetools.io.coordinates.Coordinates`.
+        t_start, t_stop : float
+            Time window.
+        equilibrium_profiles : dict, optional
+            Required for global runs.
+        outfile : str, optional
+            HDF5 output path (default ``'fluxes_2D.h5'``).
+
+        Returns
+        -------
+        Fluxes2D
+            Instance with results cached to *outfile*.
+        """
+        from genetools.io.data import BinaryReader, MultiSegmentReader
+
+        p0 = params.get(0)
+
+        # Multi-segment field reader
+        fld_reader = MultiSegmentReader([
+            BinaryReader('field', folder, ext, params.get(fn))
+            for fn, ext in enumerate(runs)
+        ])
+
+        # Multi-segment moment readers — one per species
+        species_names = [sp['name'] for sp in p0['species']]
+        mom_readers = [
+            MultiSegmentReader([
+                BinaryReader('mom', folder, ext, params.get(fn), species=name)
+                for fn, ext in enumerate(runs)
+            ])
+            for name in species_names
+        ]
+
+        obj = cls(outfile)
+        obj.compute_and_save(fld_reader, mom_readers, coords[0], geom[0],
+                             p0, t_start, t_stop, equilibrium_profiles)
+        return obj
+
+    # ------------------------------------------------------------------
     # Public interface — compute
     # ------------------------------------------------------------------
 
