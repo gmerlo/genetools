@@ -395,9 +395,24 @@ class Fluxes2D(CachingDiagnostic):
         Fluxes2D
             Instance with results cached to *outfile*.
         """
+        import warnings
         from genetools.io.data import BinaryReader, MultiSegmentReader
 
         p0 = params.get(0)
+
+        # Check grid consistency across segments
+        ref_box = (p0["box"]["nx0"], p0["box"]["nky0"], p0["box"]["nz0"])
+        for fn in range(1, len(runs)):
+            pi = params.get(fn)
+            seg_box = (pi["box"]["nx0"], pi["box"]["nky0"], pi["box"]["nz0"])
+            if seg_box != ref_box:
+                warnings.warn(
+                    f"Grid mismatch: segment 0 has {ref_box}, "
+                    f"segment {fn} has {seg_box}. "
+                    f"Using segment 0 params/geom/coords for all.",
+                    stacklevel=2,
+                )
+                break
 
         # Multi-segment field reader
         fld_reader = MultiSegmentReader([
@@ -456,9 +471,13 @@ class Fluxes2D(CachingDiagnostic):
         equilibrium_profiles : dict, optional
             Required for global runs. ``{species_name: {'T': array, 'n': array}}``.
         """
-        # Accept both Params object and plain dict
+        # Accept Params object or dict, list or single element
         if hasattr(params, 'get') and callable(params.get) and not isinstance(params, dict):
             params = params.get(0)
+        if isinstance(coords, list):
+            coords = coords[0]
+        if isinstance(geom, list):
+            geom = geom[0]
         x_local  = params["general"].get("x_local", True)
         nx       = params["box"]["nx0"]
         n_fields = params["info"]["n_fields"]
@@ -641,6 +660,12 @@ class Fluxes2D(CachingDiagnostic):
         t_start, t_stop : float, optional
             Time window.
         """
+        # Accept Params object or dict, list or single element
+        if hasattr(params, 'get') and callable(params.get) and not isinstance(params, dict):
+            params = params.get(0)
+        if isinstance(coords, list):
+            coords = coords[0]
+
         data = self.load(t_start, t_stop)
         if not data or "time" not in data or len(data["time"]) == 0:
             print("No flux data available to plot.")
