@@ -456,6 +456,9 @@ class Fluxes2D(CachingDiagnostic):
         equilibrium_profiles : dict, optional
             Required for global runs. ``{species_name: {'T': array, 'n': array}}``.
         """
+        # Accept both Params object and plain dict
+        if hasattr(params, 'get') and callable(params.get) and not isinstance(params, dict):
+            params = params.get(0)
         x_local  = params["general"].get("x_local", True)
         nx       = params["box"]["nx0"]
         n_fields = params["info"]["n_fields"]
