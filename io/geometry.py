@@ -172,7 +172,7 @@ def _read_local(fid, tmp_geom: dict) -> dict:
 # Global geometry reader
 # ---------------------------------------------------------------------------
  
-def _read_global(fid, nx: int) -> dict:
+def _read_global(fid, nx: int, tmp_geom: dict = None) -> dict:
     """
     Read the numeric section of a **global** geometry file.
  
@@ -244,6 +244,24 @@ def _read_global(fid, nx: int) -> dict:
             metric[tag] = val
     metric['dxdR'] = dxdR
     metric['dxdZ'] = dxdZ
+
+    # C_xy: try file arrays, then namelist, then derive from metric
+    if tmp_geom is None:
+        tmp_geom = {}
+    C_xy = _get(arrays, 'c_xy', 'cxy')
+    if C_xy is None and 'cxy' in tmp_geom:
+        C_xy = tmp_geom['cxy']
+    if C_xy is None and 'gxx' in metric and 'gyy' in metric and 'gxy' in metric:
+        C_xy = np.sqrt(Bfield**2 / (metric['gxx'] * metric['gyy'] - metric['gxy']**2))
+    if C_xy is not None:
+        metric['C_xy'] = C_xy
+
+    # C_y: try file arrays, then namelist
+    C_y = _get(arrays, 'c_y', 'cy')
+    if C_y is None and 'cy' in tmp_geom:
+        C_y = tmp_geom['cy']
+    if C_y is not None:
+        metric['C_y'] = C_y
  
     # q profile (if present)
     q_prof = _get(arrays, 'q', 'q_prof')
@@ -411,7 +429,7 @@ def _read_single_geom(folder: str, ext: str, params: dict) -> dict:
         if x_local:
             geom = _read_local(fid, tmp_geom)
         else:
-            geom = _read_global(fid, nx)
+            geom = _read_global(fid, nx, tmp_geom)
  
     geom['kind'] = geom_type
  
