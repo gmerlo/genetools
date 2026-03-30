@@ -254,14 +254,14 @@ def _read_global(fid, nx: int, tmp_geom: dict = None) -> dict:
     if C_xy is None and 'gxx' in metric and 'gyy' in metric and 'gxy' in metric:
         C_xy = np.sqrt(Bfield**2 / (metric['gxx'] * metric['gyy'] - metric['gxy']**2))
     if C_xy is not None:
-        metric['C_xy'] = C_xy
+        metric['C_xy'] = np.squeeze(C_xy) if hasattr(C_xy, 'squeeze') else C_xy
 
     # C_y: try file arrays, then namelist
     C_y = _get(arrays, 'c_y', 'cy')
     if C_y is None and 'cy' in tmp_geom:
         C_y = tmp_geom['cy']
     if C_y is not None:
-        metric['C_y'] = C_y
+        metric['C_y'] = np.squeeze(C_y) if hasattr(C_y, 'squeeze') else C_y
  
     # q profile (if present)
     q_prof = _get(arrays, 'q', 'q_prof')
