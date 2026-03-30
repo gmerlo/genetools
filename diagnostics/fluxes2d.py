@@ -752,11 +752,11 @@ class Fluxes2D(CachingDiagnostic):
 
             for ax, (ylabel, es_key, em_key) in zip(axes[0], flux_groups):
                 if es_key in avgs:
-                    ax.plot(x, avgs[es_key], "-b", label="ES")
+                    ax.plot(x, np.ravel(avgs[es_key]), "-b", label="ES")
                 if em_key in avgs:
-                    ax.plot(x, avgs[em_key], "--m", label="EM")
+                    ax.plot(x, np.ravel(avgs[em_key]), "--m", label="EM")
                 if es_key in avgs and em_key in avgs:
-                    ax.plot(x, avgs[es_key] + avgs[em_key],
+                    ax.plot(x, np.ravel(avgs[es_key] + avgs[em_key]),
                             "-k", lw=1.5, label="total")
                 ax.axhline(0, color="k", lw=0.5, ls=":")
                 ax.set_xlabel(x_label)
@@ -848,11 +848,11 @@ class Fluxes2D(CachingDiagnostic):
 
             for ax, (ylabel, es_key, em_key, norm) in zip(axes[0], flux_groups_SI):
                 if es_key in avgs:
-                    ax.plot(x, avgs[es_key] * norm, "-b", label="ES")
+                    ax.plot(x, np.ravel(avgs[es_key] * norm), "-b", label="ES")
                 if em_key in avgs:
-                    ax.plot(x, avgs[em_key] * norm, "--m", label="EM")
+                    ax.plot(x, np.ravel(avgs[em_key] * norm), "--m", label="EM")
                 if es_key in avgs and em_key in avgs:
-                    ax.plot(x, (avgs[es_key] + avgs[em_key]) * norm,
+                    ax.plot(x, np.ravel((avgs[es_key] + avgs[em_key]) * norm),
                             "-k", lw=1.5, label="total")
                 ax.axhline(0, color="k", lw=0.5, ls=":")
                 ax.set_xlabel(x_label)
