@@ -643,22 +643,28 @@ class Fluxes2D(CachingDiagnostic):
     # ------------------------------------------------------------------
 
     def plot(self, coords: dict, params: dict,
-             t_start: float = None, t_stop: float = None) -> None:
+             t_start: float = None, t_stop: float = None,
+             show_heatmaps: bool = False) -> None:
         """
         Plot flux profile diagnostics from the saved HDF5 file.
 
-        Per species produces:
-        1. (t, x) heatmaps of Q_es, G_es, P_es [+ EM]
-        2. Time-averaged radial profiles
+        Per species produces a figure with two subplots:
+        - Heat flux Q(x) — ES and EM overlaid
+        - Particle flux Gamma(x) — ES and EM overlaid
+
+        Optionally shows (t, x) heatmaps for each flux component.
 
         Parameters
         ----------
-        coords : dict
+        coords : dict or list of dict
             Coordinate dictionary.
-        params : dict
+        params : dict or Params
             Parameter dictionary.
         t_start, t_stop : float, optional
             Time window.
+        show_heatmaps : bool, optional
+            Show (t, x) heatmaps in addition to time-averaged profiles
+            (default False).
         """
         # Accept Params object or dict, list or single element
         if hasattr(params, 'get') and callable(params.get) and not isinstance(params, dict):
@@ -677,79 +683,86 @@ class Fluxes2D(CachingDiagnostic):
         species = params["species"]
         n_fields = params["info"]["n_fields"]
         has_em = n_fields > 1
+        nt = len(times)
 
         x_label = (r"$x / \rho_{\rm ref}$" if x_local
                    else r"$x / a$")
         t_label = r"$t\;c_{\rm ref}/L_{\rm ref}$"
 
-        es_keys = ["Qes_x", "Ges_x", "Pes_x"]
-        em_keys = ["Qem_x", "Gem_x", "Pem_x"] if has_em else []
-        all_keys = es_keys + em_keys
-
-        flux_labels = {
-            "Qes_x": r"$Q_{\rm es}\;[Q_{\rm GB}]$",
-            "Ges_x": r"$\Gamma_{\rm es}\;[\Gamma_{\rm GB}]$",
-            "Pes_x": r"$\Pi_{\rm es}\;[\Pi_{\rm GB}]$",
-            "Qem_x": r"$Q_{\rm em}\;[Q_{\rm GB}]$",
-            "Gem_x": r"$\Gamma_{\rm em}\;[\Gamma_{\rm GB}]$",
-            "Pem_x": r"$\Pi_{\rm em}\;[\Pi_{\rm GB}]$",
-        }
+        # Flux groups: (label, es_key, em_key)
+        flux_groups = [
+            (r"$Q\;[Q_{\rm GB}]$", "Qes_x", "Qem_x"),
+            (r"$\Gamma\;[\Gamma_{\rm GB}]$", "Ges_x", "Gem_x"),
+        ]
 
         for sp in species:
             name = sp["name"]
-            present_keys = [k for k in all_keys
-                           if f"{name}_{k}" in data]
-            if not present_keys:
+
+            # ── Optional heatmaps ─────────────────────────────────────
+            if show_heatmaps and nt > 1:
+                hm_keys = ["Qes_x", "Ges_x"]
+                if has_em:
+                    hm_keys += ["Qem_x", "Gem_x"]
+                present_hm = [k for k in hm_keys if f"{name}_{k}" in data]
+                if present_hm:
+                    hm_labels = {
+                        "Qes_x": r"$Q_{\rm es}$", "Ges_x": r"$\Gamma_{\rm es}$",
+                        "Qem_x": r"$Q_{\rm em}$", "Gem_x": r"$\Gamma_{\rm em}$",
+                    }
+                    ncols = len(present_hm)
+                    fig, axes = plt.subplots(1, ncols, figsize=(5 * ncols, 4),
+                                             squeeze=False)
+                    fig.suptitle(f"{name} — flux evolution")
+                    for ax, key in zip(axes[0], present_hm):
+                        arr = data[f"{name}_{key}"]
+                        vmax = np.percentile(np.abs(arr), 98)
+                        im = ax.pcolormesh(times, x, arr.T,
+                                           cmap="bwr", vmin=-vmax, vmax=vmax,
+                                           shading="auto")
+                        fig.colorbar(im, ax=ax)
+                        ax.set_xlabel(t_label)
+                        ax.set_ylabel(x_label)
+                        ax.set_title(hm_labels.get(key, key))
+                    plt.tight_layout()
+                    plt.show()
+
+            # ── Time-averaged profiles: Q and Gamma ───────────────────
+            # Compute time averages
+            avgs = {}
+            for key in ["Qes_x", "Qem_x", "Ges_x", "Gem_x"]:
+                full_key = f"{name}_{key}"
+                if full_key not in data:
+                    continue
+                arr = data[full_key]
+                if nt > 1:
+                    avgs[key] = _trapz(arr, x=times, axis=0) / (times[-1] - times[0])
+                else:
+                    avgs[key] = arr[0]
+
+            if not avgs:
                 continue
 
-            ncols = len(present_keys)
-            nt = len(times)
-
-            # ── Fig 1: (t, x) heatmaps ───────────────────────────────
             if nt > 1:
-                fig, axes = plt.subplots(1, ncols, figsize=(5 * ncols, 4),
-                                         squeeze=False)
-                fig.suptitle(f"{name} — flux evolution")
-                for ax, key in zip(axes[0], present_keys):
-                    arr = data[f"{name}_{key}"]
-                    vmax = np.percentile(np.abs(arr), 98)
-                    im = ax.pcolormesh(times, x, arr.T,
-                                       cmap="bwr", vmin=-vmax, vmax=vmax,
-                                       shading="auto")
-                    fig.colorbar(im, ax=ax)
-                    ax.set_xlabel(t_label)
-                    ax.set_ylabel(x_label)
-                    ax.set_title(flux_labels.get(key, key))
-                plt.tight_layout()
-                plt.show()
-
-            # ── Fig 2: time-averaged profiles ─────────────────────────
-            if nt > 1:
-                dt = times[-1] - times[0]
-                fig, axes = plt.subplots(1, ncols, figsize=(5 * ncols, 4),
-                                         squeeze=False)
-                title_str = f"average [{times[0]:.3f} - {times[-1]:.3f}]"
-                fig.suptitle(f"{name} — {title_str}")
-                for ax, key in zip(axes[0], present_keys):
-                    arr = data[f"{name}_{key}"]
-                    avg = _trapz(arr, x=times, axis=0) / dt
-                    ax.plot(x, avg, "-b")
-                    ax.axhline(0, color="k", lw=0.5, ls="--")
-                    ax.set_xlabel(x_label)
-                    ax.set_ylabel(flux_labels.get(key, key))
-                    ax.grid(True)
-                plt.tight_layout()
-                plt.show()
+                title_str = f"{name} — average [{times[0]:.1f}, {times[-1]:.1f}]"
             else:
-                fig, axes = plt.subplots(1, ncols, figsize=(5 * ncols, 4),
-                                         squeeze=False)
-                fig.suptitle(f"{name} — t = {times[0]:.3f}")
-                for ax, key in zip(axes[0], present_keys):
-                    arr = data[f"{name}_{key}"]
-                    ax.plot(x, arr[0], "-b")
-                    ax.axhline(0, color="k", lw=0.5, ls="--")
-                    ax.set_xlabel(x_label)
-                    ax.set_ylabel(flux_labels.get(key, key))
-                    ax.grid(True)
-                plt.tight_layout()
-                plt.show()
+                title_str = f"{name} — t = {times[0]:.3f}"
+
+            fig, axes = plt.subplots(1, 2, figsize=(12, 4), squeeze=False)
+            fig.suptitle(title_str)
+
+            for ax, (ylabel, es_key, em_key) in zip(axes[0], flux_groups):
+                if es_key in avgs:
+                    ax.plot(x, avgs[es_key], "-b", label="ES")
+                if em_key in avgs:
+                    ax.plot(x, avgs[em_key], "--m", label="EM")
+                if es_key in avgs and em_key in avgs:
+                    ax.plot(x, avgs[es_key] + avgs[em_key],
+                            "-k", lw=1.5, label="total")
+                ax.axhline(0, color="k", lw=0.5, ls=":")
+                ax.set_xlabel(x_label)
+                ax.set_ylabel(ylabel)
+                ax.legend()
+                ax.grid(True)
+
+            plt.tight_layout()
+            plt.show()
