@@ -302,7 +302,7 @@ class Spectra(CachingDiagnostic):
                 mask &= time <= t_stop
 
             # Compute final index array once for HDF5 fancy indexing
-            final_idx = sorted_idx[mask]
+            final_idx = np.sort(sorted_idx[mask])
             time = time[mask]
 
             flux_avg = {}

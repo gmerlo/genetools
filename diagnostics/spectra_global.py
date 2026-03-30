@@ -341,7 +341,7 @@ class SpectraGlobal(CachingDiagnostic):
                 mask &= time >= t_start
             if t_stop is not None:
                 mask &= time <= t_stop
-            final_idx = idx[mask]
+            final_idx = np.sort(idx[mask])
             time = time[mask]
 
             result = {"time": time}
