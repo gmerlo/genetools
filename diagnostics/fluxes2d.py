@@ -743,7 +743,7 @@ class Fluxes2D(CachingDiagnostic):
                 continue
 
             if nt > 1:
-                title_str = f"{name} — average [{times[0]:.1f}, {times[-1]:.1f}]"
+                title_str = f"{name} — average [{times[0]:.3f}, {times[-1]:.3f}]"
             else:
                 title_str = f"{name} — t = {times[0]:.3f}"
 
@@ -757,6 +757,102 @@ class Fluxes2D(CachingDiagnostic):
                     ax.plot(x, avgs[em_key], "--m", label="EM")
                 if es_key in avgs and em_key in avgs:
                     ax.plot(x, avgs[es_key] + avgs[em_key],
+                            "-k", lw=1.5, label="total")
+                ax.axhline(0, color="k", lw=0.5, ls=":")
+                ax.set_xlabel(x_label)
+                ax.set_ylabel(ylabel)
+                ax.legend()
+                ax.grid(True)
+
+            plt.tight_layout()
+            plt.show()
+
+    def plot_SI(self, coords, params, geom,
+                t_start: float = None, t_stop: float = None) -> None:
+        """
+        Plot time-averaged flux profiles in SI units.
+
+        Heat flux is converted to W and particle flux to 1/s by
+        multiplying with the gyro-Bohm normalisation and the
+        flux-surface area: ``Q_SI = Q_GB * Qgb * Area``.
+
+        Parameters
+        ----------
+        coords : dict or list of dict
+            Coordinate dictionary.
+        params : dict or Params
+            Parameter dictionary (must contain ``units`` block with
+            ``Qgb``, ``Ggb``).
+        geom : dict or list of dict
+            Geometry dictionary (must contain ``area.Area``).
+        t_start, t_stop : float, optional
+            Time window.
+        """
+        if hasattr(params, 'get') and callable(params.get) and not isinstance(params, dict):
+            params = params.get(0)
+        if isinstance(coords, list):
+            coords = coords[0]
+        if isinstance(geom, list):
+            geom = geom[0]
+
+        data = self.load(t_start, t_stop)
+        if not data or "time" not in data or len(data["time"]) == 0:
+            print("No flux data available to plot.")
+            return
+
+        times = data["time"]
+        x = data.get("x", np.asarray(coords["x"]))
+        x_local = params["general"].get("x_local", True)
+        species = params["species"]
+        n_fields = params["info"]["n_fields"]
+        has_em = n_fields > 1
+        nt = len(times)
+
+        units = params["units"]
+        Qgb = units["Qgb"]                       # [W / m^2]
+        Ggb = units["Ggb"] * 1e19                 # nref is in 10^19 m^-3 → [1 / (m^2 s)]
+        Area = np.asarray(geom["area"]["Area"])   # [m^2] (Lref^2 already included)
+
+        x_label = (r"$x / \rho_{\rm ref}$" if x_local else r"$x / a$")
+
+        # SI flux groups: (ylabel, es_key, em_key, norm_factor)
+        flux_groups_SI = [
+            (r"$Q\;[\mathrm{W}]$",            "Qes_x", "Qem_x", Qgb * Area),
+            (r"$\Gamma\;[\mathrm{s}^{-1}]$",  "Ges_x", "Gem_x", Ggb * Area),
+        ]
+
+        for sp in species:
+            name = sp["name"]
+
+            avgs = {}
+            for key in ["Qes_x", "Qem_x", "Ges_x", "Gem_x"]:
+                full_key = f"{name}_{key}"
+                if full_key not in data:
+                    continue
+                arr = data[full_key]
+                if nt > 1:
+                    avgs[key] = _trapz(arr, x=times, axis=0) / (times[-1] - times[0])
+                else:
+                    avgs[key] = arr[0]
+
+            if not avgs:
+                continue
+
+            if nt > 1:
+                title_str = f"{name} — SI units — average [{times[0]:.3f}, {times[-1]:.3f}]"
+            else:
+                title_str = f"{name} — SI units — t = {times[0]:.3f}"
+
+            fig, axes = plt.subplots(1, 2, figsize=(12, 4), squeeze=False)
+            fig.suptitle(title_str)
+
+            for ax, (ylabel, es_key, em_key, norm) in zip(axes[0], flux_groups_SI):
+                if es_key in avgs:
+                    ax.plot(x, avgs[es_key] * norm, "-b", label="ES")
+                if em_key in avgs:
+                    ax.plot(x, avgs[em_key] * norm, "--m", label="EM")
+                if es_key in avgs and em_key in avgs:
+                    ax.plot(x, (avgs[es_key] + avgs[em_key]) * norm,
                             "-k", lw=1.5, label="total")
                 ax.axhline(0, color="k", lw=0.5, ls=":")
                 ax.set_xlabel(x_label)
