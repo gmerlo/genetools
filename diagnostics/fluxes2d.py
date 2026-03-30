@@ -117,10 +117,13 @@ def _compute_velocity(field: np.ndarray, ky: np.ndarray,
         vel = sign * 1j * ky3 * vel / scalar_cxy
     else:
         vel = field.copy()
-        if np.ndim(C_xy) > 0:
-            C_xy_3d = np.asarray(C_xy)[:, np.newaxis, :]
+        C_xy_arr = np.asarray(C_xy)
+        if C_xy_arr.ndim == 2:
+            C_xy_3d = C_xy_arr[:, np.newaxis, :]       # (nx, 1, nz)
+        elif C_xy_arr.ndim == 1:
+            C_xy_3d = C_xy_arr[:, np.newaxis, np.newaxis]  # (nx, 1, 1)
         else:
-            C_xy_3d = float(C_xy)
+            C_xy_3d = float(C_xy_arr)
         ky3 = ky[np.newaxis, :, np.newaxis]
         vel = sign * 1j * ky3 * vel / C_xy_3d
     return vel
@@ -811,7 +814,7 @@ class Fluxes2D(CachingDiagnostic):
         units = params["units"]
         Qgb = units["Qgb"]                       # [W / m^2]
         Ggb = units["Ggb"] * 1e19                 # nref is in 10^19 m^-3 → [1 / (m^2 s)]
-        Area = np.asarray(geom["area"]["Area"])   # [m^2] (Lref^2 already included)
+        Area = np.squeeze(np.asarray(geom["area"]["Area"]))  # [m^2], 1D (nx,)
 
         x_label = (r"$x / \rho_{\rm ref}$" if x_local else r"$x / a$")
 
