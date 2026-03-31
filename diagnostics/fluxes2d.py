@@ -271,8 +271,8 @@ class Fluxes2D(CachingDiagnostic):
         Path to the output HDF5 file (default ``'fluxes_2D.h5'``).
     """
 
-    def __init__(self, outfile: str = "fluxes_2D.h5"):
-        super().__init__(outfile)
+    def __init__(self, outfile: str = "fluxes_2D.h5", folder: str = None):
+        super().__init__(outfile, folder)
 
     # ------------------------------------------------------------------
     # HDF5 helpers
@@ -433,7 +433,7 @@ class Fluxes2D(CachingDiagnostic):
             for name in species_names
         ]
 
-        obj = cls(outfile)
+        obj = cls(outfile, folder=folder)
         obj.compute_and_save(fld_reader, mom_readers, coords[0], geom[0],
                              p0, t_start, t_stop, equilibrium_profiles)
         return obj

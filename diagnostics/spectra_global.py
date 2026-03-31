@@ -112,8 +112,8 @@ class SpectraGlobal(CachingDiagnostic):
         Path to the output HDF5 file (default ``'spectra_global.h5'``).
     """
 
-    def __init__(self, outfile: str = "spectra_global.h5"):
-        super().__init__(outfile)
+    def __init__(self, outfile: str = "spectra_global.h5", folder: str = None):
+        super().__init__(outfile, folder)
 
     # ------------------------------------------------------------------
     # HDF5 helpers

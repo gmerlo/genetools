@@ -212,8 +212,8 @@ class ShearingRate(CachingDiagnostic):
         Path to the output HDF5 file (default ``'shearing_rate.h5'``).
     """
 
-    def __init__(self, outfile: str = "shearing_rate.h5"):
-        super().__init__(outfile)
+    def __init__(self, outfile: str = "shearing_rate.h5", folder: str = None):
+        super().__init__(outfile, folder)
 
     # ------------------------------------------------------------------
     # HDF5 helpers

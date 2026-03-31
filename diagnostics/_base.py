@@ -27,8 +27,11 @@ class CachingDiagnostic:
     _sync_field_mom_indices(fld_reader, mom_readers, t_start, t_stop, params) → (list, list)
     """
 
-    def __init__(self, outfile: str):
-        self.outfile = outfile
+    def __init__(self, outfile: str, folder: str = None):
+        if folder is not None and not os.path.dirname(outfile):
+            self.outfile = os.path.join(folder, outfile)
+        else:
+            self.outfile = outfile
 
     # ------------------------------------------------------------------
     # Time-checking helpers

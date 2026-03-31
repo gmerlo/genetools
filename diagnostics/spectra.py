@@ -15,8 +15,8 @@ from genetools.diagnostics._base import CachingDiagnostic
 
 
 class Spectra(CachingDiagnostic):
-    def __init__(self, outfile="flux_spectra.h5"):
-        super().__init__(outfile)
+    def __init__(self, outfile="flux_spectra.h5", folder: str = None):
+        super().__init__(outfile, folder)
 
     # ------------------------------------------------------------------
     # Synchronisation
