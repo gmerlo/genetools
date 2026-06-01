@@ -64,6 +64,13 @@ Each phase is its own review checkpoint.
 
 New files; nothing existing is moved in Phase 1.
 
+> **Physical layout note.** The repository root *is* the `genetools` package
+> (the repo dir contains `__init__.py`, `compat.py`, `io/`, `diagnostics/`).
+> So the module paths below map to physical files at the repo root: `genetools/run.py`
+> → `./run.py`, `genetools/_xr.py` → `./_xr.py`, `genetools/cli.py` → `./cli.py`,
+> `genetools/io/omega.py` → `./io/omega.py`, etc. Paths are written in module form
+> for clarity.
+
 ```
 genetools/
   __init__.py            # + re-export Run (keep existing flat re-exports)
@@ -145,6 +152,50 @@ Parametrized diagnostics are callable and return a configured instance:
 - `t=(start, stop)` — time window.
 - `t=None` — full available range.
 - `t=<scalar>` — nearest single time (for contour/ballooning snapshots).
+
+### Continuation / restart runs
+
+GENE runs are commonly split into restarted **segments** (`_0001`, `_0002`, …,
+`.dat`). This is a first-class concern, handled at two layers.
+
+**Reader layer (existing, reused as-is).** `Run(path, ext=None)` discovers *all*
+segments via `set_runs` and builds a single `MultiSegmentReader` across them
+automatically — continuation is transparent, segments are never named by the user.
+The reader (`io/data.py`):
+- merges every segment's time array, sorts, and **deduplicates overlaps with
+  "later segment wins"** — matching GENE's restart-rewind, where a restart
+  re-emits a few steps that must not be double-counted;
+- exposes the merged/deduplicated timeline as `run.times`; `t=(start, stop)`
+  windows select across segment boundaries seamlessly;
+- routes each requested step to the owning segment and yields arrays in that
+  segment's native shape/dtype.
+
+**Diagnostic layer (policy for this redesign).** Confirmed decision:
+**continuation runs keep the same numerical grid (extend in time); validate and
+warn, assume consistent.** Concretely:
+- On `Run` construction, validate grid/geometry consistency across the spanned
+  segments (perpendicular/parallel dims and key geometry). If they differ, emit a
+  **clear warning** naming the divergent segments and advising the user to scope
+  to a consistent subset. (This replaces the current *silent* segment-0
+  assumption in `Spectra`/`Profiles`/`Fluxes2D`, which use `coords[0]`/`geom[0]`.)
+- Allow scoping to a subset of segments — `Run(path, ext=["_0002", ".dat"])` — for
+  the rare case where a user wants only the post-change portion.
+- With a consistent grid (the assumed/validated case), the single grid is used for
+  weighting and for the xarray output coordinates; results are correct and labels
+  unambiguous.
+- Full per-segment-grid correctness (per-step geometry via
+  `stream_selected_with_seg`, interpolating across grid changes) is explicitly a
+  non-goal for this effort.
+- New diagnostics follow the same model. Linear diagnostics (growth-rate,
+  ballooning) naturally use the trailing window of the final segment, so
+  continuation barely affects them.
+
+**Caching across continuations.** Re-running a diagnostic after a run is extended
+recomputes only the new times (`_is_already_saved` skips cached steps) and appends
+to the HDF5 cache — cheap incremental updates. *Known limitation:* if a restart
+*overwrote* already-cached overlapping timesteps, those cached values are not
+recomputed (the cache is keyed by time value, which is unchanged). Documented; not
+addressed in this effort.
 
 ## 5. xarray data layer (`_xr.py`)
 
@@ -252,7 +303,9 @@ Aligned to the existing `tests/` layout. Extend `tests/conftest.py` with synthet
 field/mom/nrg/omega fixtures.
 
 - `tests/test_run.py` — segment discovery, lazy reader construction, `species` /
-  `is_local`, accessors return bound diagnostics, multi-segment wiring, time axis.
+  `is_local`, accessors return bound diagnostics, multi-segment wiring, time axis,
+  **continuation runs**: spanning multiple segments, overlap dedup (later wins),
+  `ext=[...]` subsetting, and the grid-consistency validation warning on mismatch.
 - `tests/test_xr.py` — wrappers produce correct dims/coords/units/attrs.
 - `tests/diagnostics/test_ballooning.py` — χ connection length, dims, local-only
   guard, normalization.
@@ -287,6 +340,12 @@ Run: `pytest tests/ -v` (and `--cov=genetools` for coverage).
   on synthetic data.
 - **Growth-rate windowing** — a poor window over a not-yet-converged run yields
   noisy γ/ω; default to the trailing portion and expose the window via `t=`.
+- **Continuation runs with a changed grid** — out of scope by decision; mitigated by
+  the `Run` grid-consistency validation warning + `ext=[...]` subsetting, so the
+  user is told rather than silently given wrong results.
+- **Stale cache on overwritten overlaps** — if a restart rewrites already-cached
+  timesteps, the time-keyed cache keeps the old values. Documented limitation; the
+  workaround is to delete the diagnostic's HDF5 cache and recompute.
 - **Phase-1 adapter is temporary** — clearly marked; removed in Phase 3 to avoid
   lingering dual code paths.
 
