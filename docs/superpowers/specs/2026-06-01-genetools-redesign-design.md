@@ -92,9 +92,8 @@ genetools/
 `pyproject.toml` changes:
 - Add `xarray` to `[project] dependencies` (hard dependency).
 - Add `[project.scripts]`: `genetools = "genetools.cli:main"`.
-- Add an optional extra for netCDF export (`ds.to_netcdf` needs `h5netcdf` or
-  `netcdf4`): `[project.optional-dependencies] netcdf = ["h5netcdf"]`. Export is a
-  convenience, never required for core use.
+- (netCDF export is intentionally out of scope; the internal HDF5 cache remains
+  the on-disk format.)
 
 ## 4. The `Run` object (`run.py`)
 
@@ -213,7 +212,6 @@ Example:
 ds = run.spectra.data
 # Dimensions: (species, ky); coords ky=[...], species=['ions','elec']
 ds.Q_es.sel(species="ions").plot()
-ds.to_netcdf("spectra.nc")          # optional, requires h5netcdf/netcdf4
 ```
 
 **Phase-1 mechanism:** existing diagnostics still return numpy dicts; a thin

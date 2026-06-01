@@ -13,11 +13,15 @@ dependencies = [
     "matplotlib>=3.4",
     "f90nml>=1.4",
     "h5py>=3.0",
+    "xarray>=2022.3",
 ]
 
 [project.optional-dependencies]
 adios2 = ["adios2"]
 dev = ["pytest>=7", "pytest-cov"]
+
+[project.scripts]
+genetools = "genetools.cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

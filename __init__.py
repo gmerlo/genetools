@@ -44,6 +44,9 @@ You can import everything from the top level:
 from . import io
 from . import diagnostics
 
+# High-level facade — the recommended entry point.
+from .run import Run
+
 # Flat convenience imports — mirrors original API
 from .io import (
     BinaryReader,
@@ -71,6 +74,7 @@ __version__ = "0.2.0"
 __all__ = [
     "io",
     "diagnostics",
+    "Run",
     "BinaryReader",
     "BPReader",
     "MultiSegmentReader",
