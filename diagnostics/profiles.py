@@ -317,8 +317,17 @@ class Profiles(CachingDiagnostic):
 
         return result
 
-    def dataset(self, coords, params, species, t_start=None, t_stop=None):
-        """Return the radial profiles as an ``xarray.Dataset`` (dims species, time, x)."""
+    def dataset(self, coords, params, species, t_start=None, t_stop=None,
+                equilibrium_profiles=None):
+        """
+        Return the radial profiles as an ``xarray.Dataset`` (dims species, time, x).
+
+        Variables: the cached fluctuating ``T``/``n``/``u`` and — when the
+        equilibrium background can be built (always for local runs; for global
+        runs only if *equilibrium_profiles* is supplied) — the background-inclusive
+        totals ``T_total``/``n_total``/``u_total`` and normalised gradients
+        ``omt``/``omn``/``omu``, exactly as shown by :meth:`plot`.
+        """
         import xarray as xr
         from genetools import _xr
 
@@ -326,6 +335,10 @@ class Profiles(CachingDiagnostic):
         if not raw:
             return xr.Dataset()
         time = np.asarray(raw.get("time", []))
+        try:
+            self._augment_with_totals(raw, coords, params, equilibrium_profiles)
+        except Exception:
+            pass  # global run without equilibrium profiles -> fluctuations only
         data_vars, used = _xr.stacked_vars(
             raw, species, lambda var: ("time", "x"), coord_keys=("time",))
         x = np.asarray(coords.get("x", []))
@@ -333,6 +346,36 @@ class Profiles(CachingDiagnostic):
             x = np.asarray(coords.get("x_o_a", []))
         candidates = {"time": time, "x": x}
         return _xr.make_dataset(data_vars, candidates, species=used, params=params)
+
+    def _augment_with_totals(self, raw, coords, params, equilibrium_profiles):
+        """Add background-inclusive totals and gradients to *raw* in place."""
+        x_local = params["general"].get("x_local", True)
+        units = params.get("units", {})
+        geom_p = params.get("geometry", {})
+        rhostar = geom_p.get("rhostar", units.get("rho_starref", 1.0 / 500))
+        minor_r = geom_p.get("minor_r", 1.0)
+        x = np.asarray(coords["x"])
+        if x_local:
+            dx_n = (x[1] - x[0]) * rhostar * minor_r if len(x) > 1 else 1.0
+        else:
+            dx_n = (x[1] - x[0]) * minor_r if len(x) > 1 else 1.0
+
+        backgrounds = self.build_background(params, coords, equilibrium_profiles)
+        for sp in params["species"]:
+            name = sp["name"]
+            T_f, n_f, u_f = (raw.get(f"{name}_T"), raw.get(f"{name}_n"),
+                             raw.get(f"{name}_u"))
+            if T_f is None:
+                continue
+            bg = backgrounds[name]
+            for key, fluct, back in (("T", T_f, bg["T_back"]),
+                                     ("n", n_f, bg["n_back"]),
+                                     ("u", u_f, bg["u_back"])):
+                total = back[np.newaxis, :] + rhostar * fluct * minor_r
+                grad = np.array([self._compute_gradient(total[i], dx_n, x_local)
+                                 for i in range(total.shape[0])])
+                raw[f"{name}_{key}_total"] = total
+                raw[f"{name}_om{key.lower()}"] = grad   # omt / omn / omu
 
     # ------------------------------------------------------------------
     # Background profiles

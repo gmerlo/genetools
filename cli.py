@@ -110,24 +110,35 @@ def main(argv=None) -> int:
     # CLI controls whether windows open or figures are saved.
     orig_show = plt.show
     plt.show = lambda *a, **k: None
+    plt.close("all")  # start clean so --save captures only this diagnostic
 
     from .run import Run
 
-    path = args.runpath or args.path
-    run = Run(path, ext=args.ext)
+    try:
+        path = args.runpath or args.path
+        run = Run(path, ext=args.ext)
 
-    accessor = DIAGNOSTICS[name]
-    diag = getattr(run, accessor)
-    kwargs = _plot_kwargs(name, args)
-    if name == "ballooning":  # parametrized accessor
-        diag = diag(ky=kwargs.pop("ky"))
-    diag.plot(**kwargs)
+        accessor = DIAGNOSTICS[name]
+        diag = getattr(run, accessor)
+        kwargs = _plot_kwargs(name, args)
+        if name == "ballooning":  # parametrized accessor
+            ky = kwargs.pop("ky")
+            if ky is None:
+                print("genetools: --ballooning requires --ky VALUE",
+                      file=sys.stderr)
+                return 2
+            diag = diag(ky=ky)
+        diag.plot(**kwargs)
+    except Exception as exc:  # surface a clean message, not a traceback
+        print(f"genetools: error: {exc}", file=sys.stderr)
+        return 1
 
     if args.save is not None:
         _save_figures(plt, args.save, name)
     elif not args.no_show:
         plt.show = orig_show
         orig_show()
+    plt.close("all")
     return 0
 
 
@@ -138,7 +149,9 @@ def _save_figures(plt, save, name: str) -> None:
         print(f"{name}: no figures were produced.", file=sys.stderr)
         return
     out = Path(save)
-    is_dir = out.is_dir() or save.endswith("/")
+    # Treat as a directory if it exists as one, ends with '/', or has no file
+    # extension (so `--save outdir` works even when outdir doesn't exist yet).
+    is_dir = out.is_dir() or save.endswith("/") or out.suffix == ""
     if is_dir:
         out.mkdir(parents=True, exist_ok=True)
     for i, num in enumerate(nums):

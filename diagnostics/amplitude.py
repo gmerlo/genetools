@@ -37,20 +37,33 @@ class AmplitudeSpectra:
         w[ky == 0.0] = 1.0
         return w
 
-    def _accumulate(self, reader, idx, names, J_norm, ky_weight, out):
-        """Stream *reader* over *idx*, time-average |·|² spectra for *names*."""
-        per = {n: {"kx": [], "ky": []} for n in names}
+    def _accumulate(self, reader, idx, names, J_norm, ky_weight, out, is_local):
+        """Stream *reader* over *idx*, time-average |·|² spectra for *names*.
+
+        For local runs the radial axis is spectral (kx-folded); for global runs
+        x is real space, so a kx spectrum is meaningless — a Jacobian-weighted
+        radial profile of |·|² is reported instead.
+        """
+        radial = "kx" if is_local else "x"
+        per = {n: {radial: [], "ky": []} for n in names}
         times = []
         for time, arrays in reader.stream_selected(list(idx)):
             times.append(time)
             for k, name in enumerate(names):
                 amp = np.abs(arrays[k]) ** 2
-                sp_kx, sp_ky, _ = Spectra.averages(amp, J_norm, ky_weight)
-                per[name]["kx"].append(sp_kx)
+                if is_local:
+                    sp_r, sp_ky, _ = Spectra.averages(amp, J_norm, ky_weight)
+                else:
+                    W = ky_weight[np.newaxis, :, np.newaxis]
+                    J = J_norm[np.newaxis, np.newaxis, :]
+                    weighted = amp * (W * J)
+                    sp_r = np.sum(weighted, axis=(1, 2))   # |·|² vs real x
+                    sp_ky = np.sum(weighted, axis=(0, 2))  # vs ky
+                per[name][radial].append(sp_r)
                 per[name]["ky"].append(sp_ky)
         times = np.asarray(times)
         for name in names:
-            for ax in ("kx", "ky"):
+            for ax in (radial, "ky"):
                 stack = np.asarray(per[name][ax])
                 if stack.shape[0] > 1:
                     avg = _trapz(stack, x=times, axis=0) / (times[-1] - times[0])
@@ -67,11 +80,13 @@ class AmplitudeSpectra:
         ky_weight = self._ky_weight()
         n_fields = int(run.params.get(0)["info"]["n_fields"])
 
+        is_local = run.is_local
         out = {}
         _, idx = run._indices(run.field, t)
         if idx.size:
             field_names = [_FIELD_NAMES[i] for i in range(min(n_fields, 3))]
-            self._accumulate(run.field, idx, field_names, J_norm, ky_weight, out)
+            self._accumulate(run.field, idx, field_names, J_norm, ky_weight, out,
+                             is_local)
 
         for sp in run.species:
             rdr = run.mom(sp)
@@ -79,7 +94,7 @@ class AmplitudeSpectra:
             if idxm.size == 0:
                 continue
             names = [f"{sp}_{m}" for m in _MOM_NAMES]
-            self._accumulate(rdr, idxm, names, J_norm, ky_weight, out)
+            self._accumulate(rdr, idxm, names, J_norm, ky_weight, out, is_local)
 
         self._cache = out
         return out
@@ -96,6 +111,7 @@ class AmplitudeSpectra:
         candidates = {
             "kx": np.asarray(coord.get("kx_2", coord.get("kx", []))),
             "ky": np.asarray(coord.get("ky", [])),
+            "x": np.asarray(coord.get("x", coord.get("x_o_a", []))),
         }
         return _xr.make_dataset(data_vars, candidates, species=used,
                                 params=self.run.params.get(0))
@@ -106,19 +122,23 @@ class AmplitudeSpectra:
             self.compute(t)
         ds = self.data
         ky = ds["ky"].values if "ky" in ds.coords else None
-        kx = ds["kx"].values if "kx" in ds.coords else None
+        is_local = self.run.is_local
+        rcoord = "kx" if is_local else "x"
+        rsuffix = "_kx" if is_local else "_x"
+        rax = ds[rcoord].values if rcoord in ds.coords else None
 
-        fig, (axky, axkx) = plt.subplots(1, 2, figsize=(11, 4.5))
+        fig, (axky, axr) = plt.subplots(1, 2, figsize=(11, 4.5))
         for var in ds.data_vars:
             da = ds[var]
             label = var.rsplit("_", 1)[0]
             if var.endswith("_ky"):
                 _plot_spectrum(axky, ky, da, label)
-            elif var.endswith("_kx"):
-                _plot_spectrum(axkx, kx, da, label)
+            elif var.endswith(rsuffix):
+                _plot_spectrum(axr, rax, da, label)
         axky.set_xlabel(r"$k_y\rho$"); axky.set_ylabel("amplitude$^2$")
-        axkx.set_xlabel(r"$k_x\rho$"); axkx.set_ylabel("amplitude$^2$")
-        for ax in (axky, axkx):
+        axr.set_xlabel(r"$k_x\rho$" if is_local else r"$x/\rho_{\rm ref}$")
+        axr.set_ylabel("amplitude$^2$")
+        for ax in (axky, axr):
             ax.set_yscale("log"); ax.grid(True, which="both", alpha=0.3)
         axky.legend(fontsize=7, ncol=2)
         fig.tight_layout()

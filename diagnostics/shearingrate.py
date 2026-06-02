@@ -43,6 +43,7 @@ Example
 """
 
 import os
+import warnings
 import numpy as np
 import matplotlib.pyplot as plt
 import h5py
@@ -169,7 +170,6 @@ def compute_exb(phi: np.ndarray, params: dict, geom: dict, coord: dict) -> dict:
         # ------------------------------------------------------------------
         dx = coord["dx"]
         x  = np.asarray(coord["x"])                 # radial grid (rho_ref units)
-        q  = np.asarray(geom["profiles"]["q"])      # safety factor profile
 
         # Flux-surface average of zonal phi: weighted sum over z
         # phi_zonal_kx has shape (nx, nz); J has shape (nz,)
@@ -181,17 +181,30 @@ def compute_exb(phi: np.ndarray, params: dict, geom: dict, coord: dict) -> dict:
         # ExB velocity (global: no C_xy factor, already in correct units)
         v_ExB = E_r.copy()
 
-        # ExB shearing rate (global, accounts for q profile):
-        # ω_ExB = (x/q) * ∂/∂x (q * E_r / x) / dx
-        omega_ExB = (x / q) * _central_diff(q * E_r / x) / dx
-    
+        # ExB shearing rate (global) needs the safety-factor profile:
+        #   ω_ExB = (x/q) * ∂/∂x (q * E_r / x) / dx
+        # The q-profile is absent if the geometry file carries no q array, so
+        # degrade gracefully to NaN rather than crashing — the zonal potential
+        # and E_r (used by the Zonal diagnostic) remain valid.
+        q = (geom.get("profiles") or {}).get("q")
+        if q is None:
+            warnings.warn(
+                "Global shearing rate: geometry has no q-profile; "
+                "omega_ExB and shearing_rms set to NaN.")
+            omega_ExB = np.full_like(E_r, np.nan)
+            shearing_rms = float("nan")
+        else:
+            q = np.asarray(q)
+            omega_ExB = (x / q) * _central_diff(q * E_r / x) / dx
+            shearing_rms = float(np.sqrt(np.mean(omega_ExB**2)))
+
         return dict(
             phi_zonal_fsavg = None,         # not defined for global geometry
             phi_zonal_x     = phi_zonal_x,
             E_r             = E_r,
             v_ExB           = v_ExB,
             omega_ExB       = omega_ExB,
-            shearing_rms    = float(np.sqrt(np.mean(omega_ExB**2))),
+            shearing_rms    = shearing_rms,
         )
 
 
@@ -295,12 +308,17 @@ class ShearingRate(CachingDiagnostic):
         t_start, t_stop : float
             Time window to process.
         """
-        saved_times = self._load_saved_times()
+        saved_times = list(self._load_saved_times())
 
         with h5py.File(self.outfile, "a") as hf:
             initialised = "time" in hf
 
-            for seg_idx, reader in enumerate(field_readers):
+            # Process later segments first so that on restart overlaps the later
+            # segment's values win (matching MultiSegmentReader semantics), and
+            # track times written during this call so overlapping timesteps are
+            # not written twice (stale-cache bug).
+            for seg_idx in range(len(field_readers) - 1, -1, -1):
+                reader = field_readers[seg_idx]
                 p     = params.get(seg_idx)
                 coord = coords[seg_idx]
                 geom  = geoms[seg_idx]
@@ -312,7 +330,7 @@ class ShearingRate(CachingDiagnostic):
                 indices = np.where(mask)[0].tolist()
 
                 for t, arrays in reader.stream_selected(indices):
-                    if self._is_already_saved(t, saved_times):
+                    if self._is_already_saved(t, np.asarray(saved_times, dtype=float)):
                         continue
 
                     phi    = arrays[0]
@@ -323,6 +341,7 @@ class ShearingRate(CachingDiagnostic):
                         initialised = True
                     else:
                         self._append_to_open_file(hf, result, t, x_local)
+                    saved_times.append(float(t))
 
     def load(self) -> dict:
         """

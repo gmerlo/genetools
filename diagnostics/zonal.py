@@ -36,6 +36,9 @@ class Zonal:
         p = run.params.get(0)
 
         _, idx = run._indices(run.field, t)
+        if idx.size == 0:
+            raise ValueError(
+                "Zonal: no field time steps in the requested window.")
         times, phiz, omeg = [], [], []
         for time, arrays in run.field.stream_selected(list(idx)):
             res = compute_exb(arrays[0], p, geom, coord)
