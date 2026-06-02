@@ -19,10 +19,15 @@ Continuation / restart runs are handled transparently: all segments
 :class:`~genetools.io.MultiSegmentReader` (overlap dedup, later segment wins).
 The grid is assumed consistent across segments; a mismatch raises a warning
 telling you to scope to a subset via ``Run(path, ext=[...])``.
+
+Both Fortran-binary and ADIOS2 BP outputs are supported: each segment's reader
+is chosen per file (binary ``field_0001`` vs BP ``field_0001.bp``), so BP runs
+work without any extra arguments (the ``adios2`` package must be installed).
 """
 
 from __future__ import annotations
 
+import os
 import warnings
 from functools import cached_property
 from pathlib import Path
@@ -35,6 +40,7 @@ from .io import (
     Geometry,
     Coordinates,
     BinaryReader,
+    BPReader,
     MultiSegmentReader,
 )
 from .diagnostics import (
@@ -170,12 +176,37 @@ class Run:
     # Readers (lazy, multi-segment aware)
     # ------------------------------------------------------------------
 
+    def _make_reader(self, file_type, ext, params_i, species=None):
+        """
+        Build one segment reader, auto-selecting Fortran-binary vs ADIOS2 BP.
+
+        The file present on disk decides: binary (``field_0001``) is preferred
+        when both exist (it needs no adios2); otherwise the BP form
+        (``field_0001.bp`` / ``field.bp``) is used, or selected from the
+        ``write_bp`` parameter when neither file is present yet. Constructing a
+        :class:`BPReader` without the ``adios2`` package raises a clear
+        ``ImportError``.
+        """
+        sp = f"_{species}" if species else ""
+        binfile = f"{self._folder}{file_type}{sp}{ext}"
+        if os.path.exists(binfile):
+            return BinaryReader(file_type, self._folder, ext, params_i,
+                                species=species)
+        bp_ext = ("" if ext == ".dat" else ext) + ".bp"
+        bpfile = f"{self._folder}{file_type}{sp}{bp_ext}"
+        if os.path.exists(bpfile) or params_i.get("in_out", {}).get("write_bp", False):
+            return BPReader(file_type, self._folder, bp_ext, params_i,
+                            species=species)
+        # Neither present: default to binary (errors clearly on first read).
+        return BinaryReader(file_type, self._folder, ext, params_i,
+                            species=species)
+
     @property
     def _field_segment_readers(self) -> list:
         """One field reader per segment (used by ShearingRate)."""
         if self._field_segments is None:
             self._field_segments = [
-                BinaryReader("field", self._folder, ext, self.params.get(i))
+                self._make_reader("field", ext, self.params.get(i))
                 for i, ext in enumerate(self.extensions)
             ]
         return self._field_segments
@@ -195,8 +226,7 @@ class Run:
             species = self.species[0]
         if species not in self._mom:
             readers = [
-                BinaryReader("mom", self._folder, ext, self.params.get(i),
-                             species=species)
+                self._make_reader("mom", ext, self.params.get(i), species=species)
                 for i, ext in enumerate(self.extensions)
             ]
             self._mom[species] = readers[0] if len(readers) == 1 \
