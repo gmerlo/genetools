@@ -2,22 +2,46 @@
 
 Post-processing toolkit for [GENE](http://genecode.org) gyrokinetic plasma simulations.
 
-`genetools` provides Python readers and plotters for the binary and ADIOS2 output files produced by the GENE code, making it straightforward to load, inspect and visualise simulation results from a Jupyter notebook or script.
+`genetools` provides Python readers and plotters for the binary and ADIOS2 output files produced by the GENE code, making it straightforward to load, inspect and visualise simulation results from a Jupyter notebook or the command line.
+
+The recommended entry point is the **`Run` facade**: point it at a run directory and every diagnostic is one line away, returning labelled [`xarray`](https://docs.xarray.dev) datasets and plots. Continuation/restart segments are discovered and stitched automatically.
+
+```python
+from genetools import Run
+
+run = Run("/path/to/run")        # discovers segments, params, geometry, coords
+run.nrg.plot()                   # energy/flux time traces
+run.spectra.plot(t=(500, 2000))  # flux spectra over a time window
+ds = run.spectra.data            # -> xarray.Dataset (labelled dims/coords/units)
+run.ballooning(ky=0.3).plot()    # ballooning mode structure
+```
+
+Or from the command line:
+
+```bash
+genetools /path/to/run --nrg
+genetools /path/to/run --spectra --t 500 2000 --save spectra.png
+genetools /path/to/run --growthrate
+```
 
 ---
 
-## Features
+## Diagnostics
 
-| Module | What it does |
+| Accessor / flag | What it computes |
 |---|---|
-| `params` | Parse GENE Fortran-90 namelist `parameters` files with physics defaults applied |
-| `data` | Stream field and moment data from Fortran binary (`.dat`, `_NNNN`) or ADIOS2 BP files |
-| `nrg` | Read and plot energy/flux diagnostic files (`nrg*`) |
-| `utils` | Scan run directories and discover available output segments |
-| `geometry` | Parse local and global geometry files |
-| `spectra` | Compute and store time-averaged flux spectra as HDF5 |
-| `coordinates` | Build coordinate arrays (kx, ky, z) |
-| `contours` | 2-D contour visualisations |
+| `run.nrg` · `--nrg` | Energy/flux time traces (`nrg*`) |
+| `run.spectra` · `--spectra` | Time-averaged flux spectra (auto local kx/ky or global) |
+| `run.profiles` · `--profiles` | Flux-surface-averaged radial profiles |
+| `run.fluxes2d` · `--fluxes2d` | x-resolved transport fluxes (Γ, Q, Π; ES/EM) |
+| `run.shearing` · `--shearing` | ExB shearing rate / zonal Eᵣ |
+| `run.contours` · `--contours` | 2-D field/moment slices |
+| `run.ballooning(ky=…)` · `--ballooning` | Field-line (ballooning) mode structure |
+| `run.growthrate` · `--growthrate` | Linear γ/ω from the field time evolution |
+| `run.amplitude` · `--amplitude` | kx/ky amplitude spectra of fields & moments |
+| `run.zonal` · `--zonal` | Zonal (ky=0) potential x-t contour |
+
+Each diagnostic exposes a uniform surface: `.data` (an `xarray.Dataset`), `.plot(t=(start, stop))`, and (where caching applies) `.save()`.
 
 ---
 
@@ -29,12 +53,15 @@ cd genetools
 pip install -e .
 ```
 
+This installs a `genetools` command-line entry point.
+
 **Dependencies** (installed automatically):
 
 - `numpy >= 1.21`
 - `matplotlib >= 3.4`
 - `f90nml >= 1.4`
 - `h5py >= 3.0`
+- `xarray >= 2022.3`
 
 **Optional** — ADIOS2 BP file support:
 
@@ -44,7 +71,52 @@ pip install adios2
 
 ---
 
-## Quick start
+## Quick start — the `Run` facade
+
+```python
+from genetools import Run
+
+run = Run("/path/to/run")            # ext=None -> all segments; or ext=["_0002", ".dat"]
+run.species                          # ['ions', 'electrons']
+run.is_local                         # True for flux-tube (spectral-x) runs
+
+# Every diagnostic: .data (xarray) + .plot(t=...) + .save()
+ds = run.profiles.data               # xarray.Dataset, dims (species, time, x)
+run.profiles.plot(t=(1000, 2000))
+
+ds = run.spectra.data                # auto local kx/ky or global, by geometry
+ds.Q_es.sel(species="ions").plot()   # label-based selection, auto-axes
+
+ky, gamma, omega, window = run.growthrate.compute()   # linear stability
+run.ballooning(ky=0.3).plot()        # mode structure along the field line
+```
+
+**Continuation runs** are handled automatically: all segments are discovered,
+their timelines merged and de-duplicated (later segment wins), and the grid is
+validated for consistency (a warning is raised if it changes across segments —
+scope to a subset with `Run(path, ext=[...])`).
+
+## Command line
+
+```bash
+genetools [PATH] --DIAG [options]
+
+genetools /run --nrg
+genetools /run --spectra --t 500 2000 --save spectra.png   # save instead of show
+genetools /run --profiles --no-show
+genetools /run --ballooning --ky 0.3
+genetools /run --contours --field 0 --ifft xy
+```
+
+Common options: `--t START STOP`, `--species …`, `--ext …`, `--save FILE`
+(a directory auto-names PNGs), `--no-show`.
+
+---
+
+## Low-level API
+
+The original modules remain available for fine-grained control (the `Run` facade
+is a thin layer over them).
 
 ### Load parameters
 

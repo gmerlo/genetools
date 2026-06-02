@@ -13,18 +13,25 @@ Post-processing toolkit for [GENE](http://genecode.org) gyrokinetic plasma simul
 pip install -e .
 pip install -e ".[dev]"       # with pytest
 
-# Run tests (test file is at root, not in tests/)
-pytest test_genetools.py -v
-pytest test_genetools.py -v -k "TestParams"              # single test class
-pytest test_genetools.py -v -k "test_defaults_applied"   # single test
+# Run tests (suite lives under tests/)
+pytest tests/ -v
+pytest tests/io/test_params.py -v -k "test_defaults_applied"   # single test
+pytest tests/diagnostics -v                                    # diagnostics only
 
 # Coverage
-pytest test_genetools.py -v --cov=genetools --cov-report=term-missing
+pytest tests/ -v --cov=genetools --cov-report=term-missing
 ```
 
-Note: `pyproject.toml` sets `testpaths = ["tests"]` but the actual test file is `test_genetools.py` at the repo root. Pass the file path explicitly to pytest.
+Note: tests are under `tests/` (matching `testpaths = ["tests"]` in `pyproject.toml`). A `genetools` console-script CLI is installed by the editable install.
 
 ## Architecture
+
+### High-level layer (the recommended entry point)
+- **`run.py`** — `Run` facade: `Run(path, ext=None)` auto-wires `set_runs` → `Params` → `Geometry`/`Coordinates` and lazily builds multi-segment readers. Exposes every diagnostic as a lazy attribute (`run.nrg`, `run.spectra`, `run.profiles`, `run.fluxes2d`, `run.shearing`, `run.contours`, `run.growthrate`, `run.amplitude`, `run.zonal`) or callable (`run.ballooning(ky=...)`). `run.spectra` auto-dispatches local (`Spectra`) vs global (`SpectraGlobal`). Validates grid consistency across continuation segments (warns on mismatch; assumes same grid). Each bound diagnostic offers `.data` (xarray), `.plot(t=(start,stop))`, `.save()`.
+- **`_xr.py`** — adapter that wraps the existing diagnostics' numpy-dict outputs into labelled `xarray.Dataset` objects (species-dim stacking, length-matched coord attachment, unit attrs from the `units` block). Phase-1 adapter; existing diagnostics still compute in numpy.
+- **`cli.py`** — flag-style CLI (`genetools /run --spectra --t 500 2000 [--save fig.png] [--no-show]`), one flag per diagnostic. Entry point: `genetools = genetools.cli:main`.
+
+The repo root **is** the `genetools` package (so `run.py` → `genetools.run`, etc.). `xarray` is a hard dependency; the data layer returns `xarray.Dataset`s.
 
 Two subpackages under the root `genetools` package:
 
@@ -35,6 +42,7 @@ Two subpackages under the root `genetools` package:
 - **`coordinates.py`** — `Coordinates()` function: builds kx, ky, z, vp, mu arrays from params.
 - **`utils.py`** — `set_runs()`: discovers output segment suffixes by scanning for `nrg*` files.
 - **`profiles_loader.py`** — `load_equilibrium_profiles()`: loads external equilibrium profiles from HDF5.
+- **`omega.py`** — `read_omega()` / `read_eigenvalues()`: parse GENE linear `omega<ext>` / `eigenvalues.dat` files (used as an optional cross-check by the growth-rate diagnostic).
 
 ### `diagnostics/` — Physics computations and plotting
 All diagnostics follow a common pattern: stream data from readers, compute physics quantities, cache results to HDF5, provide `plot()` methods.
@@ -46,6 +54,10 @@ All diagnostics follow a common pattern: stream data from readers, compute physi
 - **`shearingrate.py`** — `ShearingRate`: ExB shearing rate from zonal potential
 - **`profiles.py`** — `Profiles`: flux-surface-averaged radial profiles
 - **`fluxes2d.py`** — `Fluxes2D`: x-resolved transport fluxes (particle, heat, momentum)
+- **`ballooning.py`** — `Ballooning`: field-line (ballooning) mode structure φ/A∥/B∥(χ) for a chosen ky (local runs only); Run/xarray-native
+- **`growthrate.py`** — `GrowthRate`: linear γ/ω from the field time evolution (γ from |φ| growth, ω from phase rotation), optional `omega<ext>` cross-check; Run/xarray-native
+- **`amplitude.py`** — `AmplitudeSpectra`: time-averaged kx/ky |·|² spectra of fields and moments; reuses `Spectra.averages`; Run/xarray-native
+- **`zonal.py`** — `Zonal`: zonal (ky=0) potential x-t contour; reuses `shearingrate.compute_exb`; Run/xarray-native
 
 ### Data flow
 1. `set_runs(folder)` → segment suffixes

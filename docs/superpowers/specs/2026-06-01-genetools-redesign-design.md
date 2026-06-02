@@ -355,5 +355,14 @@ Run: `pytest tests/ -v` (and `--cov=genetools` for coverage).
   `tests/test_cli.py` pass; existing tests still pass.
 - **Phase 2:** the four new diagnostics work via `run.*` and the CLI, with passing
   diagnostic tests.
-- **Phase 3:** existing diagnostics are xarray-native, the `_xr.py` adapter is
-  removed, all tests (updated) pass; README/CLAUDE.md/notebook updated.
+- **Phase 3:** README/CLAUDE.md updated to lead with the `Run` facade + CLI + new
+  diagnostics; example notebook added (`examples/quickstart.ipynb`).
+
+  *Implementation note (2026-06):* the internal "deepen" refactor (making the
+  existing diagnostics xarray-native and removing the `_xr.py` adapter) is
+  **deferred**. It has zero user-facing effect — `.data` already returns
+  `xarray.Dataset`s via the adapter — and rewriting the seven existing
+  diagnostics plus their ~223 numpy-asserting tests carries real risk without the
+  expanded test coverage that was declined for this effort. The adapter is clean
+  and well isolated, so it stays. Revisit if/when those diagnostics are touched
+  for other reasons.
