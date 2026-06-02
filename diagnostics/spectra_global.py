@@ -383,6 +383,23 @@ class SpectraGlobal(CachingDiagnostic):
                     (time[-1] - time[0])
         return result
 
+    def dataset(self, coords, params, species, t_start=None, t_stop=None):
+        """Return the time-averaged ky-resolved spectra as an ``xarray.Dataset``."""
+        import xarray as xr
+        from genetools import _xr
+
+        raw = self.load_time_average(t_start, t_stop)
+        if not raw:
+            return xr.Dataset()
+
+        data_vars, used = _xr.stacked_vars(
+            raw, species, lambda var: ("x", "ky"))
+        x = np.asarray(coords.get("x", []))
+        if x.size == 0:
+            x = np.asarray(coords.get("x_o_a", []))
+        candidates = {"x": x, "ky": np.asarray(coords.get("ky", []))}
+        return _xr.make_dataset(data_vars, candidates, species=used, params=params)
+
     # ------------------------------------------------------------------
     # Plotting
     # ------------------------------------------------------------------

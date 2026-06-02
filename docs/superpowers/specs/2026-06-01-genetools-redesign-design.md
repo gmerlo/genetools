@@ -358,11 +358,15 @@ Run: `pytest tests/ -v` (and `--cov=genetools` for coverage).
 - **Phase 3:** README/CLAUDE.md updated to lead with the `Run` facade + CLI + new
   diagnostics; example notebook added (`examples/quickstart.ipynb`).
 
-  *Implementation note (2026-06):* the internal "deepen" refactor (making the
-  existing diagnostics xarray-native and removing the `_xr.py` adapter) is
-  **deferred**. It has zero user-facing effect — `.data` already returns
-  `xarray.Dataset`s via the adapter — and rewriting the seven existing
-  diagnostics plus their ~223 numpy-asserting tests carries real risk without the
-  expanded test coverage that was declined for this effort. The adapter is clean
-  and well isolated, so it stays. Revisit if/when those diagnostics are touched
-  for other reasons.
+  *Implementation note (2026-06):* the internal "deepen" refactor is **complete**.
+  Each existing diagnostic now owns its xarray construction via a `dataset(coords,
+  params, species, …)` method (explicit dimensions, real coords, unit attrs);
+  `NrgReader` gains `dataset(params)`. The generic inference adapter
+  (`_xr.build_dataset`/`_infer_dims`/`_coord_arrays`/`nrg_dataset`) is retired,
+  replaced by small explicit helpers in `_xr.py` (`stacked_vars`, `attach_coords`,
+  `make_dataset`, `unit_attrs`, `split_species`). The `Run` bound wrappers now call
+  the diagnostics' `dataset()` methods directly. Two latent Phase-1 bugs were
+  fixed in passing: `Profiles.plot` takes `equilibrium_profiles=` and
+  `Fluxes2D.plot` takes `show_heatmaps=` (the wrappers had passed wrong kwargs).
+  The existing numpy `load`/`load_time_average` methods are unchanged, so all 223
+  existing tests still pass.

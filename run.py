@@ -46,7 +46,6 @@ from .diagnostics import (
     ShearingRate,
     Contours,
 )
-from . import _xr
 
 
 # ---------------------------------------------------------------------------
@@ -289,9 +288,7 @@ class _BoundNrg:
 
     @property
     def data(self):
-        times, data = self._reader.read_all()
-        return _xr.nrg_dataset(times, data, self.run.species,
-                               self.run.params.get(0))
+        return self._reader.dataset(self.run.params.get(0))
 
     def plot(self, **kw):
         self._reader.plot()
@@ -299,10 +296,6 @@ class _BoundNrg:
 
 class _BoundSpectra:
     """Time-averaged flux spectra; auto-dispatches local vs global."""
-
-    _LOCAL_DIMS = {f"{lbl}_{ax}": (ax,)
-                   for lbl in ("Q_es", "Q_em", "G_es", "G_em")
-                   for ax in ("kx", "ky")}
 
     def __init__(self, run: Run):
         self.run = run
@@ -327,13 +320,8 @@ class _BoundSpectra:
     def load(self, t=None):
         self.compute(t)
         a, b = _window(t)
-        raw = self._diag.load_time_average(a, b)
-        if not raw:
-            return _xr.build_dataset({})
-        dims = None if self.is_global else self._LOCAL_DIMS
-        return _xr.build_dataset(raw, coords=self.run.coords[0],
-                                 params=self.run.params.get(0),
-                                 species=self.run.species, dims=dims)
+        return self._diag.dataset(self.run.coords[0], self.run.params.get(0),
+                                  self.run.species, a, b)
 
     @property
     def data(self):
@@ -370,13 +358,8 @@ class _BoundProfiles:
     def load(self, t=None):
         self.compute(t)
         a, b = _window(t)
-        raw = self._diag.load(a, b)
-        if not raw:
-            return _xr.build_dataset({})
-        time = raw.get("time")
-        return _xr.build_dataset(raw, coords=self.run.coords[0],
-                                 params=self.run.params.get(0),
-                                 species=self.run.species, time=time)
+        return self._diag.dataset(self.run.coords[0], self.run.params.get(0),
+                                  self.run.species, a, b)
 
     @property
     def data(self):
@@ -386,7 +369,7 @@ class _BoundProfiles:
         a, b = _bounds(t)
         self.compute(t)
         self._diag.plot(self.run.coords[0], self.run.params.get(0), a, b,
-                        eq_profs=eq_profs)
+                        equilibrium_profiles=eq_profs)
 
 
 class _BoundFluxes2D:
@@ -409,22 +392,18 @@ class _BoundFluxes2D:
     def load(self, t=None):
         self.compute(t)
         a, b = _window(t)
-        raw = self._diag.load_time_average(a, b)
-        if not raw:
-            return _xr.build_dataset({})
-        return _xr.build_dataset(raw, coords=self.run.coords[0],
-                                 params=self.run.params.get(0),
-                                 species=self.run.species)
+        return self._diag.dataset(self.run.coords[0], self.run.params.get(0),
+                                  self.run.species, a, b)
 
     @property
     def data(self):
         return self.load()
 
-    def plot(self, t=None, x_avg_lims=None, **kw):
+    def plot(self, t=None, show_heatmaps=False, **kw):
         a, b = _bounds(t)
         self.compute(t)
         self._diag.plot(self.run.coords[0], self.run.params.get(0), a, b,
-                        x_avg_lims=x_avg_lims)
+                        show_heatmaps=show_heatmaps)
 
 
 class _BoundShearing:
@@ -446,13 +425,7 @@ class _BoundShearing:
 
     def load(self, t=None):
         self.compute(t)
-        raw = self._diag.load()
-        if not raw:
-            return _xr.build_dataset({})
-        time = raw.get("time")
-        return _xr.build_dataset(raw, coords=self.run.coords[0],
-                                 params=self.run.params.get(0),
-                                 species=self.run.species, time=time)
+        return self._diag.dataset(self.run.coords[0], self.run.params.get(0))
 
     @property
     def data(self):

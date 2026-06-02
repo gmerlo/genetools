@@ -316,6 +316,26 @@ class Spectra(CachingDiagnostic):
                     flux_avg[key] = _trapz(data, x=time, axis=0) / (time[-1] - time[0])
         return flux_avg
 
+    def dataset(self, coords, params, species, t_start=None, t_stop=None):
+        """Return the time-averaged flux spectra as an ``xarray.Dataset``."""
+        import xarray as xr
+        from genetools import _xr
+
+        raw = self.load_time_average(t_start, t_stop)
+        if not raw:
+            return xr.Dataset()
+
+        def dim_of(var):                       # "Q_es_kx" -> ("kx",)
+            return (var.rsplit("_", 1)[1],)
+
+        data_vars, used = _xr.stacked_vars(raw, species, dim_of)
+        candidates = {
+            "kx": np.asarray(coords.get("kx_2", coords.get("kx", []))),
+            "ky": np.asarray(coords.get("ky", [])),
+            "z":  np.asarray(coords.get("z", [])),
+        }
+        return _xr.make_dataset(data_vars, candidates, species=used, params=params)
+
     def plot(self, fld_reader, mom_readers, coords, geom, params_list,
              t_start, t_stop):
         if hasattr(params_list, 'tolist'):

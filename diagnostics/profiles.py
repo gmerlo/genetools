@@ -317,6 +317,23 @@ class Profiles(CachingDiagnostic):
 
         return result
 
+    def dataset(self, coords, params, species, t_start=None, t_stop=None):
+        """Return the radial profiles as an ``xarray.Dataset`` (dims species, time, x)."""
+        import xarray as xr
+        from genetools import _xr
+
+        raw = self.load(t_start, t_stop)
+        if not raw:
+            return xr.Dataset()
+        time = np.asarray(raw.get("time", []))
+        data_vars, used = _xr.stacked_vars(
+            raw, species, lambda var: ("time", "x"), coord_keys=("time",))
+        x = np.asarray(coords.get("x", []))
+        if x.size == 0:
+            x = np.asarray(coords.get("x_o_a", []))
+        candidates = {"time": time, "x": x}
+        return _xr.make_dataset(data_vars, candidates, species=used, params=params)
+
     # ------------------------------------------------------------------
     # Background profiles
     # ------------------------------------------------------------------

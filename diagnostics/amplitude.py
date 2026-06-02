@@ -90,17 +90,15 @@ class AmplitudeSpectra:
     def data(self):
         """Return an ``xarray.Dataset`` of kx/ky amplitude spectra."""
         out = self.compute() if self._cache is None else self._cache
-        coord = dict(self.run.coords[0])
-        kx2 = np.asarray(coord.get("kx_2", []))
-        if kx2.size:
-            coord["kx"] = kx2          # kx spectra are over |kx| (nx//2+1)
-        bases = set()
-        for key in out:
-            _, var = _xr._split_species(key, self.run.species)
-            bases.add(var)
-        dims = {v: ("kx",) if v.endswith("_kx") else ("ky",) for v in bases}
-        return _xr.build_dataset(out, coords=coord, params=self.run.params.get(0),
-                                 species=self.run.species, dims=dims)
+        coord = self.run.coords[0]
+        data_vars, used = _xr.stacked_vars(
+            out, self.run.species, lambda var: (var.rsplit("_", 1)[1],))
+        candidates = {
+            "kx": np.asarray(coord.get("kx_2", coord.get("kx", []))),
+            "ky": np.asarray(coord.get("ky", [])),
+        }
+        return _xr.make_dataset(data_vars, candidates, species=used,
+                                params=self.run.params.get(0))
 
     def plot(self, t=None, **kw):
         """Plot ky and kx amplitude spectra (log-y) of all quantities."""

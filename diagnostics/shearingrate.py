@@ -344,6 +344,31 @@ class ShearingRate(CachingDiagnostic):
 
         return data
 
+    def dataset(self, coords, params, species=None):
+        """Return the shearing-rate diagnostics as an ``xarray.Dataset``."""
+        import xarray as xr
+        from genetools import _xr
+
+        raw = self.load()
+        if not raw or np.asarray(raw.get("time", [])).size == 0:
+            return xr.Dataset()
+        time = np.asarray(raw["time"])
+
+        def dim_of(var):
+            if var == "shearing_rms":
+                return ("time",)
+            if var == "abs_phi_zonal_kx":
+                return ("time", "kx")
+            return ("time", "x")
+
+        data_vars, _ = _xr.stacked_vars(raw, [], dim_of, coord_keys=("time",))
+        x = np.asarray(coords.get("x", []))
+        if x.size == 0:
+            x = np.asarray(coords.get("x_o_a", []))
+        candidates = {"time": time, "x": x,
+                      "kx": np.asarray(coords.get("kx", []))}
+        return _xr.make_dataset(data_vars, candidates, params=params)
+
     def plot(self, coord=None, t_start=None, t_stop=None) -> None:
         """
         Plot E_r and ω_ExB diagnostics from the saved HDF5 file.

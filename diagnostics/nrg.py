@@ -261,6 +261,33 @@ class NrgReader:
         self.data  = sorted_data[:, :, keep]
         return self.times, self.data
 
+    # Named GENE nrg columns (others remain in the raw ``nrg`` variable).
+    _NAMED_COLS = {0: "n_sq", 1: "T_par_sq", 2: "T_perp_sq", 3: "u_par_sq",
+                   6: "Q_es", 7: "Q_em", 8: "Gamma_es", 9: "Gamma_em"}
+
+    def dataset(self, params: dict = None):
+        """Return the nrg data as an ``xarray.Dataset`` (dims species, time)."""
+        import xarray as xr
+        from genetools import _xr
+
+        if self.times is None or self.data is None:
+            self.read_all()
+        data = self.data
+        n_spec, n_cols, _ = data.shape
+        sp = list(self.specnames)[:n_spec]
+        if len(sp) < n_spec:
+            sp += [f"sp{i}" for i in range(len(sp), n_spec)]
+
+        coords = {"species": sp, "time": np.asarray(self.times),
+                  "column": np.arange(n_cols)}
+        data_vars = {"nrg": (("species", "column", "time"), data)}
+        for col, name in self._NAMED_COLS.items():
+            if col < n_cols:
+                data_vars[name] = (("species", "time"), data[:, col, :])
+        ds = xr.Dataset(data_vars, coords=coords)
+        ds.attrs.update(_xr.unit_attrs(params))
+        return ds
+
     def _read_file(self, filepath: str) -> tuple:
         """
         Parse a single ``nrg`` file.

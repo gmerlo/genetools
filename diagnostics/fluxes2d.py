@@ -641,6 +641,21 @@ class Fluxes2D(CachingDiagnostic):
 
         return result
 
+    def dataset(self, coords, params, species, t_start=None, t_stop=None):
+        """Return the time-averaged x-resolved fluxes as an ``xarray.Dataset``."""
+        import xarray as xr
+        from genetools import _xr
+
+        raw = self.load_time_average(t_start, t_stop)
+        if not raw:
+            return xr.Dataset()
+        x = np.asarray(raw.get("x", coords.get("x", [])))
+        if x.size == 0:
+            x = np.asarray(coords.get("x_o_a", []))
+        data_vars, used = _xr.stacked_vars(
+            raw, species, lambda var: ("x",), coord_keys=("x",))
+        return _xr.make_dataset(data_vars, {"x": x}, species=used, params=params)
+
     # ------------------------------------------------------------------
     # Plotting
     # ------------------------------------------------------------------
