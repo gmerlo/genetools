@@ -21,7 +21,7 @@ import argparse
 import sys
 from pathlib import Path
 
-# Diagnostic flag -> Run accessor attribute. Phase 2 extends this mapping.
+# Diagnostic flag -> Run accessor attribute.
 DIAGNOSTICS = {
     "nrg": "nrg",
     "spectra": "spectra",
@@ -29,6 +29,10 @@ DIAGNOSTICS = {
     "fluxes2d": "fluxes2d",
     "shearing": "shearing",
     "contours": "contours",
+    "ballooning": "ballooning",
+    "growthrate": "growthrate",
+    "amplitude": "amplitude",
+    "zonal": "zonal",
 }
 
 

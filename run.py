@@ -210,6 +210,13 @@ class Run:
     def _mom_dict(self) -> dict:
         return {n: self.mom(n) for n in self.species}
 
+    def _indices(self, reader, t):
+        """Return ``(all_times, selected_indices)`` for time window *t*."""
+        a, b = _bounds(t)
+        times = reader.read_all_times()
+        idx = np.where((times >= a) & (times <= b))[0]
+        return times, idx
+
     # ------------------------------------------------------------------
     # Diagnostics
     # ------------------------------------------------------------------
@@ -237,6 +244,26 @@ class Run:
     @cached_property
     def contours(self):
         return _BoundContours(self)
+
+    def ballooning(self, ky=None, **kw):
+        """Ballooning mode structure for a chosen ``ky`` (local runs only)."""
+        from .diagnostics.ballooning import Ballooning
+        return Ballooning(self, ky=ky, **kw)
+
+    @cached_property
+    def growthrate(self):
+        from .diagnostics.growthrate import GrowthRate
+        return GrowthRate(self)
+
+    @cached_property
+    def amplitude(self):
+        from .diagnostics.amplitude import AmplitudeSpectra
+        return AmplitudeSpectra(self)
+
+    @cached_property
+    def zonal(self):
+        from .diagnostics.zonal import Zonal
+        return Zonal(self)
 
     def __repr__(self) -> str:
         geom = "local" if self.is_local else "global"

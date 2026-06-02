@@ -20,6 +20,10 @@ from .spectra import Spectra
 from .profiles import Profiles
 from .fluxes2d import Fluxes2D
 from .spectra_global import SpectraGlobal
+from .ballooning import Ballooning
+from .growthrate import GrowthRate
+from .amplitude import AmplitudeSpectra
+from .zonal import Zonal
 
 __all__ = [
     "NrgReader",
@@ -29,4 +33,8 @@ __all__ = [
     "Profiles",
     "Fluxes2D",
     "SpectraGlobal",
+    "Ballooning",
+    "GrowthRate",
+    "AmplitudeSpectra",
+    "Zonal",
 ]
