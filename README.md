@@ -231,4 +231,4 @@ Pull requests and issue reports are welcome. Please run the test suite before su
 
 ## License
 
-This project is research software. See `LICENSE` for details.
+Released under the [MIT License](LICENSE). © 2026 Gabriele Merlo.

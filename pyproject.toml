@@ -8,6 +8,12 @@ version = "0.1.0"
 description = "Post-processing toolkit for GENE gyrokinetic simulations"
 readme = "README.md"
 requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "Gabriele Merlo" }]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+]
 dependencies = [
     "numpy>=1.21",
     "matplotlib>=3.4",
