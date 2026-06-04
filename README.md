@@ -231,4 +231,4 @@ Pull requests and issue reports are welcome. Please run the test suite before su
 
 ## License
 
-Released under the [MIT License](LICENSE). © 2026 Gabriele Merlo.
+Released under the [Mozilla Public License 2.0](LICENSE). © 2026 Gabriele Merlo.
