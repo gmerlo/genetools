@@ -574,10 +574,6 @@ class MultiSegmentReader:
         if not global_indices:
             return
 
-        # Map each global index to its (seg_idx, local_iter)
-        # and build a position map for output ordering
-        request_pos = {g_idx: pos for pos, g_idx in enumerate(global_indices)}
-
         # Group by segment, preserving local iteration order within each
         seg_requests = defaultdict(list)
         for g_idx in global_indices:

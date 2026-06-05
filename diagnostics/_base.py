@@ -58,6 +58,21 @@ class CachingDiagnostic:
         tol = max(1e-6, abs(time) * 1e-6)
         return bool(np.any(np.abs(saved_times - time) <= tol))
 
+    @staticmethod
+    def _time_dtype(params) -> type:
+        """
+        Resolve the on-disk time-axis dtype from GENE's output precision.
+
+        Single-precision runs store time as ``float32``, double-precision as
+        ``float64`` — matching the precision GENE wrote the data with. Used
+        consistently for the cached ``time`` dataset across all diagnostics.
+        Time *comparisons* (dedup) are always done in float64.
+        """
+        prec = "double"
+        if isinstance(params, dict):
+            prec = str(params.get("info", {}).get("precision", "double")).lower()
+        return np.float32 if prec.startswith("s") else np.float64
+
     # ------------------------------------------------------------------
     # Time averaging
     # ------------------------------------------------------------------

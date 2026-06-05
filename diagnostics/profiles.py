@@ -163,10 +163,10 @@ class Profiles(CachingDiagnostic):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _init_h5(f, species_names: list, nx: int):
+    def _init_h5(f, species_names: list, nx: int, time_dtype=np.float64):
         """Create all datasets in a newly opened HDF5 file handle."""
         f.create_dataset("time", shape=(0,), maxshape=(None,),
-                         dtype=np.float64, chunks=True)
+                         dtype=time_dtype, chunks=True)
         for name in species_names:
             grp = f.create_group(name)
             for key in ("T", "n", "u"):
@@ -268,7 +268,8 @@ class Profiles(CachingDiagnostic):
                     sp_data[name] = {"T": T_fsa, "n": n_fsa, "u": u_fsa}
 
                 if not initialised:
-                    self._init_h5(hf, species_names, nx)
+                    self._init_h5(hf, species_names, nx,
+                                  time_dtype=self._time_dtype(params))
                     initialised = True
 
                 self._append_to_open_file(hf, species_names, sp_data, tm)

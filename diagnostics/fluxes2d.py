@@ -284,10 +284,10 @@ class Fluxes2D(CachingDiagnostic):
 
     @staticmethod
     def _init_h5(f, species_names: list, nx: int, x: np.ndarray,
-                 has_em: bool):
+                 has_em: bool, time_dtype=np.float64):
         """Create all datasets in a newly opened HDF5 file handle."""
         f.create_dataset("time", shape=(0,), maxshape=(None,),
-                         dtype=np.float64, chunks=True)
+                         dtype=time_dtype, chunks=True)
         f.create_dataset("x", data=x)
         for name in species_names:
             grp = f.create_group(name)
@@ -564,7 +564,8 @@ class Fluxes2D(CachingDiagnostic):
                     sp_data[name] = result
 
                 if not initialised:
-                    self._init_h5(hf, species_names, nx, x, has_em)
+                    self._init_h5(hf, species_names, nx, x, has_em,
+                                  time_dtype=self._time_dtype(params))
                     initialised = True
 
                 self._append_to_open_file(hf, species_names, sp_data, tm)

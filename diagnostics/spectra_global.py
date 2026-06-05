@@ -77,17 +77,17 @@ def _compute_flux_yspectra(a: np.ndarray, b: np.ndarray,
     np.ndarray
         Real array of shape ``(nx, nky)``.
     """
-    nx, nky, nz = a.shape
-    out = np.zeros((nx, nky))
+    nky = a.shape[1]
 
-    # ky=0: no factor 2
-    cross_0 = np.real(np.conj(a[:, 0, :]) * b[:, 0, :])  # (nx, nz)
-    out[:, 0] = np.sum(cross_0 * J_norm, axis=1)
-
-    # ky>0: factor 2 for Hermitian symmetry
-    for iky in range(1, nky):
-        cross_k = np.real(np.conj(a[:, iky, :]) * b[:, iky, :])
-        out[:, iky] = 2.0 * np.sum(cross_k * J_norm, axis=1)
+    # z-summed cross-correlation per ky (vectorised over ky), with Hermitian
+    # weighting: factor 1 for ky=0, factor 2 for ky>0. J_norm may be (nx, nz)
+    # or (nz,); insert the ky axis so it broadcasts over ky either way.
+    J = np.asarray(J_norm)
+    Jb = J[:, np.newaxis, :] if J.ndim == 2 else J[np.newaxis, np.newaxis, :]
+    cross = np.real(np.conj(a) * b)                       # (nx, nky, nz)
+    out = np.sum(cross * Jb, axis=2)                      # (nx, nky)
+    if nky > 1:
+        out[:, 1:] *= 2.0
 
     # Division by C_xy (applied after z-summation, matching MATLAB)
     C_xy_arr = np.asarray(C_xy)
@@ -124,10 +124,11 @@ class SpectraGlobal(CachingDiagnostic):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _init_h5(f, species_names: list, nx: int, nky: int, has_em: bool):
+    def _init_h5(f, species_names: list, nx: int, nky: int, has_em: bool,
+                 time_dtype=np.float64):
         """Create all datasets in a newly opened HDF5 file handle."""
         f.create_dataset("time", shape=(0,), maxshape=(None,),
-                         dtype=np.float64, chunks=True)
+                         dtype=time_dtype, chunks=True)
         es_keys = ["Qes_ky", "Ges_ky", "Pes_ky"]
         em_keys = ["Qem_ky", "Gem_ky", "Pem_ky"] if has_em else []
         for name in species_names:
@@ -310,7 +311,8 @@ class SpectraGlobal(CachingDiagnostic):
                     sp_data[name] = result
 
                 if not initialised:
-                    self._init_h5(hf, species_names, nx, nky, has_em)
+                    self._init_h5(hf, species_names, nx, nky, has_em,
+                                  time_dtype=self._time_dtype(params))
                     initialised = True
 
                 self._append_to_open_file(hf, species_names, sp_data, tm)

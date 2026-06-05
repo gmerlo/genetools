@@ -40,19 +40,20 @@ class Spectra(CachingDiagnostic):
         idx_mom    = np.where((times_mom >= t_start) & (times_mom <= t_stop))[0][::stride_mom]
         if os.path.exists(self.outfile):
             with h5py.File(self.outfile, "r") as f:
-                saved_times = f["time"][...] if "time" in f else np.array([], dtype=np.float32)
+                saved_times = f["time"][...] if "time" in f else np.array([], dtype=np.float64)
         else:
-            saved_times = np.array([], dtype=np.float32)
+            saved_times = np.array([], dtype=np.float64)
 
         if saved_times.size == 0:
             return idx_fld.tolist(), idx_mom.tolist()
 
-        saved_sorted = np.sort(saved_times.astype(np.float32))
+        # Compare in float64 regardless of on-disk precision (tolerance-based).
+        saved_sorted = np.sort(saved_times.astype(np.float64))
 
         def _filter_unsaved(indices, all_times):
             if len(indices) == 0:
                 return []
-            candidate = np.float32(all_times[indices])
+            candidate = all_times[indices].astype(np.float64)
             tol = np.maximum(1e-6, np.abs(candidate) * 1e-6)
             pos = np.searchsorted(saved_sorted, candidate)
             found = np.zeros(len(candidate), dtype=bool)
@@ -161,12 +162,13 @@ class Spectra(CachingDiagnostic):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _init_h5(f, coords, species_names, fluxes, n_alloc=1):
+    def _init_h5(f, coords, species_names, fluxes, n_alloc=1,
+                 time_dtype=np.float64):
         """Create all datasets in a newly opened HDF5 file, pre-allocated."""
         f.create_dataset("kx",   data=coords["kx"])
         f.create_dataset("ky",   data=coords["ky"])
         f.create_dataset("z",    data=coords["z"])
-        f.create_dataset("time", shape=(n_alloc,), dtype=np.float32,
+        f.create_dataset("time", shape=(n_alloc,), dtype=time_dtype,
                          maxshape=(None,), chunks=True)
         for i_sp, name in enumerate(species_names):
             Q_es, Q_em, G_es, G_em = fluxes[i_sp]
@@ -200,7 +202,7 @@ class Spectra(CachingDiagnostic):
                         else:
                             ds.resize((new_size, ds.shape[1]))
 
-        f["time"][row_idx] = np.float32(time_value)
+        f["time"][row_idx] = time_value   # cast to the dataset's dtype by h5py
         for i_sp, name in enumerate(species_names):
             Q_es, Q_em, G_es, G_em = fluxes[i_sp]
             for label, flux in zip(["Q_es", "Q_em", "G_es", "G_em"],
@@ -281,7 +283,8 @@ class Spectra(CachingDiagnostic):
 
                     if not initialised:
                         self._init_h5(hf, coords, species_names, fluxes,
-                                      n_alloc=n_missing)
+                                      n_alloc=n_missing,
+                                      time_dtype=self._time_dtype(params))
                         initialised = True
 
                     self._write_to_open_file(hf, fluxes, species_names, tm,

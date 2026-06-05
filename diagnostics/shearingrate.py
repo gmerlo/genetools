@@ -237,9 +237,10 @@ class ShearingRate(CachingDiagnostic):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _init_h5(f, result: dict, time: float, nx: int, x_local: bool) -> None:
+    def _init_h5(f, result: dict, time: float, nx: int, x_local: bool,
+                 time_dtype=np.float64) -> None:
         """Create all datasets in a newly opened HDF5 file handle."""
-        f.create_dataset("time",        data=np.array([time]),
+        f.create_dataset("time",        data=np.array([time], dtype=time_dtype),
                          maxshape=(None,), chunks=(1,))
         f.create_dataset("phi_zonal_x", data=result["phi_zonal_x"][np.newaxis, :],
                          maxshape=(None, nx), chunks=(1, nx))
@@ -341,7 +342,8 @@ class ShearingRate(CachingDiagnostic):
                     result = compute_exb(phi, p, geom, coord)
 
                     if not initialised:
-                        self._init_h5(hf, result, t, nx, x_local)
+                        self._init_h5(hf, result, t, nx, x_local,
+                                      time_dtype=self._time_dtype(p))
                         initialised = True
                     else:
                         self._append_to_open_file(hf, result, t, x_local)

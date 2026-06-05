@@ -329,7 +329,8 @@ class _BoundNrg:
     def data(self):
         return self._reader.dataset(self.run.params.get(0))
 
-    def plot(self, **kw):
+    def plot(self, t=None):
+        # nrg plots the full time series; t is accepted for a uniform facade API.
         self._reader.plot()
 
 
@@ -366,12 +367,13 @@ class _BoundSpectra:
     def data(self):
         return self.load()
 
-    def plot(self, t=None, **kw):
+    def plot(self, t=None, x_avg_lims=None):
         a, b = _bounds(t)
         r = self.run
         if self.is_global:
             self.compute(t)
-            self._diag.plot(r.coords[0], r.params.get(0), a, b, **kw)
+            self._diag.plot(r.coords[0], r.params.get(0), a, b,
+                            x_avg_lims=x_avg_lims)
         else:
             self._diag.plot(r.field, r._mom_list(), r.coords, r.geometry,
                             r.params, a, b)
@@ -404,7 +406,7 @@ class _BoundProfiles:
     def data(self):
         return self.load()
 
-    def plot(self, t=None, eq_profs=None, **kw):
+    def plot(self, t=None, eq_profs=None):
         a, b = _bounds(t)
         self.compute(t)
         self._diag.plot(self.run.coords[0], self.run.params.get(0), a, b,
@@ -438,7 +440,7 @@ class _BoundFluxes2D:
     def data(self):
         return self.load()
 
-    def plot(self, t=None, show_heatmaps=False, **kw):
+    def plot(self, t=None, show_heatmaps=False):
         a, b = _bounds(t)
         self.compute(t)
         self._diag.plot(self.run.coords[0], self.run.params.get(0), a, b,
@@ -470,7 +472,7 @@ class _BoundShearing:
     def data(self):
         return self.load()
 
-    def plot(self, t=None, **kw):
+    def plot(self, t=None):
         a, b = _bounds(t)
         self.compute(t)
         self._diag.plot(self.run.coords[0], a, b)

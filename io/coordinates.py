@@ -73,7 +73,7 @@ def load_coord_single_run(folder, file_number, params):
             else:
                 kx_modes = np.concatenate((kx_pos, -kx_pos[1:][::-1]))
 
-            kx = (kx_modes * kxmin).reshape(-1)
+            kx = kx_modes * kxmin
             kx_2 = kx[:half + 1]
 
             x = np.linspace(-lx / 2, lx / 2, nx + 1)[:-1]
