@@ -218,10 +218,44 @@ class ProfileDiag:
             avg = ds.integrate("time") / span if span > 0 else ds.isel(time=0)
         return avg, ds
 
-    def plot(self, t=None, si=False, **kw):
-        """Plot time-averaged radial profiles (8 panels), species overlaid."""
-        avg, ds = self._time_average(t)
+    def _si_available(self) -> bool:
+        """True if the parameter file provides real reference units (not the
+        all-1.0 defaults), so an SI conversion is physically meaningful."""
+        units = self.run.params.get(0).get("units", {}) or {}
+        return any(float(units.get(k, 1.0)) != 1.0
+                   for k in ("Lref", "Bref", "Tref", "nref", "mref"))
 
+    def plot(self, t=None, si=None, **kw):
+        """
+        Plot time-averaged radial profiles (8 panels), species overlaid.
+
+        Always plots gyro-Bohm (normalised) units, and *additionally* plots the
+        SI version when the parameter file provides reference units. Override
+        with ``si=False`` (GB only) or ``si=True`` (SI only).
+
+        Returns a single figure, or a list ``[gb_fig, si_fig]`` when both are
+        drawn.
+        """
+        avg, ds = self._time_average(t)
+        si_ok = self._si_available()
+
+        show_gb = si in (None, False)
+        show_si = si is True or (si is None and si_ok)
+        if si is True and not si_ok:
+            warnings.warn("profile_diag: SI requested but the parameter file has "
+                          "no reference units; plotting gyro-Bohm instead.")
+            show_gb, show_si = True, False
+
+        figs = []
+        if show_gb:
+            figs.append(self._plot_panels(avg, ds, si=False))
+        if show_si:
+            figs.append(self._plot_panels(avg, ds, si=True))
+        plt.show()
+        return figs[0] if len(figs) == 1 else figs
+
+    def _plot_panels(self, avg, ds, si: bool):
+        """Draw one 8-panel figure in gyro-Bohm (si=False) or SI (si=True)."""
         panels = [("T", r"$T$"), ("n", r"$n$"),
                   ("omt", r"$R/L_T$"), ("omn", r"$R/L_n$"),
                   ("Gamma", r"$\Gamma$"), ("Q", r"$Q$"),
@@ -230,8 +264,7 @@ class ProfileDiag:
         x = ds["x"].values
 
         def pick(key):
-            k = f"{key}_SI" if (si and f"{key}_SI" in avg) else key
-            return k
+            return f"{key}_SI" if (si and f"{key}_SI" in avg) else key
 
         fig, axes = plt.subplots(2, 4, figsize=(16, 7), sharex=True)
         for ax, (key, title) in zip(axes.flat, panels):
@@ -249,7 +282,7 @@ class ProfileDiag:
         for ax in axes[-1, :]:
             ax.set_xlabel(r"$x/a$")
         axes[0, 0].legend(fontsize=7)
-        fig.suptitle("Radial profiles (profile_<species>)" + (" [SI]" if si else ""))
+        fig.suptitle("Radial profiles (profile_<species>)"
+                     + (" [SI]" if si else " [gyro-Bohm]"))
         fig.tight_layout()
-        plt.show()
         return fig
