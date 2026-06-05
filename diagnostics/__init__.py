@@ -28,6 +28,7 @@ from .ballooning import Ballooning
 from .growthrate import GrowthRate
 from .amplitude import AmplitudeSpectra
 from .zonal import Zonal
+from .profile_diag import ProfileDiag
 
 __all__ = [
     "NrgReader",
@@ -41,4 +42,5 @@ __all__ = [
     "GrowthRate",
     "AmplitudeSpectra",
     "Zonal",
+    "ProfileDiag",
 ]

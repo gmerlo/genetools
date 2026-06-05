@@ -40,6 +40,7 @@ genetools /path/to/run --growthrate
 | `run.growthrate` · `--growthrate` | Linear γ/ω from the field time evolution |
 | `run.amplitude` · `--amplitude` | kx/ky amplitude spectra of fields & moments |
 | `run.zonal` · `--zonal` | Zonal (ky=0) potential x-t contour |
+| `run.profile_diag` · `--profile-diag` | GENE `profile_<species>` radial profiles + turbulent/neoclassical fluxes + bootstrap current (global nonlinear) |
 
 Each diagnostic exposes a uniform surface: `.data` (an `xarray.Dataset`), `.plot(t=(start, stop))`, and (where caching applies) `.save()`.
 

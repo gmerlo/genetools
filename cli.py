@@ -37,6 +37,7 @@ DIAGNOSTICS = {
     "growthrate": "growthrate",
     "amplitude": "amplitude",
     "zonal": "zonal",
+    "profile_diag": "profile_diag",
 }
 
 
@@ -54,7 +55,8 @@ def build_parser() -> argparse.ArgumentParser:
     group = p.add_argument_group("diagnostics (choose one)")
     diag = group.add_mutually_exclusive_group(required=True)
     for flag in DIAGNOSTICS:
-        diag.add_argument(f"--{flag}", action="store_true",
+        diag.add_argument(f"--{flag.replace('_', '-')}", dest=flag,
+                          action="store_true",
                           help=f"Run the {flag} diagnostic.")
 
     p.add_argument("--t", nargs=2, type=float, metavar=("START", "STOP"),

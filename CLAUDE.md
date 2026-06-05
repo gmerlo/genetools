@@ -58,6 +58,7 @@ All diagnostics follow a common pattern: stream data from readers, compute physi
 - **`growthrate.py`** — `GrowthRate`: linear γ/ω from the field time evolution (γ from |φ| growth, ω from phase rotation), optional `omega<ext>` cross-check; Run/xarray-native
 - **`amplitude.py`** — `AmplitudeSpectra`: time-averaged kx/ky |·|² spectra of fields and moments; reuses `Spectra.averages`; Run/xarray-native
 - **`zonal.py`** — `Zonal`: zonal (ky=0) potential x-t contour; reuses `shearingrate.compute_exb`; Run/xarray-native
+- **`profile_diag.py`** — `ProfileDiag`: reads GENE `profile_<species>` ASCII output (from `diag_df.F90`; global nonlinear runs) — radial T/n/gradients + turbulent (Γ/Q/Π) + neoclassical fluxes + bootstrap current as a time series; returns xarray (species, time, x) with normalized + `*_SI` variables. `run.profile_diag` / `--profile-diag`
 
 ### Data flow
 1. `set_runs(folder)` → segment suffixes

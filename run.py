@@ -298,6 +298,11 @@ class Run:
         from .diagnostics.zonal import Zonal
         return Zonal(self)
 
+    @cached_property
+    def profile_diag(self):
+        from .diagnostics.profile_diag import ProfileDiag
+        return ProfileDiag(self)
+
     def __repr__(self) -> str:
         geom = "local" if self.is_local else "global"
         return (f"<Run {self.path.name!r} | {geom} | "

@@ -191,8 +191,13 @@ class Params:
                 continue
 
             default = copy.deepcopy(self._DEFAULTS.get(group_name, {}))
+            # f90nml lower-cases namelist keys, but the defaults use mixed case
+            # (Tref, Lref, Bpar, sign_Ip_CW, ...). Merge case-insensitively so
+            # file values actually override the matching default rather than
+            # being added under a separate lower-cased key.
+            canon = {k.lower(): k for k in default}
             for k, v in values.items():
-                default[k] = v
+                default[canon.get(k.lower(), k)] = v
 
             if group_name == "species":
                 param_dict.setdefault("species", []).append(default)
