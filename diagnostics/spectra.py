@@ -298,25 +298,14 @@ class Spectra(CachingDiagnostic):
         if not os.path.exists(self.outfile):
             return {}
         with h5py.File(self.outfile, "r") as f:
-            time = f["time"][...]
-            sorted_idx = np.argsort(time)
-            time = time[sorted_idx]
-
-            mask = np.ones(len(time), dtype=bool)
-            if t_start is not None:
-                mask &= time >= t_start
-            if t_stop is not None:
-                mask &= time <= t_stop
-
-            # Compute final index array once for HDF5 fancy indexing
-            final_idx = np.sort(sorted_idx[mask])
-            time = time[mask]
+            time, read_idx, unsort = self._select_window(
+                f["time"][...], t_start, t_stop)
 
             flux_avg = {}
             for key in f.keys():
                 if key in ("time", "kx", "ky", "z"):
                     continue
-                data = f[key][final_idx]
+                data = f[key][read_idx][unsort]
                 if len(time) <= 1:
                     flux_avg[key] = data[0] if len(time) == 1 else data
                 else:

@@ -339,16 +339,7 @@ class SpectraGlobal(CachingDiagnostic):
             if time.size == 0:
                 return {}
 
-            idx = np.argsort(time)
-            time = time[idx]
-
-            mask = np.ones(len(time), dtype=bool)
-            if t_start is not None:
-                mask &= time >= t_start
-            if t_stop is not None:
-                mask &= time <= t_stop
-            final_idx = np.sort(idx[mask])
-            time = time[mask]
+            time, read_idx, unsort = self._select_window(time, t_start, t_stop)
 
             result = {"time": time}
             species_names = [k for k in f.keys() if k != "time"]
@@ -356,7 +347,7 @@ class SpectraGlobal(CachingDiagnostic):
                 grp = f[name]
                 for key in grp.keys():
                     # Dataset shape: (nx, nky, n_times)
-                    data = grp[key][:, :, final_idx]
+                    data = grp[key][:, :, read_idx][:, :, unsort]
                     # Transpose to (n_times, nx, nky)
                     result[f"{name}_{key}"] = np.transpose(data, (2, 0, 1))
 

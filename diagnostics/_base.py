@@ -59,6 +59,39 @@ class CachingDiagnostic:
         return bool(np.any(np.abs(saved_times - time) <= tol))
 
     @staticmethod
+    def _select_window(time, t_start=None, t_stop=None):
+        """
+        Sort cached times, apply a window, and build HDF5 read indices.
+
+        The cached HDF5 rows are not guaranteed to be in time order (windows
+        may be computed out of order; restarts append later segments first), so
+        loading must pair each time with its own row. h5py fancy indexing
+        requires strictly increasing indices, hence the read/unsort pair.
+
+        Returns
+        -------
+        times : np.ndarray
+            Selected times in ascending time order.
+        read_idx : np.ndarray of int
+            File positions to read, strictly increasing (h5py-safe).
+        unsort : np.ndarray of int
+            Permutation such that ``data[..., read_idx][..., unsort]`` is in
+            ascending time order, aligned with *times*.
+        """
+        time = np.asarray(time)
+        order_t = np.argsort(time, kind="stable")
+        tsorted = time[order_t]
+        mask = np.ones(tsorted.size, dtype=bool)
+        if t_start is not None:
+            mask &= tsorted >= t_start
+        if t_stop is not None:
+            mask &= tsorted <= t_stop
+        file_pos = order_t[mask]                  # file rows, in time order
+        read_idx = np.sort(file_pos)
+        unsort = np.argsort(np.argsort(file_pos, kind="stable"), kind="stable")
+        return tsorted[mask], read_idx, unsort
+
+    @staticmethod
     def _time_dtype(params) -> type:
         """
         Resolve the on-disk time-axis dtype from GENE's output precision.

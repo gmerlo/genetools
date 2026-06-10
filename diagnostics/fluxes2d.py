@@ -592,16 +592,7 @@ class Fluxes2D(CachingDiagnostic):
             if time.size == 0:
                 return {}
 
-            idx = np.argsort(time)
-            time = time[idx]
-
-            mask = np.ones(len(time), dtype=bool)
-            if t_start is not None:
-                mask &= time >= t_start
-            if t_stop is not None:
-                mask &= time <= t_stop
-            final_idx = np.sort(idx[mask])
-            time = time[mask]
+            time, read_idx, unsort = self._select_window(time, t_start, t_stop)
 
             result = {"time": time}
             if "x" in f:
@@ -611,7 +602,7 @@ class Fluxes2D(CachingDiagnostic):
             for name in species_names:
                 grp = f[name]
                 for key in grp.keys():
-                    data = grp[key][:, final_idx]  # (nx, n_selected)
+                    data = grp[key][:, read_idx][:, unsort]
                     result[f"{name}_{key}"] = data.T  # (n_times, nx)
 
         return result

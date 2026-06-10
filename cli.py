@@ -75,8 +75,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="ky mode (ballooning).")
     p.add_argument("--field", type=int, default=0,
                    help="Field/moment index (contours).")
-    p.add_argument("--ifft", default=None, choices=[None, "x", "y", "xy"],
-                   help="Inverse FFT axes (contours).")
+    p.add_argument("--ifft", default=None, choices=["x", "y", "xy"],
+                   help="Inverse FFT axes (contours); omit for spectral view.")
     return p
 
 

@@ -466,7 +466,11 @@ class _BoundShearing:
 
     def load(self, t=None):
         self.compute(t)
-        return self._diag.dataset(self.run.coords[0], self.run.params.get(0))
+        ds = self._diag.dataset(self.run.coords[0], self.run.params.get(0))
+        a, b = _window(t)
+        if (a is not None or b is not None) and "time" in ds.coords:
+            ds = ds.sel(time=slice(a, b))
+        return ds
 
     @property
     def data(self):

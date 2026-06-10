@@ -36,9 +36,13 @@ class AmplitudeSpectra:
     # ------------------------------------------------------------------
 
     def _ky_weight(self):
+        # Index-based Hermitian weighting (first mode 1, rest 2), matching the
+        # Spectra convention — so single-ky linear runs (ky=[kymin], finite)
+        # are weighted identically across the package.
         ky = np.asarray(self.run.coords[0]["ky"])
         w = np.full(ky.size, 2.0)
-        w[ky == 0.0] = 1.0
+        if w.size:
+            w[0] = 1.0
         return w
 
     def _accumulate(self, reader, idx, names, J_norm, ky_weight, out, is_local):

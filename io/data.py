@@ -262,7 +262,7 @@ class BinaryReader(_BaseReader):
             records_per_iter = 1 + self.n_arrays
             n_iters = len(idx) // records_per_iter
 
-            # Gather all time-record byte offsets and read in one shot
+            # Gather all time-record byte offsets, then read each scalar
             offsets = np.array([idx[it * records_per_iter][0] for it in range(n_iters)],
                               dtype=np.int64)
             buf = np.empty(n_iters, dtype=self.real_dtype)

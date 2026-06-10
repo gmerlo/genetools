@@ -27,6 +27,7 @@ class GrowthRate:
 
     def __init__(self, run):
         self.run = run
+        self._cache = {}        # window key -> (ky, gamma, omega, window)
 
     # ------------------------------------------------------------------
 
@@ -35,8 +36,17 @@ class GrowthRate:
         Return ``(ky, gamma, omega, window)`` from the field time evolution.
 
         With ``t=None`` the trailing half of the time series is used; otherwise
-        the given ``(start, stop)`` window is used.
+        the given ``(start, stop)`` window is used. Results are cached per
+        window, so ``.plot()`` followed by ``.data`` streams the field once.
         """
+        key = tuple(t) if isinstance(t, (tuple, list)) else t
+        if key in self._cache:
+            return self._cache[key]
+        result = self._compute(t)
+        self._cache[key] = result
+        return result
+
+    def _compute(self, t):
         run = self.run
         times_all, idx = run._indices(run.field, t)
         if t is None:
