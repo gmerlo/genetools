@@ -34,7 +34,7 @@ Quick start
 ...     for fn, ext in enumerate(runs)
 ... ])
 >>> Contours().plot_timeseries_2d(field_reader, t_start=10., t_stop=2000.,
-...     field=0, ifft='xy', params=params.get(0))
+...     field=0, ifft='xy', params_list=params.tolist())
 
 Backward-compatible flat imports
 ---------------------------------
