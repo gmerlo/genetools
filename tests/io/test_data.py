@@ -142,3 +142,102 @@ class TestBPReaderImportError:
             if adios2_backup is not None:
                 sys.modules["adios2"] = adios2_backup
             importlib.reload(data_mod)
+
+
+class TestSubrecords:
+    """Fortran splits payloads larger than 2**31-1 bytes into subrecords.
+
+    The leading marker is negative to mean "continues in the next subrecord".
+    Production meshes reach this routinely — 512x4096x128 in double precision
+    is 4 GiB per field record. Reading such a file with a single-marker parser
+    walks the offset backwards past the start of the file and dies with
+    ``IndexError``, or silently drops timesteps for smaller splits.
+    """
+
+    NI, NJ, NK, N_ARRAYS = 4, 2, 3, 2
+    TIMES = (1.0, 2.0, 3.0)
+
+    def _truth(self):
+        rng = np.random.default_rng(0)
+        shape = (self.NI, self.NJ, self.NK)
+        return [[rng.standard_normal(shape) + 1j * rng.standard_normal(shape)
+                 for _ in range(self.N_ARRAYS)] for _ in self.TIMES]
+
+    @staticmethod
+    def _plain(payload):
+        marker = struct.pack("<i", len(payload))
+        return marker + payload + marker
+
+    @staticmethod
+    def _split(payload, chunk):
+        """Write *payload* as sign-flagged subrecords of at most *chunk* bytes."""
+        out = b""
+        parts = [payload[i:i + chunk] for i in range(0, len(payload), chunk)]
+        for j, part in enumerate(parts or [b""]):
+            last = j == len(parts) - 1
+            lead = len(part) if last else -len(part)
+            trail = len(part) if j == 0 else -len(part)
+            out += struct.pack("<i", lead) + part + struct.pack("<i", trail)
+        return out
+
+    def _write(self, tmp_path, ext, encode, truth):
+        path = tmp_path / f"field{ext}"
+        with open(path, "wb") as f:
+            for t, arrays in zip(self.TIMES, truth):
+                f.write(self._plain(struct.pack("<d", t)))
+                for arr in arrays:
+                    f.write(encode(arr.astype(np.complex128).tobytes(order="F")))
+        return path
+
+    def _reader(self, tmp_path, ext):
+        params = make_params(nx0=self.NI, nky0=self.NJ, nz0=self.NK,
+                             n_fields=self.N_ARRAYS)
+        return BinaryReader("field", str(tmp_path) + "/", ext, params)
+
+    @pytest.mark.parametrize("chunk", [None, 64, 17, 8, 1])
+    def test_roundtrip_matches_ground_truth(self, tmp_path, chunk):
+        """chunk=17 and 1 split values mid-complex, so spans must be joined
+        as bytes before being viewed as complex."""
+        truth = self._truth()
+        encode = (self._plain if chunk is None
+                  else (lambda p: self._split(p, chunk)))
+        ext = f"_c{chunk}"
+        self._write(tmp_path, ext, encode, truth)
+        reader = self._reader(tmp_path, ext)
+
+        np.testing.assert_allclose(reader.read_all_times(), self.TIMES)
+        got = list(reader.stream_selected(range(len(self.TIMES))))
+        assert len(got) == len(self.TIMES)
+        for (t, arrays), t_exp, arrays_exp in zip(got, self.TIMES, truth):
+            assert t == pytest.approx(t_exp)
+            for arr, exp in zip(arrays, arrays_exp):
+                assert arr.shape == (self.NI, self.NJ, self.NK)
+                np.testing.assert_allclose(arr, exp)
+
+    def test_huge_negative_marker_does_not_crash(self, tmp_path):
+        """The reported failure: a >2 GiB subrecord marker sent the scan
+        offset negative, slicing to an empty buffer and raising IndexError."""
+        path = tmp_path / "field_0001"
+        with open(path, "wb") as f:
+            f.write(self._plain(struct.pack("<d", 1.0)))
+            f.write(struct.pack("<i", -2147483644))   # continuation marker
+            f.write(b"\x00" * 64)                     # payload never present
+        times = self._reader(tmp_path, "_0001").read_all_times()
+        assert times.size == 0        # truncated record dropped, no exception
+
+    def test_truncated_final_record_is_dropped(self, tmp_path):
+        truth = self._truth()
+        path = self._write(tmp_path, "_0001", self._plain, truth)
+        with open(path, "r+b") as f:
+            f.truncate(path.stat().st_size - 40)
+        times = self._reader(tmp_path, "_0001").read_all_times()
+        np.testing.assert_allclose(times, self.TIMES[:-1])
+
+    def test_trailing_bytes_ignored(self, tmp_path):
+        """A killed write can leave a partial marker at the end of the file."""
+        truth = self._truth()
+        path = self._write(tmp_path, "_0001", self._plain, truth)
+        with open(path, "ab") as f:
+            f.write(b"\x01\x02\x03")
+        np.testing.assert_allclose(
+            self._reader(tmp_path, "_0001").read_all_times(), self.TIMES)

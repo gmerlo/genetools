@@ -165,20 +165,66 @@ class BinaryReader(_BaseReader):
         """
         Return the cached record index, building it from *mm* if necessary.
 
-        Each entry is a ``(payload_start, payload_size)`` tuple.
+        Each entry is one logical record, held as a list of
+        ``(payload_start, payload_size)`` byte spans — more than one span when
+        the record is split into subrecords (see :meth:`_scan_record`).
         """
         if self._record_index is None:
             self._record_index = self._build_record_index(mm)
         return self._record_index
 
     @staticmethod
-    def _build_record_index(mm) -> list:
-        """
-        Scan a Fortran unformatted file and return
-        ``[(payload_start, payload_bytes), ...]`` for every record.
+    def _payload_len(spans) -> int:
+        """Total payload bytes of a record across all its spans."""
+        return sum(n for _, n in spans)
 
-        Fortran wraps each record with a 4-byte integer marker before *and*
-        after the payload that stores the byte length of the payload.
+    @staticmethod
+    def _disk_len(spans) -> int:
+        """On-disk bytes of a record, including every subrecord's markers."""
+        return sum(8 + n for _, n in spans)
+
+    @staticmethod
+    def _read_marker(mm, pos: int, size: int):
+        """Return the 4-byte record marker at *pos*, or ``None`` past the end."""
+        if pos < 0 or pos + 4 > size:
+            return None
+        return int(np.frombuffer(mm[pos:pos + 4], dtype=np.int32)[0])
+
+    @classmethod
+    def _scan_record(cls, mm, pos: int, size: int):
+        """
+        Read one logical record starting at *pos*.
+
+        Fortran brackets each record with a 4-byte marker holding the payload
+        length. A payload larger than 2**31-1 bytes cannot be described by a
+        signed 4-byte marker, so compilers split it into subrecords and flag a
+        negative leading marker to mean "continues in the next subrecord"; the
+        final piece carries a positive one. Meshes big enough to hit this are
+        ordinary in production runs — 512x4096x128 in double precision is 4 GiB
+        per field record — so the pieces are collected and stitched together.
+
+        Returns ``(spans, next_pos)``, or ``(None, None)`` at end of file or on
+        a record truncated by an interrupted write.
+        """
+        spans = []
+        while True:
+            marker = cls._read_marker(mm, pos, size)
+            if marker is None:
+                return None, None
+            nbytes = abs(marker)
+            start = pos + 4
+            if start + nbytes + 4 > size:
+                return None, None          # truncated mid-record
+            spans.append((start, nbytes))
+            pos = start + nbytes + 4
+            if marker >= 0:                # last (or only) subrecord
+                return spans, pos
+
+    @classmethod
+    def _build_record_index(cls, mm) -> list:
+        """
+        Scan a Fortran unformatted file and return one entry per record, each
+        a list of ``(payload_start, payload_bytes)`` spans.
 
         Optimisation: after scanning the first full iteration (1 + n_arrays
         records), if all records within that group have fixed sizes, the
@@ -189,59 +235,60 @@ class BinaryReader(_BaseReader):
         if size == 0:
             return []
 
-        # Scan first record to bootstrap
-        index = []
-        pos = 0
-        first_nbytes = int(np.frombuffer(mm[pos: pos + 4], dtype=np.int32)[0])
-        index.append((pos + 4, first_nbytes))
-        pos = pos + 4 + first_nbytes + 4
+        # Scan the first record to bootstrap
+        spans, pos = cls._scan_record(mm, 0, size)
+        if spans is None:
+            return []
+        index = [spans]
+        first_len = cls._payload_len(spans)
 
-        # Scan more records to detect periodicity
+        # Scan further records to detect periodicity
         found_repeat = False
         while pos < size:
-            nbytes = int(np.frombuffer(mm[pos: pos + 4], dtype=np.int32)[0])
-            start = pos + 4
-            index.append((start, nbytes))
-            pos = start + nbytes + 4
-            # Check if we've found a repeating pattern: the current record
-            # has the same size as the first → likely start of next iteration
-            if nbytes == first_nbytes and len(index) > 1:
+            spans, pos = cls._scan_record(mm, pos, size)
+            if spans is None:
+                break
+            index.append(spans)
+            # Same payload size as the first record → likely the next iteration
+            if cls._payload_len(spans) == first_len and len(index) > 1:
                 found_repeat = True
                 break
 
-        # If the loop exhausted without finding a repeat (single iteration
-        # or irregular file), return the index as-is — no arithmetic fill.
+        # No repeat (single iteration or irregular file) → no arithmetic fill.
         if not found_repeat:
             return index
 
-        # Determine stride (bytes per full iteration group)
-        group_len = len(index) - 1  # last record starts next group
-        if group_len < 1:
-            # Only one record type, finish scanning
-            while pos < size:
-                nbytes = int(np.frombuffer(mm[pos: pos + 4], dtype=np.int32)[0])
-                index.append((pos + 4, nbytes))
-                pos += 4 + nbytes + 4
+        # One full group is everything before the record that started the next
+        group = index[:-1]
+        stride = sum(cls._disk_len(s) for s in group)
+        if stride <= 0:
             return index
-
-        # Compute stride = sum of (4 + payload + 4) for each record in group
-        stride = sum(4 + index[i][1] + 4 for i in range(group_len))
-        record_sizes = [index[i][1] for i in range(group_len)]
-
-        # Remove the extra record we read (it's the first of the next group)
         index.pop()
-        pos_group_start = index[0][0] - 4  # byte offset of first group
 
-        # Fill remaining groups arithmetically
+        pos_group_start = group[0][0][0] - 4     # first span's marker offset
         n_full_groups = (size - pos_group_start) // stride
         for g in range(1, n_full_groups):
-            base = pos_group_start + g * stride
-            rec_pos = base
-            for rec_size in record_sizes:
-                index.append((rec_pos + 4, rec_size))
-                rec_pos += 4 + rec_size + 4
+            shift = g * stride
+            for spans in group:
+                index.append([(start + shift, n) for start, n in spans])
 
         return index
+
+    @staticmethod
+    def _read_payload(mm, spans, dtype, count: int = None) -> np.ndarray:
+        """
+        Return a record's payload as *dtype*, joining subrecord spans first.
+
+        Joining before the dtype view matters: a subrecord boundary can fall in
+        the middle of a value, so the spans cannot be decoded independently.
+        """
+        if len(spans) == 1:
+            start, nbytes = spans[0]
+            buf = mm[start:start + nbytes]
+        else:
+            buf = b"".join(mm[start:start + n] for start, n in spans)
+        arr = np.frombuffer(buf, dtype=dtype)
+        return arr if count is None else arr[:count]
 
     # ------------------------------------------------------------------
     # Public interface
@@ -263,8 +310,8 @@ class BinaryReader(_BaseReader):
             n_iters = len(idx) // records_per_iter
 
             # Gather all time-record byte offsets, then read each scalar
-            offsets = np.array([idx[it * records_per_iter][0] for it in range(n_iters)],
-                              dtype=np.int64)
+            offsets = np.array([idx[it * records_per_iter][0][0]
+                                for it in range(n_iters)], dtype=np.int64)
             buf = np.empty(n_iters, dtype=self.real_dtype)
             byte_width = np.dtype(self.real_dtype).itemsize
             for i, off in enumerate(offsets):
@@ -287,13 +334,12 @@ class BinaryReader(_BaseReader):
             for it in iteration_indices:
                 base = it * records_per_iter
                 # scalar record
-                start, nbytes = idx[base]
-                time = np.frombuffer(mm[start: start + nbytes], dtype=self.real_dtype)[0]
+                time = self._read_payload(mm, idx[base], self.real_dtype)[0]
                 # complex array records
                 data = []
                 for k in range(self.n_arrays):
-                    s, nb = idx[base + 1 + k]
-                    arr = np.frombuffer(mm[s: s + nb], dtype=self.cpx_dtype, count=self.npts)
+                    arr = self._read_payload(mm, idx[base + 1 + k],
+                                             self.cpx_dtype, self.npts)
                     arr = arr.reshape((self.ni, self.nj, self.nk), order="F")
                     data.append(arr)
                 yield float(time), data
