@@ -47,6 +47,7 @@ Example
 import os
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.colors import SymLogNorm
 import h5py
 
 from genetools.compat import trapz as _trapz
@@ -100,6 +101,39 @@ def _compute_flux_yspectra(a: np.ndarray, b: np.ndarray,
         out /= float(C_xy_arr)
 
     return out
+
+
+# ---------------------------------------------------------------------------
+# Plot helpers
+# ---------------------------------------------------------------------------
+
+def _ky_weighted_label(label: str) -> str:
+    """Turn ``'$Q_{\\rm es}$'`` into ``'$k_y\\,Q_{\\rm es}$'``."""
+    return r"$k_y\," + label.lstrip("$")
+
+
+def _signed_log_norm(data: np.ndarray):
+    """
+    Logarithmic colour norm that survives negative values and exact zeros.
+
+    Transport fluxes change sign — particle flux can run inward, momentum
+    flux counter-current — and the ky=0 column of a ky-weighted map is
+    identically zero. A plain :class:`LogNorm` renders both as blank, so a
+    symmetric-log norm is used instead: logarithmic in magnitude beyond
+    ``linthresh``, linear through zero below it. Returns ``None`` (matplotlib's
+    default linear norm) when the data carry no non-zero values to scale.
+    """
+    finite = np.asarray(data)[np.isfinite(data)]
+    if finite.size == 0:
+        return None
+    nonzero = np.abs(finite[finite != 0])
+    if nonzero.size == 0:
+        return None
+    vmax = float(np.abs(finite).max())
+    # Keep the linear window below the smallest resolved magnitude, but do not
+    # let it collapse to zero when the dynamic range is extreme.
+    linthresh = float(max(nonzero.min(), vmax * 1e-6))
+    return SymLogNorm(linthresh=linthresh, vmin=-vmax, vmax=vmax, base=10)
 
 
 # ---------------------------------------------------------------------------
@@ -521,7 +555,9 @@ class SpectraGlobal(CachingDiagnostic):
                 else:
                     tavg[key] = arr[0]
 
-            # ── Fig 1: (ky, x) heatmaps ──────────────────────────────
+            # ── Fig 1: (ky, x) heatmaps of ky-weighted flux ──────────
+            # ky weighting puts equal areas at equal flux contribution on a
+            # logarithmic ky axis, since ∫F dky = ∫ ky F d(ln ky).
             ncols = len(present_keys)
             fig, axes = plt.subplots(1, ncols, figsize=(5 * ncols, 4),
                                      squeeze=False)
@@ -529,11 +565,14 @@ class SpectraGlobal(CachingDiagnostic):
                         if len(times) > 1 else f"t = {times[0]:.1f}")
             fig.suptitle(f"{name} — {title_str}")
             for ax, key in zip(axes[0], present_keys):
-                im = ax.pcolormesh(ky, x, tavg[key], shading="auto")
+                weighted = tavg[key] * ky[np.newaxis, :]
+                im = ax.pcolormesh(ky, x, weighted, shading="auto",
+                                   norm=_signed_log_norm(weighted),
+                                   cmap="RdBu_r")
                 fig.colorbar(im, ax=ax)
                 ax.set_xlabel(ky_label)
                 ax.set_ylabel(x_label)
-                ax.set_title(flux_labels.get(key, key))
+                ax.set_title(_ky_weighted_label(flux_labels.get(key, key)))
             plt.tight_layout()
             plt.show()
 
@@ -544,24 +583,28 @@ class SpectraGlobal(CachingDiagnostic):
                 f" — {title_str}")
             for key in present_keys:
                 spec_xavg = np.mean(tavg[key][x_inds, :], axis=0)
+                weighted = spec_xavg * ky
                 color = flux_colors.get(key, "b")
                 label = flux_labels.get(key, key)
-                axes[0].plot(ky, spec_xavg, color=color, label=label)
-                axes[1].plot(ky, np.abs(spec_xavg), color=color, label=label)
-                # total flux profile: sum over ky at every radius
+                axes[0].plot(ky, weighted, color=color,
+                             label=_ky_weighted_label(label))
+                axes[1].plot(ky, np.abs(weighted), color=color,
+                             label=_ky_weighted_label(label))
+                # Radial profile stays unweighted: summed over ky it is the
+                # physical total flux through each flux surface.
                 axes[2].plot(x, np.sum(tavg[key], axis=1),
                              color=color, label=label)
                 total = np.sum(spec_xavg)
                 print(f"  {name} {key}: sum = {total:.6g}")
 
             axes[0].set_xlabel(ky_label)
-            axes[0].set_ylabel("Flux [GB]")
+            axes[0].set_ylabel(r"$k_y\,$Flux [GB]")
             axes[0].legend()
             axes[0].grid(True)
             axes[0].set_title("linear")
 
             axes[1].set_xlabel(ky_label)
-            axes[1].set_ylabel("|Flux| [GB]")
+            axes[1].set_ylabel(r"$|k_y\,$Flux$|$ [GB]")
             axes[1].set_xscale("log")
             axes[1].set_yscale("log")
             axes[1].legend()
