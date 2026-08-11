@@ -47,7 +47,7 @@ Example
 import os
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.colors import SymLogNorm
+from matplotlib.colors import LogNorm, SymLogNorm
 import h5py
 
 from genetools.compat import trapz as _trapz
@@ -112,28 +112,41 @@ def _ky_weighted_label(label: str) -> str:
     return r"$k_y\," + label.lstrip("$")
 
 
-def _signed_log_norm(data: np.ndarray):
+def _flux_norm_and_cmap(data: np.ndarray):
     """
-    Logarithmic colour norm that survives negative values and exact zeros.
+    Return ``(norm, cmap)`` for a logarithmic flux panel.
 
-    Transport fluxes change sign — particle flux can run inward, momentum
-    flux counter-current — and the ky=0 column of a ky-weighted map is
-    identically zero. A plain :class:`LogNorm` renders both as blank, so a
-    symmetric-log norm is used instead: logarithmic in magnitude beyond
-    ``linthresh``, linear through zero below it. Returns ``None`` (matplotlib's
-    default linear norm) when the data carry no non-zero values to scale.
+    A flux that keeps one sign — the usual case for heat flux — is scaled with
+    a plain :class:`LogNorm` over a sequential map, so the whole colour range
+    covers the actual dynamic range. Forcing a symmetric range on such data
+    would spend half the colours on values that never occur and wash the panel
+    out.
+
+    A flux that genuinely changes sign (inward particle transport,
+    counter-current momentum) cannot use LogNorm at all, since it blanks the
+    negative half. Those get a symmetric-log norm — logarithmic in magnitude,
+    linear through zero — over a diverging map so the sign stays readable.
+
+    ``(None, ...)`` falls back to matplotlib's linear default when there is no
+    dynamic range to scale.
     """
     finite = np.asarray(data)[np.isfinite(data)]
-    if finite.size == 0:
-        return None
-    nonzero = np.abs(finite[finite != 0])
+    nonzero = finite[finite != 0]
     if nonzero.size == 0:
-        return None
-    vmax = float(np.abs(finite).max())
-    # Keep the linear window below the smallest resolved magnitude, but do not
-    # let it collapse to zero when the dynamic range is extreme.
-    linthresh = float(max(nonzero.min(), vmax * 1e-6))
-    return SymLogNorm(linthresh=linthresh, vmin=-vmax, vmax=vmax, base=10)
+        return None, "viridis"
+
+    vmax = float(np.abs(nonzero).max())
+    vmin = float(np.abs(nonzero).min())
+
+    if (nonzero < 0).any():
+        # Keep the linear window below the smallest resolved magnitude, but do
+        # not let it collapse to zero when the dynamic range is extreme.
+        linthresh = float(max(vmin, vmax * 1e-6))
+        return SymLogNorm(linthresh=linthresh, vmin=-vmax, vmax=vmax,
+                          base=10), "RdBu_r"
+    if vmin == vmax:
+        return None, "viridis"
+    return LogNorm(vmin=vmin, vmax=vmax), "viridis"
 
 
 # ---------------------------------------------------------------------------
@@ -564,12 +577,20 @@ class SpectraGlobal(CachingDiagnostic):
             title_str = (f"average [{times[0]:.1f} - {times[-1]:.1f}]"
                         if len(times) > 1 else f"t = {times[0]:.1f}")
             fig.suptitle(f"{name} — {title_str}")
+            # The ky=0 column is a structural zero — the electrostatic fluxes
+            # are built from v_E = -i ky phi, which vanishes there — so it
+            # carries no information and would force a linear region into an
+            # otherwise logarithmic scale. Drop it.
+            kpos = ky > 0
+            ky_p = ky[kpos] if kpos.any() else ky
             for ax, key in zip(axes[0], present_keys):
-                weighted = tavg[key] * ky[np.newaxis, :]
-                im = ax.pcolormesh(ky, x, weighted, shading="auto",
-                                   norm=_signed_log_norm(weighted),
-                                   cmap="RdBu_r")
+                weighted = tavg[key][:, kpos] * ky_p[np.newaxis, :] \
+                    if kpos.any() else tavg[key] * ky[np.newaxis, :]
+                norm, cmap = _flux_norm_and_cmap(weighted)
+                im = ax.pcolormesh(ky_p, x, weighted, shading="auto",
+                                   norm=norm, cmap=cmap)
                 fig.colorbar(im, ax=ax)
+                ax.set_xscale("log")
                 ax.set_xlabel(ky_label)
                 ax.set_ylabel(x_label)
                 ax.set_title(_ky_weighted_label(flux_labels.get(key, key)))
