@@ -46,6 +46,7 @@ from .io import (
     BinaryReader,
     BPReader,
     MultiSegmentReader,
+    load_equilibrium_profiles,
 )
 from .diagnostics import (
     NrgReader,
@@ -148,6 +149,58 @@ class Run:
             return self.field.read_all_times()
         except FileNotFoundError:
             return self.nrg.read_all()[0]
+
+    @cached_property
+    def eq_profiles(self):
+        """
+        Background equilibrium profiles per species — ``None`` for local runs.
+
+        Global diagnostics need the background ``n(x)`` and ``T(x)`` to build
+        the density and temperature prefactors that enter the heat and momentum
+        fluxes; computing those without the profiles silently assumes flat
+        backgrounds, which is wrong for a global run. Loaded once from
+        ``profiles_<species><ext>`` for the first segment — the same segment
+        the diagnostics take their params, coords, and geometry from.
+
+        Assign to this attribute to supply profiles from another source::
+
+            run.eq_profiles = {"ions": {"T": ..., "n": ..., "omt": ..., "omn": ...}}
+
+        Raises
+        ------
+        FileNotFoundError
+            If a global run has no profile file for one or more species.
+        ValueError
+            If a profile's radial grid does not match the simulation grid.
+        """
+        if self.is_local:
+            return None
+
+        ext = self.extensions[0]
+        nx = int(self.params.get(0)["box"]["nx0"])
+        profiles, missing = {}, []
+        for name in self.species:
+            try:
+                ep = load_equilibrium_profiles(self._folder, ext, name)
+            except FileNotFoundError:
+                missing.append(f"profiles_{name}{ext}")
+                continue
+            npts = np.size(ep["T"])
+            if npts != nx:
+                raise ValueError(
+                    f"Equilibrium profile 'profiles_{name}{ext}' has {npts} "
+                    f"radial points but the run grid has nx0={nx}. The profile "
+                    "must be on the simulation's radial grid.")
+            profiles[name] = ep
+
+        if missing:
+            raise FileNotFoundError(
+                f"Global run is missing equilibrium profile file(s) in "
+                f"{self._folder}: {', '.join(missing)}. These carry the "
+                "background n(x) and T(x) that the heat and momentum fluxes "
+                "need; without them those fluxes would assume flat profiles. "
+                "Assign run.eq_profiles = {...} to supply them from elsewhere.")
+        return profiles
 
     # ------------------------------------------------------------------
     # Continuation / restart validation
@@ -348,7 +401,8 @@ class _BoundSpectra:
         r = self.run
         if self.is_global:
             self._diag.compute_and_save(r.field, r._mom_list(), r.coords[0],
-                                        r.geometry[0], r.params.get(0), a, b)
+                                        r.geometry[0], r.params.get(0), a, b,
+                                        equilibrium_profiles=r.eq_profiles)
         else:
             self._diag.compute_missing(r.field, r._mom_list(), r.coords[0],
                                        r.geometry[0], r.params, a, b)
@@ -400,7 +454,8 @@ class _BoundProfiles:
         self.compute(t)
         a, b = _window(t)
         return self._diag.dataset(self.run.coords[0], self.run.params.get(0),
-                                  self.run.species, a, b)
+                                  self.run.species, a, b,
+                                  equilibrium_profiles=self.run.eq_profiles)
 
     @property
     def data(self):
@@ -409,6 +464,8 @@ class _BoundProfiles:
     def plot(self, t=None, eq_profs=None):
         a, b = _bounds(t)
         self.compute(t)
+        if eq_profs is None:
+            eq_profs = self.run.eq_profiles
         self._diag.plot(self.run.coords[0], self.run.params.get(0), a, b,
                         equilibrium_profiles=eq_profs)
 
@@ -424,7 +481,8 @@ class _BoundFluxes2D:
         a, b = _bounds(t)
         r = self.run
         self._diag.compute_and_save(r.field, r._mom_list(), r.coords[0],
-                                    r.geometry[0], r.params.get(0), a, b)
+                                    r.geometry[0], r.params.get(0), a, b,
+                                    equilibrium_profiles=r.eq_profiles)
         return self
 
     def save(self, t=None):

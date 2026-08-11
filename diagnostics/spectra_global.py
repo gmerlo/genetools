@@ -244,6 +244,12 @@ class SpectraGlobal(CachingDiagnostic):
 
         with h5py.File(self.outfile, "a") as hf:
             initialised = "time" in hf
+            if initialised and any(n not in hf for n in species_names):
+                raise ValueError(
+                    f"Cache '{self.outfile}' has a time axis but no data group "
+                    f"for every species {species_names} — it was written by an "
+                    "interrupted run or a different configuration. Delete it "
+                    "and recompute.")
 
             for tm, fields in it_field:
                 # Read moments for all species
@@ -335,6 +341,8 @@ class SpectraGlobal(CachingDiagnostic):
             return {}
 
         with h5py.File(self.outfile, "r") as f:
+            if "time" not in f:     # partially written cache
+                return {}
             time = f["time"][...]
             if time.size == 0:
                 return {}
@@ -369,6 +377,8 @@ class SpectraGlobal(CachingDiagnostic):
             return {}
 
         time = data["time"]
+        if len(time) == 0:      # window selects no cached step
+            return {}
         result = {}
         for key, arr in data.items():
             if key == "time":

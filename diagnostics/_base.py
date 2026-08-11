@@ -142,6 +142,15 @@ class CachingDiagnostic:
         Compute aligned field and moment iteration indices, filtering
         out already-saved timesteps.
 
+        The two lists are paired by matching *time values*, not by position.
+        Field and moment files are generally written at different cadences
+        (``istep_field`` vs ``istep_mom``), and either may be truncated when a
+        run is killed mid-write, so the n-th field record and the n-th moment
+        record usually belong to different times. Pairing them positionally
+        silently correlates a field snapshot with moments from another time,
+        and crashes outright when the moment file is the shorter of the two.
+        Only times present in both files, and not already cached, are returned.
+
         Parameters
         ----------
         fld_reader : reader
@@ -151,44 +160,52 @@ class CachingDiagnostic:
         t_start, t_stop : float
             Time window.
         params : dict
-            Parameter dictionary.
+            Parameter dictionary. Retained for API compatibility; the cadence
+            keys are no longer needed now that pairing is by time value.
 
         Returns
         -------
         idx_fld, idx_mom : list of int
-            Filtered iteration indices for field and moment readers.
+            Equal-length, time-aligned iteration indices.
         """
-        istep_fld = int(params["in_out"]["istep_field"])
-        istep_mom = int(params["in_out"]["istep_mom"])
-        L = int(np.lcm(istep_fld, istep_mom))
-        stride_fld = L // istep_fld
-        stride_mom = L // istep_mom
+        times_fld = np.asarray(fld_reader.read_all_times(), dtype=np.float64)
+        times_mom = np.asarray(mom_readers[0].read_all_times(), dtype=np.float64)
 
-        times_fld = fld_reader.read_all_times()
-        idx_fld = np.where(
-            (times_fld >= t_start) & (times_fld <= t_stop)
-        )[0][::stride_fld]
-        times_mom = mom_readers[0].read_all_times()
-        idx_mom = np.where(
-            (times_mom >= t_start) & (times_mom <= t_stop)
-        )[0][::stride_mom]
+        idx_fld = np.where((times_fld >= t_start) & (times_fld <= t_stop))[0]
+        idx_mom = np.where((times_mom >= t_start) & (times_mom <= t_stop))[0]
+        if idx_fld.size == 0 or idx_mom.size == 0:
+            return [], []
 
-        saved_times = self._load_saved_times()
-        if saved_times.size == 0:
-            return idx_fld.tolist(), idx_mom.tolist()
+        # Moment times, sorted, for tolerant lookup by value.
+        order = np.argsort(times_mom[idx_mom], kind="stable")
+        mom_idx_sorted = idx_mom[order]
+        mom_t_sorted = times_mom[mom_idx_sorted]
+        pos = np.searchsorted(mom_t_sorted, times_fld[idx_fld])
 
-        saved_sorted = np.sort(saved_times.astype(np.float64))
+        saved_sorted = np.sort(self._load_saved_times().astype(np.float64))
 
-        def _filter(indices, all_times):
-            if len(indices) == 0:
-                return []
-            cand = all_times[indices]
-            tol = np.maximum(1e-6, np.abs(cand) * 1e-6)
-            pos = np.searchsorted(saved_sorted, cand)
-            found = np.zeros(len(cand), dtype=bool)
+        def _nearest(sorted_times, at, value, tol):
+            """Index into *sorted_times* matching *value*, or None."""
             for offset in (0, -1):
-                ic = np.clip(pos + offset, 0, len(saved_sorted) - 1)
-                found |= np.abs(saved_sorted[ic] - cand) <= tol
-            return [i for i, f in zip(indices, found) if not f]
+                j = int(np.clip(at + offset, 0, sorted_times.size - 1))
+                if abs(sorted_times[j] - value) <= tol:
+                    return j
+            return None
 
-        return _filter(idx_fld, times_fld), _filter(idx_mom, times_mom)
+        pair_fld, pair_mom = [], []
+        for k, i_fld in enumerate(idx_fld):
+            t = times_fld[i_fld]
+            tol = max(1e-6, abs(t) * 1e-6)
+
+            j = _nearest(mom_t_sorted, pos[k], t, tol)
+            if j is None:
+                continue          # no moment output at this time
+            if saved_sorted.size:
+                at = int(np.searchsorted(saved_sorted, t))
+                if _nearest(saved_sorted, at, t, tol) is not None:
+                    continue      # already in the cache
+
+            pair_fld.append(int(i_fld))
+            pair_mom.append(int(mom_idx_sorted[j]))
+
+        return pair_fld, pair_mom
