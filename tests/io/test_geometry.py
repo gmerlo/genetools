@@ -164,6 +164,68 @@ class TestCurvatureComputation:
         assert not np.all(np.isnan(sloc)), "sloc is entirely NaN for local geometry"
 
 
+class TestLocalShear:
+    """sloc = d(gxy/gxx)/dz, computed with np.gradient (no scipy)."""
+
+    @staticmethod
+    def _curv(gxy, gxx, nz, edge_opt=0):
+        from genetools.io.geometry import _compute_curvature
+        zeros = np.zeros_like(gxx)
+        geom = {
+            "metric": {"gxx": gxx, "gxy": gxy, "gxz": zeros,
+                       "gyy": np.ones_like(gxx), "gyz": zeros},
+            "dBdx": zeros, "dBdy": zeros, "dBdz": zeros,
+        }
+        params = {"box": {"nz0": nz},
+                  "geometry": {"n_pol": 1, "edge_opt": edge_opt}}
+        return _compute_curvature(geom, params)["sloc"]
+
+    def test_constant_shear_recovered_local(self):
+        """gxy/gxx = shat*z  ->  sloc == shat everywhere."""
+        from genetools.io._zgrid import build_zgrid
+        nz, shat = 32, 0.8
+        z = build_zgrid(nz, 1, 0)
+        gxx = np.ones(nz)
+        sloc = self._curv(shat * z, gxx, nz)
+        assert sloc.shape == (nz,)
+        # exact for a linear profile, including the one-sided end points
+        np.testing.assert_allclose(sloc, shat, rtol=1e-12)
+
+    def test_constant_shear_recovered_global(self):
+        """Global geometry: the ratio is (nx, nz) and z is the last axis."""
+        from genetools.io._zgrid import build_zgrid
+        nx, nz = 5, 32
+        z = build_zgrid(nz, 1, 0)
+        shat = np.linspace(0.5, 1.5, nx)[:, np.newaxis]   # x-dependent shear
+        gxx = np.ones((nx, nz))
+        sloc = self._curv(shat * z[np.newaxis, :], gxx, nz)
+        assert sloc.shape == (nx, nz)
+        np.testing.assert_allclose(sloc, np.broadcast_to(shat, (nx, nz)),
+                                   rtol=1e-12)
+
+    def test_nonuniform_grid_uses_z_spacing(self):
+        """edge_opt != 0 clusters the z grid; the derivative must still be exact
+        for a linear profile, which requires spacing-aware differencing."""
+        from genetools.io._zgrid import build_zgrid
+        nz, shat, edge = 32, 0.8, 4.0
+        z = build_zgrid(nz, 1, edge)
+        assert not np.allclose(np.diff(z), np.diff(z)[0]), "grid should be non-uniform"
+        sloc = self._curv(shat * z, np.ones(nz), nz, edge_opt=edge)
+        np.testing.assert_allclose(sloc, shat, rtol=1e-10)
+
+    def test_scalar_nan_when_single_z_point(self):
+        sloc = self._curv(np.array([1.0]), np.array([1.0]), nz=1)
+        assert np.isscalar(sloc) or np.ndim(sloc) == 0
+        assert np.isnan(sloc)
+
+    def test_mismatched_z_length_falls_back_to_nan(self):
+        """A z grid that disagrees with the data length yields all-NaN, not a crash."""
+        nz = 32
+        # params say nz0=16 while the arrays carry 32 points
+        sloc = self._curv(np.ones(nz), np.ones(nz), nz=16)
+        assert np.all(np.isnan(sloc))
+
+
 class TestAreaComputation:
     """Geometry must populate geom['area'] with Area and dVdx."""
 

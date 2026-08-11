@@ -51,7 +51,6 @@ Example
 import os
 import re
 import numpy as np
-from scipy.interpolate import CubicSpline
 
 from genetools.io._zgrid import build_zgrid
  
@@ -324,19 +323,13 @@ def _compute_curvature(geom: dict, params: dict) -> dict:
     edge = params['geometry'].get('edge_opt', 0)
     z = build_zgrid(nz, npol, edge)
  
-    # Local shear: d(gxy/gxx)/dz via cubic spline
+    # Local shear: d(gxy/gxx)/dz by central differences (one-sided at the
+    # ends). Passing z rather than a spacing keeps this correct on the
+    # non-uniform grid produced by edge_opt != 0. axis=-1 is z for both local
+    # geometry, where the ratio is (nz,), and global, where it is (nx, nz).
     if nz > 1:
         try:
-            ratio = gxy / gxx
-            # CubicSpline expects y shape (n, ...) where n == len(x).
-            # For local geometry ratio is (nz,); for global it's (nx, nz).
-            if ratio.ndim == 2:
-                # Global: transpose to (nz, nx), spline, transpose back
-                cs   = CubicSpline(z, ratio.T)
-                sloc = cs(z, 1).T   # first derivative, back to (nx, nz)
-            else:
-                cs   = CubicSpline(z, ratio)
-                sloc = cs(z, 1)     # first derivative
+            sloc = np.gradient(gxy / gxx, z, axis=-1)
         except ValueError:
             sloc = np.full_like(gxy, np.nan)
     else:
