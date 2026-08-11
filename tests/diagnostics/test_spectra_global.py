@@ -196,3 +196,77 @@ class TestNumericalValues:
         out = _compute_flux_yspectra(a, b, C_xy=1.0, J_norm=J)
         # Re(conj(2)*3) = 6, times J[iz=0]=1
         np.testing.assert_allclose(out[:, 0], 6.0, rtol=1e-10)
+
+
+# ---------------------------------------------------------------------------
+# Dataset layout: (x, ky) map plus 1-D reductions
+# ---------------------------------------------------------------------------
+
+class TestExpandReductions:
+
+    def test_map_and_reduction_keys(self):
+        from genetools.diagnostics.spectra_global import SpectraGlobal
+        raw = {"ions_Qes_ky": np.ones((5, 3)), "ions_Ges_ky": np.ones((5, 3))}
+        out = SpectraGlobal._expand_reductions(raw)
+        assert set(out) == {
+            "ions_Qes_xky", "ions_Qes_x", "ions_Qes_ky",
+            "ions_Ges_xky", "ions_Ges_x", "ions_Ges_ky",
+        }
+
+    def test_reduction_shapes_and_values(self):
+        from genetools.diagnostics.spectra_global import SpectraGlobal
+        nx, nky = 4, 3
+        arr = np.arange(nx * nky, dtype=float).reshape(nx, nky)
+        out = SpectraGlobal._expand_reductions({"ions_Qes_ky": arr})
+        np.testing.assert_allclose(out["ions_Qes_xky"], arr)
+        # radial profile is the ky-sum; ky spectrum is the radial mean
+        np.testing.assert_allclose(out["ions_Qes_x"], arr.sum(axis=1))
+        np.testing.assert_allclose(out["ions_Qes_ky"], arr.mean(axis=0))
+        assert out["ions_Qes_x"].shape == (nx,)
+        assert out["ions_Qes_ky"].shape == (nky,)
+
+    def test_non_2d_entries_pass_through(self):
+        from genetools.diagnostics.spectra_global import SpectraGlobal
+        out = SpectraGlobal._expand_reductions({"time": np.arange(4.0)})
+        np.testing.assert_allclose(out["time"], np.arange(4.0))
+
+
+class TestDatasetLayout:
+
+    def _dataset(self):
+        from genetools.diagnostics.spectra_global import SpectraGlobal
+        nx, nky = 6, 4
+        rng = np.random.default_rng(0)
+        maps = {sp: rng.standard_normal((nx, nky)) for sp in ("ions", "elec")}
+        sg = object.__new__(SpectraGlobal)
+        sg.load_time_average = lambda a=None, b=None: {
+            f"{sp}_Qes_ky": m for sp, m in maps.items()}
+        coords = {"x": np.linspace(0.3, 0.7, nx), "ky": 0.05 * np.arange(nky)}
+        ds = sg.dataset(coords, {"units": {}}, ["ions", "elec"])
+        return ds, maps
+
+    def test_dims_and_coords(self):
+        ds, _ = self._dataset()
+        assert ds["Qes_xky"].dims == ("species", "x", "ky")
+        assert ds["Qes_x"].dims == ("species", "x")
+        assert ds["Qes_ky"].dims == ("species", "ky")
+        assert list(ds["species"].values) == ["ions", "elec"]
+
+    def test_reductions_consistent_with_map(self):
+        ds, _ = self._dataset()
+        np.testing.assert_allclose(
+            ds["Qes_x"].values, ds["Qes_xky"].values.sum(axis=2), rtol=1e-12)
+        np.testing.assert_allclose(
+            ds["Qes_ky"].values, ds["Qes_xky"].values.mean(axis=1), rtol=1e-12)
+
+    def test_species_order_preserved(self):
+        ds, maps = self._dataset()
+        np.testing.assert_allclose(
+            ds["Qes_xky"].sel(species="elec").values, maps["elec"])
+
+    def test_empty_cache_returns_empty_dataset(self):
+        from genetools.diagnostics.spectra_global import SpectraGlobal
+        sg = object.__new__(SpectraGlobal)
+        sg.load_time_average = lambda a=None, b=None: {}
+        ds = sg.dataset({"x": [], "ky": []}, {}, [])
+        assert len(ds.data_vars) == 0

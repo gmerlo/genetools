@@ -380,8 +380,39 @@ class SpectraGlobal(CachingDiagnostic):
                     (time[-1] - time[0])
         return result
 
+    @staticmethod
+    def _expand_reductions(raw: dict) -> dict:
+        """Expand each ``(nx, nky)`` flux map into the map plus its reductions.
+
+        ``'ions_Qes_ky'`` (2-D on disk) becomes ``'ions_Qes_xky'`` (x, ky),
+        ``'ions_Qes_x'`` — the total flux profile summed over ky — and
+        ``'ions_Qes_ky'`` — the radially averaged ky spectrum.
+        """
+        out = {}
+        for key, arr in raw.items():
+            arr = np.asarray(arr)
+            base = key[:-3] if key.endswith("_ky") else key
+            if arr.ndim != 2:
+                out[key] = arr
+                continue
+            out[f"{base}_xky"] = arr
+            out[f"{base}_x"] = arr.sum(axis=1)    # total flux at each radius
+            out[f"{base}_ky"] = arr.mean(axis=0)  # radially averaged spectrum
+        return out
+
     def dataset(self, coords, params, species, t_start=None, t_stop=None):
-        """Return the time-averaged ky-resolved spectra as an ``xarray.Dataset``."""
+        """
+        Return the time-averaged flux spectra as an ``xarray.Dataset``.
+
+        Per species and flux channel (``Qes``, ``Ges``, ``Pes`` and their EM
+        counterparts) the Dataset carries the 2-D map ``*_xky`` with dims
+        ``(x, ky)`` plus its two 1-D reductions — ``*_x``, the total flux
+        profile summed over ky, and ``*_ky``, the ky spectrum averaged over
+        the full radial domain. Mirrors the layout of
+        :class:`~genetools.diagnostics.amplitude.AmplitudeSpectra` for global
+        runs. Slice the map directly for a windowed average, e.g.
+        ``ds.Qes_xky.sel(x=slice(0.4, 0.6)).mean('x')``.
+        """
         import xarray as xr
         from genetools import _xr
 
@@ -390,7 +421,7 @@ class SpectraGlobal(CachingDiagnostic):
             return xr.Dataset()
 
         data_vars, used = _xr.stacked_vars(
-            raw, species, lambda var: ("x", "ky"))
+            self._expand_reductions(raw), species, _xr.dims_from_suffix)
         x = np.asarray(coords.get("x", []))
         if x.size == 0:
             x = np.asarray(coords.get("x_o_a", []))
@@ -496,19 +527,20 @@ class SpectraGlobal(CachingDiagnostic):
             plt.tight_layout()
             plt.show()
 
-            # ── Fig 2: x-averaged 1D ky spectrum (all fluxes) ────────
-            fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+            # ── Fig 2: 1D reductions — ky spectrum + radial profile ──
+            fig, axes = plt.subplots(1, 3, figsize=(16, 4))
             fig.suptitle(
                 f"{name} — x-avg [{x[i_s]:.3f}, {x[i_e]:.3f}]"
                 f" — {title_str}")
             for key in present_keys:
                 spec_xavg = np.mean(tavg[key][x_inds, :], axis=0)
-                axes[0].plot(ky, spec_xavg,
-                            color=flux_colors.get(key, "b"),
-                            label=flux_labels.get(key, key))
-                axes[1].plot(ky, np.abs(spec_xavg),
-                            color=flux_colors.get(key, "b"),
-                            label=flux_labels.get(key, key))
+                color = flux_colors.get(key, "b")
+                label = flux_labels.get(key, key)
+                axes[0].plot(ky, spec_xavg, color=color, label=label)
+                axes[1].plot(ky, np.abs(spec_xavg), color=color, label=label)
+                # total flux profile: sum over ky at every radius
+                axes[2].plot(x, np.sum(tavg[key], axis=1),
+                             color=color, label=label)
                 total = np.sum(spec_xavg)
                 print(f"  {name} {key}: sum = {total:.6g}")
 
@@ -525,6 +557,12 @@ class SpectraGlobal(CachingDiagnostic):
             axes[1].legend()
             axes[1].grid(True)
             axes[1].set_title("log-log")
+
+            axes[2].set_xlabel(x_label)
+            axes[2].set_ylabel("Flux [GB]")
+            axes[2].legend()
+            axes[2].grid(True)
+            axes[2].set_title(r"$\sum_{k_y}$ — radial profile")
 
             plt.tight_layout()
             plt.show()

@@ -49,14 +49,14 @@ All diagnostics follow a common pattern: stream data from readers, compute physi
 
 - **`nrg.py`** — `NrgReader`: energy/flux time traces (no HDF5 caching, reads nrg binary directly)
 - **`spectra.py`** — `Spectra`: time-averaged kx/ky/z-resolved flux spectra (local geometry)
-- **`spectra_global.py`** — `SpectraGlobal`: ky-resolved flux spectra Q(x,ky) for global runs
+- **`spectra_global.py`** — `SpectraGlobal`: ky-resolved flux spectra Q/Γ/Π(x,ky) for global runs; the dataset exposes the 2-D map (`*_xky`) plus 1-D reductions (`*_x` = ky-sum, `*_ky` = radial mean), matching `amplitude.py`
 - **`contours.py`** — `Contours`: 2D field visualizations with memory-efficient IFFT (slice-before-transform)
 - **`shearingrate.py`** — `ShearingRate`: ExB shearing rate from zonal potential
 - **`profiles.py`** — `Profiles`: flux-surface-averaged radial profiles
 - **`fluxes2d.py`** — `Fluxes2D`: x-resolved transport fluxes (particle, heat, momentum)
 - **`ballooning.py`** — `Ballooning`: field-line (ballooning) mode structure φ/A∥/B∥(χ) for a chosen ky (local runs only); Run/xarray-native
 - **`growthrate.py`** — `GrowthRate`: linear γ/ω from the field time evolution (γ from |φ| growth, ω from phase rotation), optional `omega<ext>` cross-check; Run/xarray-native
-- **`amplitude.py`** — `AmplitudeSpectra`: time-averaged kx/ky |·|² spectra of fields and moments; reuses `Spectra.averages`; Run/xarray-native
+- **`amplitude.py`** — `AmplitudeSpectra`: time-averaged |·|² spectra of fields and moments; kx/ky for local runs (reuses `Spectra.averages`), full |·|²(x,ky) maps + 1-D reductions for global runs; Run/xarray-native
 - **`zonal.py`** — `Zonal`: zonal (ky=0) potential x-t contour; reuses `shearingrate.compute_exb`; Run/xarray-native
 - **`profile_diag.py`** — `ProfileDiag`: reads GENE `profile_<species>` ASCII output (from `diag_df.F90`; global nonlinear runs) — radial T/n/gradients + turbulent (Γ/Q/Π) + neoclassical fluxes + bootstrap current as a time series; returns xarray (species, time, x) with normalized + `*_SI` variables. `run.profile_diag` / `--profile-diag`
 

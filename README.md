@@ -86,7 +86,9 @@ ds = run.profiles.data               # xarray.Dataset, dims (species, time, x)
 run.profiles.plot(t=(1000, 2000))
 
 ds = run.spectra.data                # auto local kx/ky or global, by geometry
-ds.Q_es.sel(species="ions").plot()   # label-based selection, auto-axes
+ds.Q_es_ky.sel(species="ions").plot()  # label-based selection, auto-axes
+# global runs: ds.Qes_xky is the (x, ky) map; ds.Qes_x / ds.Qes_ky its
+# 1-D reductions (ky-sum / radial mean). Same layout for run.amplitude.
 
 ky, gamma, omega, window = run.growthrate.compute()   # linear stability
 run.ballooning(ky=0.3).plot()        # mode structure along the field line
@@ -117,12 +119,14 @@ Common options: `--t START STOP`, `--species …`, `--ext …`, `--save FILE`
 ## Low-level API
 
 The original modules remain available for fine-grained control (the `Run` facade
-is a thin layer over them).
+is a thin layer over them). Modules live under `genetools.io` and
+`genetools.diagnostics`; all major classes are also re-exported flat
+(`from genetools import Params, NrgReader, BinaryReader, ...`).
 
 ### Load parameters
 
 ```python
-from genetools.params import Params
+from genetools.io import Params
 
 # Load from a run directory (reads 'parameters' by default)
 p = Params('/path/to/run/')
@@ -139,7 +143,7 @@ p.show()
 ### Read and plot nrg diagnostics
 
 ```python
-from genetools.nrg import NrgReader
+from genetools.diagnostics import NrgReader
 
 reader = NrgReader('/path/to/run/', params)
 times, data = reader.read_all()
@@ -153,8 +157,7 @@ reader.plot_fluctuations() # n, T_∥, T_⊥, u_∥ only
 ### Stream field/moment data
 
 ```python
-from genetools.data import BinaryReader
-from genetools.utils import set_runs
+from genetools.io import BinaryReader, set_runs
 
 # Discover available run segments
 suffixes = set_runs('/path/to/run/')  # e.g. ['_0001', '_0002', '.dat']
@@ -174,7 +177,7 @@ for t, arrays in reader.stream_selected([0, 50, 100]):
 ### ADIOS2 BP files
 
 ```python
-from genetools.data import BPReader
+from genetools.io import BPReader
 
 reader = BPReader('field', '/path/to/run/', '_0001.bp', params)
 times = reader.read_all_times()

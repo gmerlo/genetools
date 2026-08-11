@@ -55,6 +55,18 @@ def split_species(key: str, species) -> tuple:
     return None, key
 
 
+def dims_from_suffix(var: str) -> tuple:
+    """
+    Map a variable's trailing axis tag to its dimension names.
+
+    Diagnostics that report a 2-D map alongside its 1-D reductions tag each
+    variable with the axes it spans: ``'phi_xky'`` -> ``('x', 'ky')``,
+    ``'Qes_ky'`` -> ``('ky',)``, ``'Qes_x'`` -> ``('x',)``.
+    """
+    suffix = var.rsplit("_", 1)[-1]
+    return ("x", "ky") if suffix == "xky" else (suffix,)
+
+
 def stacked_vars(raw: dict, species, dim_of, *, coord_keys=(), skip_empty=True):
     """
     Group a ``{key: ndarray}`` dict into xarray-ready variables.
