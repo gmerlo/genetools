@@ -352,6 +352,55 @@ class BinaryReader(_BaseReader):
 
 if _ADIOS2_AVAILABLE:
 
+    def _patch_adios2_complex():
+        """
+        Teach the adios2 Python bindings about single-precision complex.
+
+        ADIOS2 names the type of a ``complex(4)`` array ``'float complex'``,
+        but the translation table in ``adios2/stream.py`` (still true in 2.12)
+        lists only the legacy spelling ``'complex'`` next to ``'double
+        complex'``, so reading a single-precision file dies with
+        ``KeyError: 'float complex'``. Fill in the gap, leaving the rest alone.
+        """
+        try:
+            from adios2 import stream as _stream
+        except ImportError:
+            return                          # pre-2.10 bindings: no such module
+        original = getattr(_stream, "type_adios_to_numpy", None)
+        if original is None:
+            return
+        try:
+            original("float complex")
+            return                          # already handled upstream
+        except KeyError:
+            pass
+
+        extra = {"float complex": np.complex64, "double complex": np.complex128}
+        _stream.type_adios_to_numpy = (
+            lambda name: extra[name] if name in extra else original(name))
+
+    def _bp_step_reads(filename):
+        """
+        Yield one ``read(name, ...)`` callable per step of a BP file.
+
+        adios2 2.10 rewrote the Python bindings, replacing the module-level
+        ``open()`` with ``Stream``; both spellings are supported so the reader
+        works whichever version is installed. The old ``np_type=`` argument is
+        gone in the new API, so callers cast the result themselves.
+        """
+        _patch_adios2_complex()
+        if hasattr(adios2, "Stream"):                    # adios2 >= 2.10
+            with adios2.Stream(filename, "r") as s:
+                for _ in s.steps():
+                    yield s.read
+        elif hasattr(adios2, "open"):                    # adios2 < 2.10
+            with adios2.open(filename, "r") as fh:
+                for step in fh:
+                    yield step.read
+        else:
+            raise ImportError(
+                "installed adios2 exposes neither Stream nor open()")
+
     class BPReader(_BaseReader):
         """
         Lazy streaming reader for ADIOS2 BP files.
@@ -376,10 +425,8 @@ if _ADIOS2_AVAILABLE:
             np.ndarray
                 Shape ``(n_iters,)``.
             """
-            times = []
-            with adios2.open(self.filename, "r") as fh:
-                for step in fh:
-                    times.append(step.read("time", np_type=self.real_dtype))
+            times = [np.asarray(read("time")).ravel()[0]
+                     for read in _bp_step_reads(self.filename)]
             return np.array(times, dtype=self.real_dtype)
 
         # Variable names written by GENE for each file type, in array order
@@ -414,23 +461,23 @@ if _ADIOS2_AVAILABLE:
             buffer    = {}          # step_idx -> (time, data)
             next_out  = 0           # next position in iteration_indices to yield
 
-            with adios2.open(self.filename, "r") as fh:
-                for step_idx, step in enumerate(fh):
-                    if step_idx not in iter_set:
-                        continue
-                    time = float(step.read("time", np_type=self.real_dtype))
-                    data = []
-                    for name in var_names:
-                        arr = step.read(name, np_type=self.cpx_dtype)
-                        arr = arr.reshape((self.ni, self.nj, self.nk), order="F")
-                        data.append(arr)
-                    buffer[step_idx] = (time, data)
+            for step_idx, read in enumerate(_bp_step_reads(self.filename)):
+                if step_idx not in iter_set:
+                    continue
+                time = float(np.asarray(read("time")).ravel()[0])
+                data = []
+                for name in var_names:
+                    arr = np.asarray(read(name)).astype(self.cpx_dtype,
+                                                        copy=False)
+                    arr = arr.reshape((self.ni, self.nj, self.nk), order="F")
+                    data.append(arr)
+                buffer[step_idx] = (time, data)
 
-                    # yield as many consecutive results as are ready
-                    while (next_out < len(iteration_indices) and
-                           iteration_indices[next_out] in buffer):
-                        yield buffer.pop(iteration_indices[next_out])
-                        next_out += 1
+                # yield as many consecutive results as are ready
+                while (next_out < len(iteration_indices) and
+                       iteration_indices[next_out] in buffer):
+                    yield buffer.pop(iteration_indices[next_out])
+                    next_out += 1
 
 else:
 

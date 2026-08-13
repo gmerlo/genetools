@@ -19,21 +19,54 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 
+def _bp_last_step(path):
+    """Yield a ``read`` callable positioned on the file's last step.
+
+    adios2 2.10 replaced the module-level ``open()`` with ``Stream``, and its
+    type table still omits ``'float complex'``, so single-precision output
+    fails with a KeyError until the missing entries are supplied.
+    """
+    import adios2
+    try:
+        from adios2 import stream as _stream
+        _orig = _stream.type_adios_to_numpy
+        try:
+            _orig("float complex")
+        except KeyError:
+            _extra = {"float complex": np.complex64,
+                      "double complex": np.complex128}
+            _stream.type_adios_to_numpy = (
+                lambda n: _extra[n] if n in _extra else _orig(n))
+    except ImportError:
+        pass
+
+    if hasattr(adios2, "Stream"):                       # adios2 >= 2.10
+        with adios2.Stream(path, "r") as s:
+            last = s.num_steps() - 1
+            for _ in s.steps():
+                if s.current_step() == last:
+                    yield s.read
+                    return
+    else:                                               # adios2 < 2.10
+        with adios2.open(path, "r") as fh:
+            last = sum(1 for _ in fh) - 1
+        with adios2.open(path, "r") as fh:
+            for i, step in enumerate(fh):
+                if i == last:
+                    yield step.read
+                    return
+
+
 def read_last(field, p):
     """Return (time, [complex array (nx, nky, nz) per field]) of the last step."""
     shape = (p["nx"], p["nky"], p["nz"])
     names = ("phi", "A_par", "B_par")[:p["n_fields"]]
 
     if field.endswith(".bp"):
-        import adios2
-        with adios2.open(field, "r") as fh:
-            last = sum(1 for _ in fh) - 1
-        with adios2.open(field, "r") as fh:
-            for i, step in enumerate(fh):
-                if i == last:
-                    time = float(np.asarray(step.read("time")).ravel()[0])
-                    return time, [np.asarray(step.read(v)).reshape(shape, order="F")
-                                  for v in names]
+        for read in _bp_last_step(field):
+            time = float(np.asarray(read("time")).ravel()[0])
+            return time, [np.asarray(read(v)).reshape(shape, order="F")
+                          for v in names]
         sys.exit(f"{field}: empty BP file")
 
     size = os.path.getsize(field)
