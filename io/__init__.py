@@ -11,6 +11,8 @@ BinaryReader
     Stream field/moment data from Fortran unformatted binary files.
 BPReader
     Stream field/moment data from ADIOS2 BP files.
+H5Reader
+    Stream field/moment data from GENE and GENE-3D HDF5 files.
 MultiSegmentReader
     Stitch multiple run-segment readers into a single transparent reader.
 Params
@@ -26,7 +28,7 @@ Coordinates(folder, extensions, params)
     Build coordinate arrays (x, kx, ky, z, vp, mu) for one or more segments.
 """
 
-from .data import BinaryReader, BPReader, MultiSegmentReader
+from .data import BinaryReader, BPReader, H5Reader, MultiSegmentReader
 from .params import Params
 from .utils import set_runs
 from .geometry import Geometry
@@ -36,6 +38,7 @@ from .profiles_loader import load_equilibrium_profiles, EquilibriumProfiles
 __all__ = [
     "BinaryReader",
     "BPReader",
+    "H5Reader",
     "MultiSegmentReader",
     "Params",
     "set_runs",

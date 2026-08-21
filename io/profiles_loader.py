@@ -5,10 +5,12 @@
 """
 profiles_loader.py — Equilibrium profile loader for global GENE simulations.
 
-GENE writes per-species equilibrium profile files (``profiles_{species}_{ext}``)
+GENE writes per-species equilibrium profile files (``profiles_{species}{ext}``)
 containing radial profiles of temperature, density, and their logarithmic
-gradients.  These files are plain text with two header lines followed by
-columns of floats.
+gradients.  These are plain text — a header line, a ``#<time>`` line, then
+columns of floats in the order ``x/a, x/rho_ref, T, n, omt, omn`` — and, when
+the run was built with HDF5 support, an equivalent ``.h5`` twin. GENE-3D writes
+both; the HDF5 form is read when the text file is absent.
 
 Public interface
 ----------------
@@ -29,6 +31,8 @@ Example
 """
 
 import os
+
+import h5py
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -58,19 +62,107 @@ def _load_single(folder: str, ext: str, species_name: str) -> dict:
         If the profile file does not exist.
     """
     fname = os.path.join(folder, f"profiles_{species_name}{ext}")
-    if not os.path.isfile(fname):
-        raise FileNotFoundError(f"Equilibrium profile file not found: {fname}")
+    if os.path.isfile(fname):
+        return _load_ascii(fname)
 
-    data = np.loadtxt(fname, skiprows=2)
+    # GENE-3D and GENE with write_h5 also write an HDF5 twin. GENE-3D is the
+    # case that needs it: its ASCII file is rewritten (and appended to) as the
+    # background profiles evolve, while the HDF5 form is a clean snapshot.
+    h5name = fname + ".h5"
+    if os.path.isfile(h5name):
+        return _load_h5(h5name)
 
-    return {
-        "x_o_rho_ref": data[:, 0],
-        "x_o_a": data[:, 1],
+    raise FileNotFoundError(
+        f"Equilibrium profile file not found: {fname} (nor {h5name})")
+
+
+def _load_ascii(fname: str) -> dict:
+    """
+    Parse a ``profiles_<species>`` text file.
+
+    The column order is ``x/a`` then ``x/rho_ref`` — that is what both
+    ``gene/src/profiles.F90`` and ``gene3d-dev/src/profiles.F90`` write, and
+    what the file's own header line says. Getting these two the wrong way round
+    silently rescales the radial axis by ``rhostar``.
+
+    GENE-3D appends a fresh block (separated by two blank lines) every time the
+    background profiles are updated, so only the last block is returned.
+    """
+    with open(fname) as fh:
+        lines = fh.readlines()
+
+    blocks, current = [], []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            if current:
+                blocks.append(current)
+                current = []
+            continue
+        if stripped.startswith("#"):
+            continue
+        current.append(stripped)
+    if current:
+        blocks.append(current)
+
+    if not blocks:
+        raise ValueError(f"No profile data rows found in {fname}")
+
+    data = np.array([[float(v) for v in row.split()] for row in blocks[-1]])
+    if data.ndim == 1:
+        data = data[np.newaxis, :]
+    if data.shape[1] < 6:
+        raise ValueError(
+            f"{fname} has {data.shape[1]} columns; expected at least 6 "
+            "(x/a, x/rho_ref, T, n, omt, omn)")
+
+    out = {
+        "x_o_a": data[:, 0],
+        "x_o_rho_ref": data[:, 1],
         "T": data[:, 2],
         "n": data[:, 3],
         "omt": data[:, 4],
         "omn": data[:, 5],
     }
+    if data.shape[1] >= 7:
+        # 'te' when tau is computed, 'tau' when it was read in; the header
+        # says which, and either way it is the seventh column.
+        out["te_or_tau"] = data[:, 6]
+    return out
+
+
+def _load_h5(fname: str) -> dict:
+    """
+    Read a ``profiles_<species>.h5`` file.
+
+    Written by ``write_spec_profiles`` in both codes:
+    ``/position/{x_o_a,x_o_rho_ref}``, ``/temp/{T,omt}``,
+    ``/density/{n,omn}``, optionally ``/temp/{te,tau}`` and ``/Erad``.
+    """
+    def get(f, path):
+        dset = f.get(path)
+        return None if dset is None else np.asarray(dset[...], dtype=float)
+
+    with h5py.File(fname, "r") as f:
+        out = {
+            "x_o_a": get(f, "position/x_o_a"),
+            "x_o_rho_ref": get(f, "position/x_o_rho_ref"),
+            "T": get(f, "temp/T"),
+            "n": get(f, "density/n"),
+            "omt": get(f, "temp/omt"),
+            "omn": get(f, "density/omn"),
+        }
+        for name, key in (("temp/te", "te"), ("temp/tau", "tau"),
+                          ("Erad", "Erad")):
+            val = get(f, name)
+            if val is not None:
+                out[key] = val
+
+    missing = [k for k, v in out.items() if v is None]
+    if missing:
+        raise ValueError(
+            f"{fname} is missing profile dataset(s): {', '.join(missing)}")
+    return out
 
 
 class _SegmentProfiles:

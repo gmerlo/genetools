@@ -2,7 +2,7 @@
 
 Post-processing toolkit for [GENE](http://genecode.org) gyrokinetic plasma simulations.
 
-`genetools` provides Python readers and plotters for the binary and ADIOS2 output files produced by the GENE code, making it straightforward to load, inspect and visualise simulation results from a Jupyter notebook or the command line.
+`genetools` provides Python readers and plotters for the binary, HDF5 and ADIOS2 output files produced by the GENE code — including [GENE-3D](https://gitlab.mpcdf.mpg.de/GENE/gene-3d), which is real-space in both perpendicular directions and writes HDF5 only. Loading, inspecting and visualising simulation results is a one-liner from a Jupyter notebook or the command line.
 
 The recommended entry point is the **`Run` facade**: point it at a run directory and every diagnostic is one line away, returning labelled [`xarray`](https://docs.xarray.dev) datasets and plots. Continuation/restart segments are discovered and stitched automatically.
 
@@ -22,6 +22,11 @@ Or from the command line:
 genetools /path/to/run --nrg
 genetools /path/to/run --spectra --t 500 2000 --save spectra.png
 genetools /path/to/run --growthrate
+
+# GENE-3D
+genetools /path/to/run3d --fluxes2d --si
+genetools /path/to/run3d --slices --quantities phi n --fourier y
+genetools /path/to/run3d --chi --t 200 800
 ```
 
 ---
@@ -43,6 +48,51 @@ genetools /path/to/run --growthrate
 | `run.profile_diag` · `--profile-diag` | GENE `profile_<species>` radial profiles + turbulent/neoclassical fluxes + bootstrap current (global nonlinear) |
 
 Each diagnostic exposes a uniform surface: `.data` (an `xarray.Dataset`), `.plot(t=(start, stop))`, and (where caching applies) `.save()`.
+
+### GENE-3D
+
+`Run` reports which geometry a run uses via `run.geometry_kind` — one of `flux_tube`, `x_global`, `y_global` or `xy_global` — and `run.is_3d` is true for the last.
+
+There is **one class per diagnostic**, each handling every geometry it supports internally, so every accessor above keeps working for a GENE-3D run and `run.spectra.plot()` means the same thing whatever the run is:
+
+```python
+run.spectra          # -> Spectra, for a flux tube, an x-global run or GENE-3D
+run.spectra.geometry_kind
+```
+
+These have no spectral counterpart and are GENE-3D only:
+
+| Accessor / flag | What it computes |
+|---|---|
+| `run.slices(quantities=…)` · `--slices` | Every 1-D and 2-D reduction of a snapshot, optionally in Fourier space |
+| `run.timetraces(quantities=…)` · `--timetraces` | Volume-averaged and ky-resolved time traces |
+| `run.gam` · `--gam` | Zonal-flow / GAM oscillation, with fitted frequency and damping |
+| `run.chi` · `--chi` | Heat diffusivity χ against the self-consistent driving gradient |
+| `run.omega` · `--omega` | Real frequency and the power spectrum of the de-trended signal |
+| `run.geometry_plots` · `--geometry` | 3-D geometry coefficients along cuts and planes |
+| `run.srcmom` · `--srcmom` | Krook heat/particle source moments (needs `istep_srcmom`) |
+| `run.vsp` · `--vsp` | Velocity-space output on the (z, v∥, μ) grid |
+| `run.planes(quantities=…)` · `--planes` | Remapped onto geometric (θ, φ) angles, with (n, m) mode analysis |
+| `run.vis3d(quantities=…)` · `--vis3d` | VTK export for ParaView/VisIt |
+
+These GENE-3D-only diagnostics declare which geometries they support and refuse on construction otherwise, rather than quietly reducing the data some other way:
+
+```python
+>>> Run("/path/to/flux_tube/run").gam
+NotImplementedError: Gam supports xy_global; this run is 'flux_tube'.
+```
+
+`run.ballooning(...)` likewise raises for a GENE-3D run: there is no single `ky` mode to follow when `y` is real space.
+
+Because GENE-3D computes its own turbulent fluxes and writes them to the moment
+file, `run.spectra` cross-checks every reconstructed spectrum against the code's
+own `Gamma_es`/`Q_es`/`Gamma_em`/`Q_em` and warns if the ky-sum disagrees:
+
+```python
+run = Run("/path/to/gene3d/run")
+run.spectra.compute()
+run.spectra.consistency   # {'ions/Q_es': 1.0000, ...} — 1.0 means they agree
+```
 
 ---
 
@@ -173,6 +223,31 @@ for t, arrays in reader.stream_selected([0, 50, 100]):
     phi = arrays[0]   # shape: (nx, nky, nz)
     print(f"t={t:.3f}, max(|φ|)={abs(phi).max():.4e}")
 ```
+
+### HDF5 files (`write_h5`, and all GENE-3D field/moment data)
+
+```python
+from genetools.io import H5Reader, Params
+
+params = Params('/path/to/run/', ['.dat']).get(0)
+
+# Note the '.h5' on the extension: GENE writes field.dat.h5, mom_ions.dat.h5, ...
+reader = H5Reader('field', '/path/to/run/', '.dat.h5', params)
+
+# Variables are discovered from the file, not from n_moms — GENE-3D's
+# parameters file reports 6 moments while diag_3d writes 10.
+reader.var_names                     # ['phi', 'A_par', ...]
+i = reader.index_of('Q_es')          # read a moment by name
+
+for t, arrays in reader.stream_selected([0, 5, 10]):
+    phi = arrays[0]                  # (nx, ny, nz) real for GENE-3D,
+                                     # (nx, nky, nz) complex for GENE
+```
+
+Arrays come back in GENE's `(ni, nj, nk)` order and with the dtype the file
+actually holds: futils stores 32-bit reals for field/moment data regardless of
+the run's `PRECISION`, and GENE's complex data may be a `{real, imaginary}`
+compound type. All of that is handled by the reader.
 
 ### ADIOS2 BP files
 

@@ -24,9 +24,14 @@ Continuation / restart runs are handled transparently: all segments
 The grid is assumed consistent across segments; a mismatch raises a warning
 telling you to scope to a subset via ``Run(path, ext=[...])``.
 
-Both Fortran-binary and ADIOS2 BP outputs are supported: each segment's reader
-is chosen per file (binary ``field_0001`` vs BP ``field_0001.bp``), so BP runs
-work without any extra arguments (the ``adios2`` package must be installed).
+Fortran-binary, HDF5 and ADIOS2 BP outputs are all supported: each segment's
+reader is chosen from the file actually on disk (``field_0001`` vs
+``field_0001.h5`` vs ``field_0001.bp``), so no extra arguments are needed (BP
+runs additionally require the ``adios2`` package).
+
+GENE-3D runs work through the same facade. They are real-space in x *and* y and
+write only HDF5, which :attr:`Run.geometry_kind` reports as ``'xy_global'``;
+diagnostics dispatch on that rather than on the two-valued :attr:`Run.is_local`.
 """
 
 from __future__ import annotations
@@ -45,18 +50,11 @@ from .io import (
     Coordinates,
     BinaryReader,
     BPReader,
+    H5Reader,
     MultiSegmentReader,
     load_equilibrium_profiles,
 )
-from .diagnostics import (
-    NrgReader,
-    Spectra,
-    SpectraGlobal,
-    Profiles,
-    Fluxes2D,
-    ShearingRate,
-    Contours,
-)
+from .diagnostics import NrgReader
 
 
 # ---------------------------------------------------------------------------
@@ -126,6 +124,22 @@ class Run:
     def is_local(self) -> bool:
         """Whether the run uses local (spectral-x) geometry (``x_local``)."""
         return bool(self.params.get(0)["general"].get("x_local", True))
+
+    @property
+    def geometry_kind(self) -> str:
+        """
+        ``'flux_tube'``, ``'x_global'``, ``'y_global'`` or ``'xy_global'``.
+
+        Prefer this over :attr:`is_local` when the distinction that matters is
+        *which* directions are spectral — GENE-3D is global in x and y, so
+        ``is_local`` alone cannot tell it apart from an x-global run.
+        """
+        return self.params.geometry_kind(0)
+
+    @property
+    def is_3d(self) -> bool:
+        """Whether this is a GENE-3D run (real space in x *and* y)."""
+        return self.params.is_3d(0)
 
     @property
     def species(self) -> list:
@@ -211,7 +225,7 @@ class Run:
         plist = self.params.tolist()
         if len(plist) <= 1:
             return
-        keys = ("nx0", "nky0", "nz0", "n_spec")
+        keys = ("nx0", "nky0", "ny0", "nz0", "n_spec")
         ref = {k: plist[0]["box"].get(k) for k in keys}
         ref_local = plist[0]["general"].get("x_local", True)
         bad = []
@@ -235,26 +249,42 @@ class Run:
 
     def _make_reader(self, file_type, ext, params_i, species=None):
         """
-        Build one segment reader, auto-selecting Fortran-binary vs ADIOS2 BP.
+        Build one segment reader, auto-selecting the output format.
 
-        The file present on disk decides: binary (``field_0001``) is preferred
-        when both exist (it needs no adios2); otherwise the BP form
-        (``field_0001.bp`` / ``field.bp``) is used, or selected from the
-        ``write_bp`` parameter when neither file is present yet. Constructing a
-        :class:`BPReader` without the ``adios2`` package raises a clear
-        ``ImportError``.
+        The file present on disk decides. Binary (``field_0001``) wins when
+        several exist, since it needs no optional package; then HDF5
+        (``field_0001.h5``), then ADIOS2 BP (``field_0001.bp`` / ``field.bp``).
+        With nothing on disk yet the ``write_h5``/``write_bp`` parameters
+        choose, falling back to binary so the first read fails with a clear
+        message naming the file it wanted. GENE-3D only ever writes HDF5, and
+        its ``write_h5 = T`` lives in ``&info`` — already reconciled into
+        ``in_out`` by :class:`~genetools.io.params.Params`.
+
+        Constructing a :class:`BPReader` without the ``adios2`` package raises
+        a clear ``ImportError``.
         """
         sp = f"_{species}" if species else ""
         binfile = f"{self._folder}{file_type}{sp}{ext}"
         if os.path.exists(binfile):
             return BinaryReader(file_type, self._folder, ext, params_i,
                                 species=species)
+
+        h5_ext = ext + ".h5"
+        if os.path.exists(f"{self._folder}{file_type}{sp}{h5_ext}"):
+            return H5Reader(file_type, self._folder, h5_ext, params_i,
+                            species=species)
+
         bp_ext = ("" if ext == ".dat" else ext) + ".bp"
         bpfile = f"{self._folder}{file_type}{sp}{bp_ext}"
         if os.path.exists(bpfile) or params_i.get("in_out", {}).get("write_bp", False):
             return BPReader(file_type, self._folder, bp_ext, params_i,
                             species=species)
-        # Neither present: default to binary (errors clearly on first read).
+
+        if params_i.get("in_out", {}).get("write_h5", False):
+            return H5Reader(file_type, self._folder, h5_ext, params_i,
+                            species=species)
+
+        # Nothing present: default to binary (errors clearly on first read).
         return BinaryReader(file_type, self._folder, ext, params_i,
                             species=species)
 
@@ -313,26 +343,37 @@ class Run:
 
     @cached_property
     def spectra(self):
-        return _BoundSpectra(self)
+        from .diagnostics.spectra import Spectra
+        return Spectra(self)
 
     @cached_property
     def profiles(self):
-        return _BoundProfiles(self)
+        from .diagnostics.profiles import Profiles
+        return Profiles(self)
 
     @cached_property
     def fluxes2d(self):
-        return _BoundFluxes2D(self)
+        from .diagnostics.fluxes2d import Fluxes2D
+        return Fluxes2D(self)
 
     @cached_property
     def shearing(self):
-        return _BoundShearing(self)
+        from .diagnostics.shearingrate import ShearingRate
+        return ShearingRate(self)
 
     @cached_property
     def contours(self):
-        return _BoundContours(self)
+        """2-D field/moment slices; options are passed to ``.plot()``."""
+        from .diagnostics.contours import Contours
+        return Contours(self)
 
     def ballooning(self, ky=None, **kw):
         """Ballooning mode structure for a chosen ``ky`` (local runs only)."""
+        if self.is_3d:
+            raise NotImplementedError(
+                "Ballooning mode structure needs a single ky mode, which a "
+                "GENE-3D run does not have — it is real-space in y. Use "
+                "run.planes for the field-aligned structure instead.")
         from .diagnostics.ballooning import Ballooning
         return Ballooning(self, ky=ky, **kw)
 
@@ -361,8 +402,72 @@ class Run:
         from .diagnostics.profile_diag import ProfileDiag
         return ProfileDiag(self)
 
+    # ------------------------------------------------------------------
+    # GENE-3D only
+    #
+    # These have no spectral counterpart, so they raise rather than silently
+    # doing something different for a flux-tube or x-global run.
+    # ------------------------------------------------------------------
+
+    def slices(self, **kw):
+        """Every 1-D and 2-D reduction of a GENE-3D snapshot."""
+        from .diagnostics.slices import Slices
+        return Slices(self, **kw)
+
+    def timetraces(self, **kw):
+        """Volume-averaged and ky-resolved time traces (GENE-3D)."""
+        from .diagnostics.timetraces import TimeTraces
+        return TimeTraces(self, **kw)
+
+    @cached_property
+    def gam(self):
+        """Zonal-flow / GAM oscillation traces (GENE-3D)."""
+        from .diagnostics.gam import Gam
+        return Gam(self)
+
+    @cached_property
+    def chi(self):
+        """Heat diffusivity against the driving gradient (GENE-3D)."""
+        from .diagnostics.chi import ChiGradient
+        return ChiGradient(self)
+
+    @cached_property
+    def omega(self):
+        """Real-frequency view of the growth-rate fit (GENE-3D)."""
+        from .diagnostics.omega import Omega
+        return Omega(self)
+
+    @cached_property
+    def geometry_plots(self):
+        """Geometry coefficients along cuts and planes (GENE-3D)."""
+        from .diagnostics.geometry_plots import GeometryPlots
+        return GeometryPlots(self)
+
+    @cached_property
+    def srcmom(self):
+        """Krook source moments as radial profiles (GENE-3D)."""
+        from .diagnostics.velocity import SrcMom
+        return SrcMom(self)
+
+    @cached_property
+    def vsp(self):
+        """Velocity-space output on the (z, v_par, mu) grid (GENE-3D)."""
+        from .diagnostics.velocity import VspSlice
+        return VspSlice(self)
+
+    def planes(self, **kw):
+        """Data remapped onto geometric (theta, phi) angles (GENE-3D)."""
+        from .diagnostics.planes import Planes
+        return Planes(self, **kw)
+
+    def vis3d(self, **kw):
+        """VTK export for external 3-D visualisation (GENE-3D)."""
+        from .diagnostics.vis import Vis
+        return Vis(self, **kw)
+
+
     def __repr__(self) -> str:
-        geom = "local" if self.is_local else "global"
+        geom = self.geometry_kind
         return (f"<Run {self.path.name!r} | {geom} | "
                 f"{len(self.extensions)} segment(s) | "
                 f"species={self.species}>")
@@ -390,177 +495,3 @@ class _BoundNrg:
     def plot(self, t=None):
         # nrg plots the full time series; t is accepted for a uniform facade API.
         self._reader.plot()
-
-
-class _BoundSpectra:
-    """Time-averaged flux spectra; auto-dispatches local vs global."""
-
-    def __init__(self, run: Run):
-        self.run = run
-        self.is_global = not run.is_local
-        self._diag = (SpectraGlobal(folder=run._folder) if self.is_global
-                      else Spectra(folder=run._folder))
-
-    def compute(self, t=None):
-        a, b = _bounds(t)
-        r = self.run
-        if self.is_global:
-            self._diag.compute_and_save(r.field, r._mom_list(), r.coords[0],
-                                        r.geometry[0], r.params.get(0), a, b,
-                                        equilibrium_profiles=r.eq_profiles)
-        else:
-            self._diag.compute_missing(r.field, r._mom_list(), r.coords[0],
-                                       r.geometry[0], r.params, a, b)
-        return self
-
-    def save(self, t=None):
-        return self.compute(t)
-
-    def load(self, t=None):
-        self.compute(t)
-        a, b = _window(t)
-        return self._diag.dataset(self.run.coords[0], self.run.params.get(0),
-                                  self.run.species, a, b)
-
-    @property
-    def data(self):
-        return self.load()
-
-    def plot(self, t=None, x_avg_lims=None):
-        a, b = _bounds(t)
-        r = self.run
-        if self.is_global:
-            self.compute(t)
-            self._diag.plot(r.coords[0], r.params.get(0), a, b,
-                            x_avg_lims=x_avg_lims)
-        else:
-            self._diag.plot(r.field, r._mom_list(), r.coords, r.geometry,
-                            r.params, a, b)
-
-
-class _BoundProfiles:
-    """Flux-surface-averaged radial profiles (time-resolved)."""
-
-    def __init__(self, run: Run):
-        self.run = run
-        self._diag = Profiles(folder=run._folder)
-
-    def compute(self, t=None):
-        a, b = _bounds(t)
-        r = self.run
-        self._diag.compute_and_save(r._mom_dict(), r.coords[0], r.geometry[0],
-                                    r.params.get(0), a, b)
-        return self
-
-    def save(self, t=None):
-        return self.compute(t)
-
-    def load(self, t=None):
-        self.compute(t)
-        a, b = _window(t)
-        return self._diag.dataset(self.run.coords[0], self.run.params.get(0),
-                                  self.run.species, a, b,
-                                  equilibrium_profiles=self.run.eq_profiles)
-
-    @property
-    def data(self):
-        return self.load()
-
-    def plot(self, t=None, eq_profs=None):
-        a, b = _bounds(t)
-        self.compute(t)
-        if eq_profs is None:
-            eq_profs = self.run.eq_profiles
-        self._diag.plot(self.run.coords[0], self.run.params.get(0), a, b,
-                        equilibrium_profiles=eq_profs)
-
-
-class _BoundFluxes2D:
-    """x-resolved transport fluxes (time-averaged)."""
-
-    def __init__(self, run: Run):
-        self.run = run
-        self._diag = Fluxes2D(folder=run._folder)
-
-    def compute(self, t=None):
-        a, b = _bounds(t)
-        r = self.run
-        self._diag.compute_and_save(r.field, r._mom_list(), r.coords[0],
-                                    r.geometry[0], r.params.get(0), a, b,
-                                    equilibrium_profiles=r.eq_profiles)
-        return self
-
-    def save(self, t=None):
-        return self.compute(t)
-
-    def load(self, t=None):
-        self.compute(t)
-        a, b = _window(t)
-        return self._diag.dataset(self.run.coords[0], self.run.params.get(0),
-                                  self.run.species, a, b)
-
-    @property
-    def data(self):
-        return self.load()
-
-    def plot(self, t=None, show_heatmaps=False):
-        a, b = _bounds(t)
-        self.compute(t)
-        self._diag.plot(self.run.coords[0], self.run.params.get(0), a, b,
-                        show_heatmaps=show_heatmaps)
-
-
-class _BoundShearing:
-    """ExB shearing rate / zonal electric field (time-resolved)."""
-
-    def __init__(self, run: Run):
-        self.run = run
-        self._diag = ShearingRate(folder=run._folder)
-
-    def compute(self, t=None):
-        a, b = _bounds(t)
-        r = self.run
-        self._diag.compute_and_save(r._field_segment_readers, r.coords,
-                                    r.geometry, r.params, a, b)
-        return self
-
-    def save(self, t=None):
-        return self.compute(t)
-
-    def load(self, t=None):
-        self.compute(t)
-        ds = self._diag.dataset(self.run.coords[0], self.run.params.get(0))
-        a, b = _window(t)
-        if (a is not None or b is not None) and "time" in ds.coords:
-            ds = ds.sel(time=slice(a, b))
-        return ds
-
-    @property
-    def data(self):
-        return self.load()
-
-    def plot(self, t=None):
-        a, b = _bounds(t)
-        self.compute(t)
-        self._diag.plot(self.run.coords[0], a, b)
-
-
-class _BoundContours:
-    """2D field/moment slice visualisation (plot-only)."""
-
-    def __init__(self, run: Run):
-        self.run = run
-        self._diag = Contours()
-
-    @property
-    def data(self):
-        raise NotImplementedError(
-            "Contours is a visualisation diagnostic; use .plot(...) instead.")
-
-    def plot(self, t=None, field=0, ifft=None, species=None, **kw):
-        a, b = _bounds(t)
-        reader = self.run.field if species is None else self.run.mom(species)
-        self._diag.plot_timeseries_2d(
-            reader, a, b, field=field, ifft=ifft,
-            params_list=self.run.params.get(0), coords=self.run.coords[0],
-            species=species, **kw)

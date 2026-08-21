@@ -21,16 +21,22 @@ parallel velocity, and flux quantities).
 
 Column index reference (0-based)
 ---------------------------------
-0  n        particle number / density fluctuation
-1  T_par    parallel temperature fluctuation
-2  T_perp   perpendicular temperature fluctuation
-3  u_par    parallel velocity fluctuation
-4  …
-5  …
-6  Q        heat flux (electrostatic)
-7  Q        heat flux (electromagnetic)
-8  Γ        particle flux (electrostatic)
-9  Γ        particle flux (electromagnetic)
+Taken from ``nrg_label1`` in GENE's ``diag.F90``; GENE-3D writes the same first
+eight in the same order (``diag_3d.F90``) and stops there, which is what
+``nrgcols = 8`` in its ``parameters`` file reports::
+
+    0  |n|^2         density fluctuation amplitude
+    1  |u_par|^2     parallel velocity fluctuation amplitude
+    2  |T_par|^2     parallel temperature fluctuation amplitude
+    3  |T_perp|^2    perpendicular temperature fluctuation amplitude
+    4  Gamma_es      particle flux (electrostatic)
+    5  Gamma_em      particle flux (electromagnetic)
+    6  Q_es          heat flux (electrostatic)
+    7  Q_em          heat flux (electromagnetic)
+    8  Pi_es         momentum flux (electrostatic)      GENE only
+    9  Pi_em         momentum flux (electromagnetic)    GENE only
+    10 Pi_t_par_es   parallel   momentum flux, trapped  GENE only
+    11 Pi_t_per_es   perpend.   momentum flux, trapped  GENE only
 
 Usage
 -----
@@ -57,27 +63,29 @@ from genetools.io.params import Params
 
 # Fluctuation quantity columns
 _COL_N = 0
-_COL_T_PAR = 1
-_COL_T_PERP = 2
-_COL_U_PAR = 3
+_COL_U_PAR = 1
+_COL_T_PAR = 2
+_COL_T_PERP = 3
 
 # Flux quantity column pairs (col_electrostatic, col_electromagnetic)
+_FLUX_PARTICLE = (4, 5)    # Particle flux Γ
 _FLUX_HEAT = (6, 7)        # Heat flux Q
-_FLUX_PARTICLE = (8, 9)    # Particle flux Γ
+_FLUX_MOMENTUM = (8, 9)    # Momentum flux Π — absent from GENE-3D's 8 columns
 
-# Flux column pairs used for plotting (ordered: heat first, then particle)
-_FLUX_COL_PAIRS = [_FLUX_HEAT, _FLUX_PARTICLE]
-
-# y-axis labels for each flux row
-_FLUX_YLABELS = [
-    r"$Q\,[Q_{\rm GB}]$",
-    r"$\Gamma\,[\Gamma_{\rm GB}]$",
+# Flux column pairs used for plotting, with their y-axis labels. Rows whose
+# columns the file does not have are skipped, so GENE-3D's eight-column nrg
+# plots Q and Γ and simply omits Π.
+_FLUX_ROWS = [
+    (_FLUX_HEAT, r"$Q\,[Q_{\rm GB}]$"),
+    (_FLUX_PARTICLE, r"$\Gamma\,[\Gamma_{\rm GB}]$"),
+    (_FLUX_MOMENTUM, r"$\Pi\,[\Pi_{\rm GB}]$"),
 ]
 
 # Column colours and labels for fluctuation plots
-_FLUCTUATION_COLORS = ["b", "m", "g", "r"]
-_FLUCTUATION_LABELS = [r"$n$", r"$T_{\|}$", r"$T_{\perp}$", r"$u_{\|}$"]
-_FLUCTUATION_COLS = [_COL_N, _COL_T_PAR, _COL_T_PERP, _COL_U_PAR]
+_FLUCTUATION_COLORS = ["b", "r", "m", "g"]
+_FLUCTUATION_LABELS = [r"$|n|^2$", r"$|u_{\|}|^2$",
+                       r"$|T_{\|}|^2$", r"$|T_{\perp}|^2$"]
+_FLUCTUATION_COLS = [_COL_N, _COL_U_PAR, _COL_T_PAR, _COL_T_PERP]
 
 
 class NrgReader:
@@ -266,8 +274,10 @@ class NrgReader:
         return self.times, self.data
 
     # Named GENE nrg columns (others remain in the raw ``nrg`` variable).
-    _NAMED_COLS = {0: "n_sq", 1: "T_par_sq", 2: "T_perp_sq", 3: "u_par_sq",
-                   6: "Q_es", 7: "Q_em", 8: "Gamma_es", 9: "Gamma_em"}
+    _NAMED_COLS = {0: "n_sq", 1: "u_par_sq", 2: "T_par_sq", 3: "T_perp_sq",
+                   4: "Gamma_es", 5: "Gamma_em", 6: "Q_es", 7: "Q_em",
+                   8: "Pi_es", 9: "Pi_em",
+                   10: "Pi_t_par_es", 11: "Pi_t_perp_es"}
 
     def dataset(self, params: dict = None):
         """Return the nrg data as an ``xarray.Dataset`` (dims species, time)."""
@@ -372,9 +382,10 @@ class NrgReader:
         Plot heat and particle flux time traces for each species.
 
         Creates a grid of subplots with rows for each flux type (heat flux Q,
-        particle flux Γ) and columns for each species.  Electrostatic
-        contributions are plotted as solid blue lines; electromagnetic as
-        dashed magenta lines.
+        particle flux Γ, momentum flux Π) and columns for each species.
+        Electrostatic contributions are plotted as solid blue lines;
+        electromagnetic as dashed magenta lines. Rows whose columns the file
+        does not carry are omitted.
 
         Parameters
         ----------
@@ -391,7 +402,16 @@ class NrgReader:
                 f"Expected {n_species} titles, got {len(titles)}"
             )
 
-        n_rows = len(_FLUX_COL_PAIRS)
+        # Only plot rows the file actually has: GENE-3D's nrg stops after Q,
+        # so there is no momentum-flux column to draw.
+        n_cols = self.data.shape[1]
+        rows = [(pair, label) for pair, label in _FLUX_ROWS
+                if max(pair) < n_cols]
+        n_rows = len(rows)
+        if n_rows == 0:
+            raise ValueError(
+                f"nrg file has only {n_cols} columns — no flux columns to plot.")
+
         fig, axes = plt.subplots(
             n_rows, n_species,
             figsize=(4 * n_species, 3 * n_rows),
@@ -399,7 +419,7 @@ class NrgReader:
             squeeze=False,
         )
 
-        for row_idx, (col_es, col_em) in enumerate(_FLUX_COL_PAIRS):
+        for row_idx, ((col_es, col_em), ylabel) in enumerate(rows):
             for sp_idx in range(n_species):
                 ax = axes[row_idx, sp_idx]
                 ax.plot(self.times, self.data[sp_idx, col_es, :], color="b", linestyle="-",
@@ -411,7 +431,7 @@ class NrgReader:
                     ax.set_title(titles[sp_idx])
                     ax.legend(fontsize=8)
                 if sp_idx == 0:
-                    ax.set_ylabel(_FLUX_YLABELS[row_idx])
+                    ax.set_ylabel(ylabel)
                 if row_idx == n_rows - 1:
                     ax.set_xlabel(r"$t\;c_{\rm ref}/L_{\rm ref}$")
 

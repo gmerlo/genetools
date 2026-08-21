@@ -163,7 +163,26 @@ class SpectraGlobal(CachingDiagnostic):
         Path to the output HDF5 file (default ``'spectra_global.h5'``).
     """
 
-    def __init__(self, outfile: str = "spectra_global.h5", folder: str = None):
+    def __init__(self, run=None, outfile: str = None, folder: str = None):
+        """
+        Parameters
+        ----------
+        run : genetools.run.Run, optional
+            When given, the HDF5 cache lives in the run directory. This class is
+            the x-global implementation behind
+            :class:`~genetools.diagnostics.spectra.Spectra`, which owns the
+            public facade; constructing it directly is supported for scripts that
+            want the x-global path explicitly.
+        outfile, folder : str, optional
+            Override the cache location.
+        """
+        if run is not None:
+            self.run = run
+            self._cache = {}
+            folder = folder or getattr(run, "_folder", None)
+        self._legacy_init(outfile or "spectra_global.h5", folder)
+
+    def _legacy_init(self, outfile: str, folder: str = None):
         super().__init__(outfile, folder)
 
     # ------------------------------------------------------------------

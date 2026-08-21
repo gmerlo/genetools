@@ -23,9 +23,10 @@ def set_runs(folder, exclude=None) -> list:
     identified by a 4-digit zero-padded suffix (e.g. ``_0001``, ``_0042``)
     or the special suffix ``'.dat'`` for the initial / unsuffixed run.
 
-    Detection is based on ``nrg*`` files.  When GENE's HDF5 mode is active
-    (``all_params*.h5`` files exist), every other ``nrg`` file is a
-    duplicate and is skipped (stride 2).
+    Detection is based on ``nrg*`` files.  A run with HDF5 output writes both
+    ``nrg<suffix>`` and ``nrg<suffix>.h5``; both name the same segment and are
+    reported once.  Suffixes are returned exactly as they appear on disk, so
+    non-standard widths (``_1``, as GENE-3D scans produce) survive.
 
     Parameters
     ----------
@@ -59,34 +60,29 @@ def set_runs(folder, exclude=None) -> list:
     if not folder.is_dir():
         raise FileNotFoundError(f"Folder '{folder}' not found.")
 
-    # HDF5 mode → every other file is a duplicate
-    use_h5 = bool(list(folder.glob("all_params*.h5")))
-    stride = 2 if use_h5 else 1
-
     nrg_files = sorted(folder.glob("nrg*"))
     if not nrg_files:
         raise FileNotFoundError(f"No 'nrg' files found in '{folder}'.")
 
-    numeric_suffixes = []
-    has_dat = False
-
-    for nrg_file in nrg_files[::stride]:
-        name = nrg_file.name
-        if name.endswith(".dat"):
-            has_dat = True
+    # Suffix string -> sort key. Using a dict collapses the HDF5 twins
+    # (``nrg_0001`` and ``nrg_0001.h5`` are one segment) without having to
+    # guess at a stride, and keeping the literal suffix means a segment named
+    # ``_1`` stays ``_1`` rather than being reformatted into a name that no
+    # file on disk actually has.
+    keys = {}
+    for nrg_file in nrg_files:
+        if not nrg_file.is_file():
             continue
-        m = re.search(r"(\d{4})$", name)
+        name = nrg_file.name
+        if name.endswith(".h5"):
+            name = name[: -len(".h5")]
+        suffix = name[len("nrg"):]
+        if suffix == ".dat":
+            keys[suffix] = (1, 0)          # the unsuffixed run sorts last
+            continue
+        m = re.fullmatch(r"_(\d+)", suffix)
         if m:
-            numeric_suffixes.append(int(m.group(1)))
+            keys[suffix] = (0, int(m.group(1)))
 
-    # Apply exclusions and sort
-    suffix_list = [
-        f"_{n:04d}"
-        for n in sorted(numeric_suffixes)
-        if f"_{n:04d}" not in exclude
-    ]
-
-    if has_dat and ".dat" not in exclude:
-        suffix_list.append(".dat")
-
-    return suffix_list
+    return [suffix for suffix in sorted(keys, key=keys.__getitem__)
+            if suffix not in exclude]

@@ -8,5 +8,8 @@ compat.py — Compatibility shims for different numpy versions.
 
 import numpy as np
 
-# numpy < 2.0 has np.trapz; numpy >= 2.0 renamed it to np.trapezoid
-trapz = getattr(np, 'trapz', None) or getattr(np, 'trapezoid')
+# numpy >= 2.0 renamed np.trapz to np.trapezoid and deprecated the old name.
+# Prefer the new one where it exists: the old spelling still resolves on numpy 2
+# but emits a DeprecationWarning on every call, which buries real warnings from
+# the diagnostics under integration noise.
+trapz = getattr(np, 'trapezoid', None) or getattr(np, 'trapz')

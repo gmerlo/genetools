@@ -53,7 +53,9 @@ import matplotlib.pyplot as plt
 import h5py
 
 from genetools.compat import trapz as _trapz
-from genetools.diagnostics._base import CachingDiagnostic
+from genetools.diagnostics._base import (CachingDiagnostic,
+                                        RunDiagnostic)
+from genetools.diagnostics import _gene3d as g3
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +144,7 @@ def _compute_fsa_profiles(moments: list, x_local: bool, J_norm: np.ndarray,
 # Main class
 # ---------------------------------------------------------------------------
 
-class Profiles(CachingDiagnostic):
+class Profiles(RunDiagnostic):
     """
     Compute, cache, and plot radial profile diagnostics.
 
@@ -155,8 +157,34 @@ class Profiles(CachingDiagnostic):
         Path to the output HDF5 file (default ``'profiles.h5'``).
     """
 
-    def __init__(self, outfile: str = "profiles.h5", folder: str = None):
-        super().__init__(outfile, folder)
+    name = "profiles"
+    cache_file = "profiles.h5"
+
+    def __init__(self, run=None, outfile: str = None, folder: str = None):
+        """
+        Parameters
+        ----------
+        run : genetools.run.Run, optional
+        outfile, folder : str, optional
+            Override the HDF5 cache location; normally derived from the run.
+        """
+        if run is not None:
+            RunDiagnostic.__init__(self, run)
+            if outfile:
+                self.outfile = outfile
+            return
+        self._legacy_init(outfile or self.cache_file, folder)
+
+    def _legacy_init(self, outfile: str, folder: str = None):
+        """
+        Detached construction: HDF5 cache only, no run attached.
+
+        Goes straight to the caching layer — ``super()`` is now
+        :class:`RunDiagnostic`, whose constructor takes a run.
+        """
+        self.run = None
+        self._cache = {}
+        CachingDiagnostic.__init__(self, outfile, folder)
 
     # ------------------------------------------------------------------
     # HDF5 helpers
@@ -313,7 +341,29 @@ class Profiles(CachingDiagnostic):
 
         return result
 
-    def dataset(self, coords, params, species, t_start=None, t_stop=None,
+    def dataset(self, t=None, params=None, species=None, t_start=None,
+                t_stop=None, equilibrium_profiles=None):
+        """
+        Return the radial profiles as an :class:`xarray.Dataset`.
+
+        Called with a time window when bound to a run; the older
+        ``dataset(coords, params, species, ...)`` form still works.
+        """
+        if self.run is not None and not isinstance(t, dict):
+            if self.is_3d:
+                return self._dataset_3d(t)
+            self.compute(t)
+            a, b = self._window(t)
+            return self._dataset_from_cache(
+                self.coord, self.params, self.run.species, a, b,
+                equilibrium_profiles=(equilibrium_profiles
+                                      if equilibrium_profiles is not None
+                                      else self.run.eq_profiles))
+        return self._dataset_from_cache(t, params, species, t_start, t_stop,
+                                        equilibrium_profiles)
+
+    def _dataset_from_cache(self, coords, params, species, t_start=None,
+                            t_stop=None,
                 equilibrium_profiles=None):
         """
         Return the radial profiles as an ``xarray.Dataset`` (dims species, time, x).
@@ -489,7 +539,171 @@ class Profiles(CachingDiagnostic):
     # Plotting
     # ------------------------------------------------------------------
 
-    def plot(self, coords: dict, params: dict,
+    # ------------------------------------------------------------------
+    # Run-native front end
+    # ------------------------------------------------------------------
+
+    def compute(self, t=None):
+        """
+        Stream the moment files and cache the radial profiles.
+
+        The spectral geometries append to the HDF5 cache; GENE-3D keeps its
+        result in memory — one radial profile per output time per species is
+        small, and there is no partial-window streaming to amortise.
+        """
+        if self.is_3d:
+            key = self._key(t)
+            if key not in self._cache:
+                self._cache[key] = self._compute_3d(t)
+            return self._cache[key]
+        a, b = self._bounds(t)
+        r = self.run
+        self.compute_and_save({n: r.mom(n) for n in r.species}, self.coord,
+                              self.geom, self.params, a, b)
+        return self
+
+    def _background_3d(self, species):
+        """Background ``(n_0, T_0)`` normalised to the species namelist values."""
+        params = self.params
+        spec = next(s for s in params["species"] if s["name"] == species)
+        units = params["units"]
+        prof = self.run.eq_profiles[species]
+        T0 = (np.asarray(prof["T"], dtype=float)
+              / (float(spec.get("temp", 1.0)) * float(units["Tref"])))
+        n0 = (np.asarray(prof["n"], dtype=float)
+              / (float(spec.get("dens", 1.0)) * float(units["nref"])))
+        return n0, T0
+
+    def _compute_3d(self, t):
+        """
+        Total T and n profiles, exactly as GENE-3D's ``diag_prof`` builds them.
+
+        ``T = T_0 + rhostar*minor_r*<T_par/3 + 2 T_perp/3>_FS`` and likewise for
+        the density. The ``rhostar*minor_r`` factor converts the normalised
+        perturbation into the background's units; without it the perturbation
+        comes out ``1/rhostar`` too large, two orders of magnitude for a typical
+        run.
+        """
+        run = self.run
+        params = self.params
+        J = self.geom["Jacobian"]
+        x_o_a = np.asarray(self.coord["x_o_a"], dtype=float)
+        scale = (float(params["geometry"]["rhostar"])
+                 * float(params["geometry"].get("minor_r") or 1.0))
+        minor_r = float(params["geometry"].get("minor_r") or 1.0)
+
+        out, times = {}, None
+        for name in run.species:
+            n0, T0 = self._background_3d(name)
+            reader = run.mom(name)
+            _, idx = self._indices(reader, t)
+            i_n = reader.index_of("n")
+            i_tpar = reader.index_of("T_par")
+            i_tper = reader.index_of("T_per")
+
+            stacks = {v: [] for v in ("T", "n", "omt", "omn")}
+            got = []
+            for time, arrays in reader.stream_selected(idx):
+                got.append(time)
+                t_pert = g3.flux_surface_average(
+                    arrays[i_tpar] / 3.0 + 2.0 * arrays[i_tper] / 3.0, J)
+                n_pert = g3.flux_surface_average(arrays[i_n], J)
+                T_tot = T0 + scale * t_pert
+                n_tot = n0 + scale * n_pert
+                stacks["T"].append(T_tot)
+                stacks["n"].append(n_tot)
+                stacks["omt"].append(_log_gradient(T_tot, x_o_a) / minor_r)
+                stacks["omn"].append(_log_gradient(n_tot, x_o_a) / minor_r)
+            out[name] = {v: np.asarray(stacks[v]) for v in stacks}
+            if times is None:
+                times = np.asarray(got)
+        return {"species": out, "times": times, "x_o_a": x_o_a}
+
+    def _dataset_3d(self, t):
+        from genetools._xr import make_dataset, unit_attrs
+        raw = self.compute(t)
+        params = self.params
+        units = params.get("units", {}) or {}
+        names = [n for n in self.run.species if n in raw["species"]]
+        variables = ("T", "n", "omt", "omn")
+        ds = make_dataset(
+            {v: (("species", "time", "x"),
+                 np.stack([raw["species"][n][v] for n in names], axis=0))
+             for v in variables},
+            {"x": raw["x_o_a"], "time": raw["times"]},
+            species=names, params=params)
+        labels = {"T": "T_ref", "n": "n_ref", "omt": "a/L_T", "omn": "a/L_n"}
+        si_ref = {"T": ("Tref", "keV"), "n": ("nref", "1e19 m^-3")}
+        for v in variables:
+            ds[v].attrs["units"] = labels[v]
+            if v in si_ref:
+                key, unit = si_ref[v]
+                ref = units.get(key)
+                if ref is not None:
+                    ds[v + "_SI"] = ds[v] * float(ref)
+                    ds[v + "_SI"].attrs["units"] = unit
+        ds.attrs.update(unit_attrs(params))
+        ds.attrs["geometry_kind"] = self.geometry_kind
+        return ds
+
+    def _plot_3d(self, t, si=False):
+        ds = self._dataset_3d(t)
+        x = np.asarray(ds["x"])
+        fig, axes = plt.subplots(2, 2, figsize=(10, 7))
+        for ax, v in zip(axes.ravel(), ("T", "n", "omt", "omn")):
+            key = f"{v}_SI" if (si and f"{v}_SI" in ds) else v
+            for name in ds["species"].values:
+                ax.plot(x, np.asarray(ds[key].sel(species=name).mean("time")),
+                        label=str(name))
+            ax.set_xlabel(r"$x/a$")
+            ax.set_ylabel(ds[key].attrs.get("units", ""))
+            ax.set_title(v)
+            ax.grid(True, alpha=0.3)
+            ax.legend(fontsize=8)
+        fig.tight_layout()
+        plt.show()
+        return fig
+
+    def compare_with_code(self, t=None, species=None):
+        """
+        GENE-3D only: compare this reconstruction with ``profile_<species>``.
+
+        GENE-3D writes the same four quantities itself, so when that file is
+        present the reconstruction is checkable rather than merely plausible.
+        Returns ``{species: {var: max relative difference}}``.
+        """
+        self._require("xy_global")
+        from genetools.diagnostics.profile_diag import ProfileDiag
+        code = ProfileDiag(self.run).dataset()
+        mine = self._dataset_3d(t)
+        names = [species] if species else list(mine["species"].values)
+        report = {}
+        for name in names:
+            per = {}
+            for v in ("T", "n", "omt", "omn"):
+                if v not in code:
+                    continue
+                a = np.asarray(mine[v].sel(species=name).mean("time"))
+                b = np.asarray(code[v].sel(species=name).mean("time"))
+                per[v] = float(np.max(np.abs(a - b))
+                               / max(np.max(np.abs(b)), 1e-300))
+            report[name] = per
+        return report
+
+    # ------------------------------------------------------------------
+
+    def plot(self, t=None, si=False, eq_profs=None, **kw):
+        """Plot the radial profiles over the window *t*."""
+        if self.is_3d:
+            return self._plot_3d(t, si=si)
+        self.compute(t)
+        a, b = self._bounds(t)
+        if eq_profs is None:
+            eq_profs = self.run.eq_profiles
+        return self._plot_spectral(self.coord, self.params, a, b,
+                                   equilibrium_profiles=eq_profs, **kw)
+
+    def _plot_spectral(self, coords: dict, params: dict,
              t_start: float = None, t_stop: float = None,
              equilibrium_profiles: dict = None) -> None:
         """
@@ -642,3 +856,16 @@ class Profiles(CachingDiagnostic):
 
             plt.tight_layout()
             plt.show()
+
+
+def _log_gradient(profile, x_o_a):
+    """
+    Return ``-d ln(profile) / d(x/a)``.
+
+    Non-positive values make the logarithm meaningless; they are masked to NaN
+    rather than allowed to produce a warning and an arbitrary number, since a
+    profile that has gone negative means the run itself is in trouble.
+    """
+    arr = np.asarray(profile, dtype=float)
+    safe = np.where(arr > 0, arr, np.nan)
+    return -np.gradient(np.log(safe), x_o_a)

@@ -20,11 +20,40 @@ Multiple extensions (e.g. restart files)
 ----------------------------------------
 >>> p = Params('/path/to/run/', extensions=['_0001', '_0002'])
 >>> d0, d1 = p.tolist()
+
+Geometry classification
+-----------------------
+GENE and GENE-3D disagree about which namelist carries ``x_local``/``y_local``
+and the output-format switches, so the loader reconciles them and records the
+answer once:
+
+>>> p.geometry_kind()          # 'flux_tube' | 'x_global' | 'y_global' | 'xy_global'
+'xy_global'
+>>> p.is_3d()                  # True for GENE-3D (real-space x and y)
+True
 """
 
 from pathlib import Path
 import copy
 import f90nml
+
+
+# ---------------------------------------------------------------------------
+# Geometry classification
+# ---------------------------------------------------------------------------
+
+#: ``(x_local, y_local)`` -> geometry kind.
+#:
+#: ``flux_tube``  spectral in x and y (the classic local run)
+#: ``x_global``   real-space x, spectral y  (GENE global)
+#: ``y_global``   spectral x, real-space y
+#: ``xy_global``  real-space x and y        (GENE-3D)
+GEOMETRY_KINDS = {
+    (True, True): "flux_tube",
+    (False, True): "x_global",
+    (True, False): "y_global",
+    (False, False): "xy_global",
+}
 
 
 class Params:
@@ -208,7 +237,103 @@ class Params:
         if "units" in param_dict:
             self._compute_derived_units(param_dict["units"])
 
+        # Reconcile keys that different GENE flavours write in different
+        # namelists, then classify the geometry.
+        self._normalise(param_dict, nml)
+
         return param_dict
+
+    # ------------------------------------------------------------------
+    # Cross-flavour normalisation
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _raw(nml, group: str) -> dict:
+        """
+        Return one namelist group from *nml* as a plain lower-cased dict.
+
+        Only used to tell "the file said so" apart from "the default said so":
+        ``_DEFAULTS`` is merged in unconditionally, so by the time a value
+        reaches ``param_dict`` that distinction is gone.
+        """
+        raw = nml.get(group)
+        if raw is None:
+            return {}
+        if isinstance(raw, list):            # repeated group (&species)
+            raw = raw[0] if raw else {}
+        try:
+            return {str(k).lower(): v for k, v in raw.items()}
+        except AttributeError:               # pragma: no cover - malformed group
+            return {}
+
+    @classmethod
+    def _first_present(cls, nml, key: str, groups, default):
+        """Return ``nml[group][key]`` for the first *group* that carries *key*."""
+        for group in groups:
+            raw = cls._raw(nml, group)
+            if key in raw:
+                return raw[key]
+        return default
+
+    @classmethod
+    def _normalise(cls, param_dict: dict, nml) -> None:
+        """
+        Reconcile flavour-dependent keys in place and classify the geometry.
+
+        GENE writes ``x_local``/``y_local`` in ``&general`` and the output-format
+        switches in ``&in_out``. GENE-3D has neither in those namelists: it
+        hard-codes ``x_local = F``, ``y_local = F`` and ``write_h5 = T`` into
+        ``&info`` instead ("for compatibility with the IDL/Python
+        diagnostics"). Reading only ``&general`` therefore makes a GENE-3D run
+        look like a flux tube, which is the worst possible failure mode — every
+        diagnostic branches on that flag. Resolve each key from whichever
+        namelist actually carries it and mirror the answer into both, so callers
+        can keep reading the place they already read.
+
+        Also records the resolved geometry under ``info``:
+
+        ``geometry_kind``  one of :data:`GEOMETRY_KINDS`
+        ``is_3d``          ``True`` for GENE-3D (real-space x *and* y)
+        """
+        general = param_dict.setdefault("general", {})
+        in_out = param_dict.setdefault("in_out", {})
+        info = param_dict.setdefault("info", {})
+        box = param_dict.setdefault("box", {})
+
+        # Locality flags: &general (GENE) or &info (GENE-3D).
+        for key in ("x_local", "y_local"):
+            value = bool(cls._first_present(
+                nml, key, ("general", "info"), general.get(key, True)))
+            general[key] = value
+            info[key] = value
+
+        # Output-format switches: &in_out (GENE) or &info (GENE-3D).
+        for key, default in (("write_h5", False), ("write_bp", False),
+                             ("write_std", True)):
+            value = bool(cls._first_present(
+                nml, key, ("in_out", "info"), in_out.get(key, default)))
+            in_out[key] = value
+            info[key] = value
+
+        kind = GEOMETRY_KINDS[(general["x_local"], general["y_local"])]
+        info["geometry_kind"] = kind
+        info["is_3d"] = kind == "xy_global"
+
+        # Box lengths can arrive via &info rather than &box:
+        #   * GENE-3D writes both lx and ly into &info.
+        #   * GENE with `adapt_lx = T` computes lx at runtime and reports the
+        #     result in &info, leaving &box without it. Since `lx` has a
+        #     zero default, reading &box alone yields 0 and the coordinate
+        #     builder divides by it.
+        # Consult the raw namelist rather than the merged dict, so a defaulted
+        # value does not mask a real one written elsewhere.
+        raw_box = cls._raw(nml, "box")
+        for key in ("lx", "ly"):
+            if key in raw_box:
+                continue
+            value = cls._first_present(nml, key, ("info",), None)
+            if value is not None:
+                box[key] = value
 
     @staticmethod
     def _compute_derived_units(u: dict) -> None:
@@ -255,6 +380,19 @@ class Params:
     def tolist(self) -> list:
         """Return the full list of parameter dictionaries (one per file)."""
         return self.params_list
+
+    def geometry_kind(self, index: int = 0) -> str:
+        """
+        Return the geometry kind for file *index*.
+
+        One of ``'flux_tube'``, ``'x_global'``, ``'y_global'``, ``'xy_global'``
+        (see :data:`GEOMETRY_KINDS`).
+        """
+        return self.params_list[index]["info"]["geometry_kind"]
+
+    def is_3d(self, index: int = 0) -> bool:
+        """Whether file *index* describes a GENE-3D run (real-space x and y)."""
+        return bool(self.params_list[index]["info"]["is_3d"])
 
     def show(self) -> None:
         """Pretty-print all loaded parameter dictionaries to stdout."""

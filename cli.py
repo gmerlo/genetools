@@ -16,6 +16,13 @@ Examples
     genetools /run --contours --field 0 --ifft xy
     genetools . --profiles --no-show
 
+GENE-3D runs use the same flags, plus a few of their own:
+
+    genetools /run3d --fluxes2d --si
+    genetools /run3d --slices --quantities phi n --fourier y
+    genetools /run3d --chi --t 200 800
+    genetools /run3d --planes --quantities phi
+
 One diagnostic flag is required. ``PATH`` defaults to the current directory.
 """
 
@@ -25,7 +32,8 @@ import argparse
 import sys
 from pathlib import Path
 
-# Diagnostic flag -> Run accessor attribute.
+# Diagnostic flag -> Run accessor attribute. Accessors that are callables
+# rather than properties are listed in PARAMETRIZED below.
 DIAGNOSTICS = {
     "nrg": "nrg",
     "spectra": "spectra",
@@ -39,7 +47,31 @@ DIAGNOSTICS = {
     "zonal": "zonal",
     "vexmax": "vexmax",
     "profile_diag": "profile_diag",
+    # GENE-3D only
+    "slices": "slices",
+    "timetraces": "timetraces",
+    "gam": "gam",
+    "chi": "chi",
+    "omega": "omega",
+    "geometry": "geometry_plots",
+    "srcmom": "srcmom",
+    "vsp": "vsp",
+    "planes": "planes",
+    "vis3d": "vis3d",
 }
+
+#: Accessors that must be called before use, and the argument they take.
+PARAMETRIZED = {
+    "ballooning": "ky",
+    "slices": "quantities",
+    "timetraces": "quantities",
+    "planes": "quantities",
+    "vis3d": "quantities",
+}
+
+#: Flags that only exist for GENE-3D runs, for a clearer error message.
+GENE3D_ONLY = ("slices", "timetraces", "gam", "chi", "omega", "geometry",
+               "srcmom", "vsp", "planes", "vis3d")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -78,6 +110,19 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Field/moment index (contours).")
     p.add_argument("--ifft", default=None, choices=["x", "y", "xy"],
                    help="Inverse FFT axes (contours); omit for spectral view.")
+    p.add_argument("--quantities", nargs="+", default=None,
+                   help="Variable names, e.g. phi n Q_es (GENE-3D "
+                        "slices/timetraces/contours/planes/vis3d).")
+    p.add_argument("--xlim", nargs=2, type=float, default=None,
+                   metavar=("LO", "HI"),
+                   help="Radial window in x/a (GENE-3D).")
+    p.add_argument("--fourier", default=None, choices=["x", "y", "xy"],
+                   help="View these directions in Fourier space (GENE-3D "
+                        "slices/contours).")
+    p.add_argument("--si", action="store_true",
+                   help="Plot SI-converted values where available.")
+    p.add_argument("--t-avg", action="store_true",
+                   help="Average over the time window (GENE-3D slices).")
     return p
 
 
@@ -88,17 +133,47 @@ def _selected_diagnostic(args) -> str:
     raise SystemExit("No diagnostic selected.")  # pragma: no cover (argparse guards)
 
 
-def _plot_kwargs(name: str, args) -> dict:
+def _construct_kwargs(name: str, args) -> dict:
+    """Arguments for a parametrized accessor, e.g. ``run.slices(...)``."""
+    kw = {}
+    if name == "ballooning":
+        kw["ky"] = args.ky
+        return kw
+    if args.quantities:
+        kw["quantities"] = tuple(args.quantities)
+    if args.species:
+        kw["species"] = args.species[0]
+    if args.xlim:
+        kw["xlim"] = tuple(args.xlim)
+    if name == "slices":
+        if args.fourier:
+            kw["x_fourier"] = "x" in args.fourier
+            kw["y_fourier"] = "y" in args.fourier
+        if args.t_avg:
+            kw["t_avg"] = True
+    return kw
+
+
+def _plot_kwargs(name: str, args, is_3d: bool) -> dict:
     """Build the per-diagnostic plot kwargs from parsed args."""
     t = tuple(args.t) if args.t is not None else None
     kw = {"t": t}
     if name == "contours":
-        kw["field"] = args.field
-        kw["ifft"] = args.ifft
-        if args.species:
-            kw["species"] = args.species[0]
-    elif name == "ballooning":
-        kw["ky"] = args.ky
+        if is_3d:
+            if args.quantities:
+                kw["quantities"] = tuple(args.quantities)
+            if args.species:
+                kw["species"] = args.species[0]
+            if args.fourier:
+                kw["x_fourier"] = "x" in args.fourier
+                kw["y_fourier"] = "y" in args.fourier
+        else:
+            kw["field"] = args.field
+            kw["ifft"] = args.ifft
+            if args.species:
+                kw["species"] = args.species[0]
+    elif name in ("profiles", "profile_diag", "fluxes2d", "chi") and args.si:
+        kw["si"] = True
     return kw
 
 
@@ -125,17 +200,22 @@ def main(argv=None) -> int:
         path = args.runpath or args.path
         run = Run(path, ext=args.ext)
 
+        if name in GENE3D_ONLY and not run.is_3d:
+            print(f"genetools: --{name.replace('_', '-')} is a GENE-3D "
+                  f"diagnostic; this run is {run.geometry_kind}.",
+                  file=sys.stderr)
+            return 2
+
         accessor = DIAGNOSTICS[name]
         diag = getattr(run, accessor)
-        kwargs = _plot_kwargs(name, args)
-        if name == "ballooning":  # parametrized accessor
-            ky = kwargs.pop("ky")
-            if ky is None:
+        if name in PARAMETRIZED:
+            construct = _construct_kwargs(name, args)
+            if name == "ballooning" and construct.get("ky") is None:
                 print("genetools: --ballooning requires --ky VALUE",
                       file=sys.stderr)
                 return 2
-            diag = diag(ky=ky)
-        diag.plot(**kwargs)
+            diag = diag(**construct)
+        diag.plot(**_plot_kwargs(name, args, run.is_3d))
     except Exception as exc:  # surface a clean message, not a traceback
         print(f"genetools: error: {exc}", file=sys.stderr)
         return 1

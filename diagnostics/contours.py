@@ -29,6 +29,14 @@ iy always indexes the stored ky dimension (before y-transform).
 import numpy as np
 import matplotlib.pyplot as plt
 
+from genetools.diagnostics._base import RunDiagnostic
+
+#: Axis labels shared with the slice diagnostic.
+_AXIS_LABELS = {
+    "x": r"$x/a$", "y": r"$y/\rho_{\rm ref}$", "z": r"$z/\pi$",
+    "kx": r"$k_x \rho_{\rm ref}$", "ky": r"$k_y \rho_{\rm ref}$",
+}
+
 
 def _ifft_x_2d(f2d, nx):
     """IFFT along axis 0 with GENE normalisation (multiply by nx)."""
@@ -40,18 +48,131 @@ def _irfft_y_2d(f2d, ny_full):
     return np.fft.irfft(f2d, n=ny_full, axis=1) * ny_full
 
 
-class Contours:
+class Contours(RunDiagnostic):
     """
-    Streaming time-series plotter for GENE field and moment data.
+    Streaming 2-D slice plotter for GENE field and moment data.
+
+    For the spectral geometries this streams the ``(x, y)`` and ``(x, z)``
+    slices, inverse-transforming whichever perpendicular directions are
+    spectral. GENE-3D is already real space in both, so its contour is the
+    z-averaged ``xy`` plane and comes from
+    :class:`~genetools.diagnostics.slices.Slices`, which owns the reduction
+    machinery — this class just selects the ``xy`` product of it.
 
     Parameters
     ----------
+    run : genetools.run.Run, optional
+        ``None`` gives a detached instance exposing only the pure helpers.
     cmap : str, optional
         Matplotlib colormap (default 'bwr').
     """
 
-    def __init__(self, cmap="bwr"):
+    name = "contours"
+
+    def __init__(self, run=None, cmap="bwr"):
+        super().__init__(run)
         self.cmap = cmap
+        self._slices = None
+        self._slice_kw = {}
+
+    # ------------------------------------------------------------------
+    # GENE-3D: delegate the reduction, keep the xy product
+    # ------------------------------------------------------------------
+
+    def _reducer(self, kw):
+        """
+        Return a :class:`~genetools.diagnostics.slices.Slices` for *kw*.
+
+        Rebuilt only when the selection changes, so repeated plots of the same
+        thing reuse the streamed data.
+        """
+        from genetools.diagnostics.slices import Slices
+        merged = {"quantities": ("phi",)}
+        merged.update(self._slice_kw)
+        merged.update(kw)
+        if self._slices is None or merged != self._slice_kw:
+            self._slice_kw = merged
+            self._slices = Slices(self.run, **merged)
+        return self._slices
+
+    def compute(self, t=None, **kw):
+        """GENE-3D only: stream and reduce, returning the raw reductions."""
+        self._require("xy_global")
+        return self._reducer(kw).compute(t)
+
+    def dataset(self, t=None, **kw):
+        """
+        GENE-3D only: the ``xy`` contour as an :class:`xarray.Dataset`.
+
+        The spectral paths are plot-only — they stream, draw and discard, which
+        is what makes them usable on runs whose field file does not fit in
+        memory.
+        """
+        self._require("xy_global")
+        ds = self._reducer(kw).dataset(t)
+        return ds[[n for n in ds.data_vars if n.endswith("_xy")]]
+
+    def plot(self, t=None, **kw):
+        """
+        Plot the 2-D contours.
+
+        GENE-3D takes ``quantities``, ``species``, ``x_fourier``, ``y_fourier``,
+        ``square``, ``zlim`` and ``n_max``; the spectral geometries take the
+        arguments of :meth:`plot_timeseries_2d`.
+        """
+        if self.is_3d:
+            return self._plot_3d(t, **kw)
+        return self._plot_spectral(t, **kw)
+
+    def _plot_spectral(self, t, **kw):
+        a, b = self._bounds(t)
+        species = kw.pop("species", None)
+        reader = self.run.field if species is None else self.run.mom(species)
+        return self.plot_timeseries_2d(
+            reader, a, b, params_list=self.params, coords=self.coord,
+            species=species, **kw)
+
+    def _plot_3d(self, t, n_max=6, **kw):
+        """One panel per output time, at most *n_max*, evenly spaced."""
+        ds = self.dataset(t, **kw)
+        names = [n for n in ds.data_vars if n.endswith("_xy")]
+        if not names:
+            raise ValueError("No xy slice available to plot.")
+
+        for name in names:
+            da = ds[name]
+            if "time" in da.dims:
+                n_t = da.sizes["time"]
+                picks = np.unique(np.linspace(0, n_t - 1,
+                                              min(n_max, n_t)).astype(int))
+                frames = [(float(da["time"].values[i]), da.isel(time=i))
+                          for i in picks]
+                if n_t > len(picks):
+                    print(f"contours: showing {len(picks)} of {n_t} times.")
+            else:
+                frames = [(None, da)]
+
+            ncol = min(3, len(frames))
+            nrow = int(np.ceil(len(frames) / ncol))
+            fig, axes = plt.subplots(nrow, ncol,
+                                     figsize=(4.6 * ncol, 3.6 * nrow),
+                                     squeeze=False)
+            flat = axes.ravel()
+            for ax, (time, frame) in zip(flat, frames):
+                dims = frame.dims
+                mesh = ax.pcolormesh(np.asarray(ds[dims[1]]),
+                                     np.asarray(ds[dims[0]]),
+                                     np.asarray(frame), shading="nearest",
+                                     cmap=self.cmap)
+                ax.set_xlabel(_AXIS_LABELS.get(dims[1], dims[1]))
+                ax.set_ylabel(_AXIS_LABELS.get(dims[0], dims[0]))
+                ax.set_title(name if time is None else f"{name}  t={time:.4g}")
+                fig.colorbar(mesh, ax=ax)
+            for ax in flat[len(frames):]:
+                ax.set_visible(False)
+            fig.tight_layout()
+        plt.show()
+        return fig
 
     def select_indices(self, reader, t_start, t_stop, max_loads):
         """Return downsampled iteration indices within the time window."""

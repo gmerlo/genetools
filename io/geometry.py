@@ -39,7 +39,10 @@ Each dict contains:
     ``local``      dict: q0, shat, trpeps, gridpoints
     ``curv``       dict: K_x, K_y, sloc  (curvature, computed post-load)
     ``area``       dict: Area, dVdx       (computed post-load)
-    ``profiles``   dict: q  (global geometry only)
+    ``profiles``   dict: q  (global geometry only); for GENE-3D also
+                   dVdx, sqrtgxx_fs, gxx_fs, dpdx_pm_arr, xval_a
+    ``cart_coords`` dict: x, y, z — Cartesian position of every grid point
+                   (GENE-3D HDF5 geometry only)
  
 Example
 -------
@@ -50,6 +53,8 @@ Example
  
 import os
 import re
+
+import h5py
 import numpy as np
 
 from genetools.io._zgrid import build_zgrid
@@ -285,6 +290,142 @@ def _read_global(fid, nx: int, tmp_geom: dict = None) -> dict:
  
  
 # ---------------------------------------------------------------------------
+# HDF5 geometry reader (GENE `write_h5` and GENE-3D)
+# ---------------------------------------------------------------------------
+
+#: ``/metric`` dataset name -> the key this module uses.
+_H5_METRIC = {"g^xx": "gxx", "g^xy": "gxy", "g^xz": "gxz",
+              "g^yy": "gyy", "g^yz": "gyz", "g^zz": "gzz"}
+
+#: ``/Bfield_terms`` datasets that map onto top-level geometry keys.
+_H5_BFIELD = {"Bfield": "Bfield", "dBdx": "dBdx", "dBdy": "dBdy",
+              "dBdz": "dBdz", "Jacobian": "Jacobian"}
+
+
+def _h5_get(group, name):
+    """
+    Return one dataset from *group* in GENE's axis order, or ``None``.
+
+    ``h5py.Group.get`` returns ``None`` for a missing name rather than raising,
+    so callers must check the result — guarding these lookups with
+    ``except AttributeError`` (as the GUI does) never fires and leaves ``None``
+    in place of the intended fallback.
+
+    The transpose reverses every axis, undoing the Fortran-to-C flip that
+    ``futils.putarr`` introduced: ``(nz,)`` stays put, ``(nz, nx)`` becomes
+    ``(nx, nz)``, and GENE-3D's ``(nz, ny, nx)`` becomes ``(nx, ny, nz)``.
+    """
+    if group is None:
+        return None
+    dset = group.get(name)
+    if dset is None:
+        return None
+    return np.asarray(dset[...]).T
+
+
+def _h5_scalar(group, name):
+    """Return a length-1 ``/parameters`` dataset as a float, or ``None``."""
+    arr = _h5_get(group, name)
+    if arr is None:
+        return None
+    flat = np.ravel(arr)
+    return float(flat[0]) if flat.size else None
+
+
+def _read_geom_h5(fpath: str, params: dict) -> dict:
+    """
+    Read a geometry file written through *futils*.
+
+    Covers both flavours, which share a group layout but not their contents:
+
+    * **GENE** (``write_h5``) writes ``/shape/{R,Z,dxdR,dxdZ}`` and scalar
+      ``C_y``/``C_xy``; metric and field terms are ``(nz,)`` for a flux tube
+      and ``(nz, nx)`` for an x-global run.
+    * **GENE-3D** writes 3-D ``(nz, ny, nx)`` metric and field terms, *array*
+      ``C_y``/``C_xy`` over x, no ``/shape`` group at all, and a ``/profile``
+      group carrying ``q_prof`` plus the flux-surface quantities ``dVdx``,
+      ``sqrtgxx_fs`` and ``gxx_fs`` that it has already computed.
+
+    Returns the same dictionary structure as the ASCII readers.
+    """
+    metric, profiles, extra = {}, {}, {}
+    with h5py.File(fpath, "r") as f:
+        g_metric = f.get("metric")
+        g_bfield = f.get("Bfield_terms")
+        g_shape = f.get("shape")
+        g_prof = f.get("profile")
+        g_pars = f.get("parameters")
+        g_cart = f.get("cart_coords")
+
+        for h5name, key in _H5_METRIC.items():
+            val = _h5_get(g_metric, h5name)
+            if val is not None:
+                metric[key] = val
+        for name in ("C_y", "C_xy"):
+            val = _h5_get(g_metric, name)
+            if val is not None:
+                metric[name] = np.squeeze(val)[()] if val.size == 1 else val
+
+        for h5name, key in _H5_BFIELD.items():
+            extra[key] = _h5_get(g_bfield, h5name)
+
+        # GENE-3D writes the curvature; GENE's flux-tube files may not.
+        K_x = _h5_get(g_bfield, "K_x")
+        K_y = _h5_get(g_bfield, "K_y")
+
+        R = _h5_get(g_shape, "R")
+        Z = _h5_get(g_shape, "Z")
+        Phi = _h5_get(g_shape, "phi")
+        dxdR = _h5_get(g_shape, "dxdR")
+        dxdZ = _h5_get(g_shape, "dxdZ")
+
+        for name in ("q_prof", "dpdx_pm_arr", "gxx_fs", "sqrtgxx_fs",
+                     "dVdx", "xval_a"):
+            val = _h5_get(g_prof, name)
+            if val is not None:
+                profiles["q" if name == "q_prof" else name] = val
+
+        # GENE-3D writes the Cartesian position of every grid point, which is
+        # what lets a snapshot be exported to a real-space 3-D viewer without
+        # reconstructing the flux-surface mapping.
+        cart = {}
+        for name in ("x", "y", "z"):
+            val = _h5_get(g_cart, name)
+            if val is not None:
+                cart[name] = val
+
+        local = dict(
+            q0=_h5_scalar(g_pars, "q0"),
+            shat=_h5_scalar(g_pars, "shat"),
+            trpeps=_h5_scalar(g_pars, "trpeps"),
+            gridpoints=_h5_scalar(g_pars, "gridpoints"),
+        )
+        for name in ("beta", "minor_r", "major_R", "Bref", "Lref"):
+            value = _h5_scalar(g_pars, name)
+            if value is not None:
+                local[name] = value
+
+    metric["dxdR"] = dxdR
+    metric["dxdZ"] = dxdZ
+
+    geom = dict(
+        Bfield=extra.get("Bfield"), Jacobian=extra.get("Jacobian"),
+        dBdx=extra.get("dBdx"), dBdy=extra.get("dBdy"),
+        dBdz=extra.get("dBdz"),
+        metric=metric, shape=dict(gR=R, gZ=Z, gPhi=Phi), local=local,
+        dxdR=dxdR, dxdZ=dxdZ,
+    )
+    if profiles:
+        geom["profiles"] = profiles
+    if len(cart) == 3:
+        geom["cart_coords"] = cart
+    if K_x is not None and K_y is not None:
+        # Stashed for _compute_curvature to prefer over recomputing.
+        geom["_curv_from_file"] = dict(K_x=K_x, K_y=K_y, sloc=None)
+    return geom
+
+
+# ---------------------------------------------------------------------------
 # Curvature
 # ---------------------------------------------------------------------------
  
@@ -362,6 +503,7 @@ def _get_area(geom: dict, params: dict) -> dict:
         ``{'Area': ..., 'dVdx': ...}``
     """
     x_local = params['general'].get('x_local', True)
+    is_3d   = bool(params.get('info', {}).get('is_3d', False))
     nz      = params['box']['nz0']
     Lref    = params.get('units', {}).get('Lref', 1.0)
     C_y     = geom['metric'].get('C_y', 1.0)
@@ -371,7 +513,25 @@ def _get_area(geom: dict, params: dict) -> dict:
     J   = geom['Jacobian']
     gxx = geom['metric'].get('gxx', np.ones_like(J))
  
-    if x_local:
+    if is_3d:
+        # J and gxx are (nx, ny, nz); average over the flux surface. GENE-3D
+        # already writes dVdx and sqrtgxx_fs, so use those when present — but
+        # divide out n_pol, which GENE-3D folds in (its dVdx spans the whole
+        # n_pol-turn simulation domain) while the surface area of interest is
+        # one turn. Identical for the usual n_pol = 1.
+        n_pol = float(params.get('geometry', {}).get('n_pol', 1) or 1)
+        stored = geom.get('profiles', {}) or {}
+        if 'dVdx' in stored:
+            dVdx = np.abs(np.asarray(stored['dVdx'], dtype=float)) / n_pol
+            dVdx = dVdx * Lref**2
+            sqrtgxx = stored.get('sqrtgxx_fs')
+            Area = (dVdx * np.asarray(sqrtgxx, dtype=float)
+                    if sqrtgxx is not None
+                    else A0 * np.mean(J * np.sqrt(gxx), axis=(1, 2)))
+        else:
+            Area = A0 * np.mean(J * np.sqrt(gxx), axis=(1, 2))
+            dVdx = A0 * np.mean(J, axis=(1, 2))
+    elif x_local:
         Area  = A0 * np.sum(J * np.sqrt(gxx)) / nz
         dVdx  = A0 * np.sum(J) / nz
     else:
@@ -409,8 +569,20 @@ def _read_single_geom(folder: str, ext: str, params: dict) -> dict:
     nx        = params['box'].get('nx0', 1)
  
     fpath = _geometry_filename(folder, geom_type, ext)
+    h5path = fpath + '.h5'
     if not os.path.isfile(fpath):
-        raise FileNotFoundError(f"Geometry file not found: {fpath}")
+        # GENE-3D writes its geometry only as HDF5; GENE with write_h5 writes
+        # both, and the ASCII form above is preferred there.
+        if os.path.isfile(h5path):
+            geom = _read_geom_h5(h5path, params)
+            geom['kind'] = geom_type
+            geom['curv'] = (geom.pop('_curv_from_file', None)
+                            or _compute_curvature(geom, params))
+            geom.pop('_curv_from_file', None)
+            geom['area'] = _get_area(geom, params)
+            return geom
+        raise FileNotFoundError(
+            f"Geometry file not found: {fpath} (nor {h5path})")
  
     with open(fpath, 'r') as fid:
         # ── 1. Read namelist (everything up to the first '/') ──────────

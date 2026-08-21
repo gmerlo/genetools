@@ -53,7 +53,9 @@ import matplotlib.pyplot as plt
 import h5py
 
 from genetools.compat import trapz as _trapz
-from genetools.diagnostics._base import CachingDiagnostic
+from genetools.diagnostics._base import (CachingDiagnostic,
+                                        RunDiagnostic)
+from genetools.diagnostics import _gene3d as g3
 
 
 # ---------------------------------------------------------------------------
@@ -216,7 +218,7 @@ def compute_exb(phi: np.ndarray, params: dict, geom: dict, coord: dict) -> dict:
 # Main class
 # ---------------------------------------------------------------------------
 
-class ShearingRate(CachingDiagnostic):
+class ShearingRate(RunDiagnostic):
     """
     Compute, cache, and plot ExB shearing rate diagnostics.
 
@@ -229,8 +231,35 @@ class ShearingRate(CachingDiagnostic):
         Path to the output HDF5 file (default ``'shearing_rate.h5'``).
     """
 
-    def __init__(self, outfile: str = "shearing_rate.h5", folder: str = None):
-        super().__init__(outfile, folder)
+    name = "shearing"
+    cache_file = "shearing_rate.h5"
+
+    def __init__(self, run=None, outfile: str = None, folder: str = None):
+        """
+        Parameters
+        ----------
+        run : genetools.run.Run, optional
+        outfile, folder : str, optional
+            Override the HDF5 cache location; normally derived from the run.
+        """
+        if run is not None:
+            super().__init__(run)
+            if outfile:
+                self.outfile = outfile
+            return
+        # Detached: keep the pre-Run constructor working for direct use.
+        self._legacy_init(outfile or self.cache_file, folder)
+
+    def _legacy_init(self, outfile: str, folder: str = None):
+        """
+        Detached construction: HDF5 cache only, no run attached.
+
+        Goes straight to the caching layer — ``super()`` is now
+        :class:`RunDiagnostic`, whose constructor takes a run.
+        """
+        self.run = None
+        self._cache = {}
+        CachingDiagnostic.__init__(self, outfile, folder)
 
     # ------------------------------------------------------------------
     # HDF5 helpers
@@ -369,7 +398,25 @@ class ShearingRate(CachingDiagnostic):
 
         return data
 
-    def dataset(self, coords, params, species=None):
+    def dataset(self, t=None, params=None, species=None):
+        """
+        Return the cached zonal quantities as an :class:`xarray.Dataset`.
+
+        Called with a time window when bound to a run; the older
+        ``dataset(coords, params)`` form is still accepted for direct use.
+        """
+        if self.run is not None and not isinstance(t, dict):
+            if self.is_3d:
+                return self._dataset_3d(t)
+            self.compute(t)
+            ds = self._dataset_from_cache(self.coord, self.params)
+            a, b = self._window(t)
+            if (a is not None or b is not None) and "time" in ds.coords:
+                ds = ds.sel(time=slice(a, b))
+            return ds
+        return self._dataset_from_cache(t, params, species)
+
+    def _dataset_from_cache(self, coords, params, species=None):
         """Return the shearing-rate diagnostics as an ``xarray.Dataset``."""
         import xarray as xr
         from genetools import _xr
@@ -394,7 +441,125 @@ class ShearingRate(CachingDiagnostic):
                       "kx": np.asarray(coords.get("kx", []))}
         return _xr.make_dataset(data_vars, candidates, params=params)
 
-    def plot(self, coord=None, t_start=None, t_stop=None) -> None:
+    # ------------------------------------------------------------------
+    # Run-native front end
+    # ------------------------------------------------------------------
+
+    def compute(self, t=None):
+        """
+        Stream the field file and cache the zonal quantities.
+
+        GENE-3D is real space in y, so its zonal potential is a
+        Jacobian-weighted average over y and z rather than the ``ky = 0``
+        component of a transform, and it is held in memory rather than streamed
+        to the HDF5 cache — the result is one radial profile per output time,
+        which is small.
+        """
+        if self.is_3d:
+            key = self._key(t)
+            if key not in self._cache:
+                self._cache[key] = self._compute_3d(t)
+            return self._cache[key]
+        a, b = self._bounds(t)
+        r = self.run
+        self.compute_and_save(r._field_segment_readers, r.coords, r.geometry,
+                              r.params, a, b)
+        return self
+
+    def _compute_3d(self, t):
+        """Zonal potential, ExB velocity and shearing rate for GENE-3D."""
+        run = self.run
+        J = self.geom["Jacobian"]
+        C_xy = np.asarray(self.geom["metric"]["C_xy"], dtype=float)
+        x = np.asarray(self.coord["x"], dtype=float)      # in rho_ref
+
+        reader = run.field
+        _, idx = self._indices(reader, t)
+        i_phi = reader.index_of("phi")
+
+        phi_fs, v_exb, w_exb, times = [], [], [], []
+        for time, arrays in reader.stream_selected(idx):
+            times.append(time)
+            fs = g3.flux_surface_average(arrays[i_phi], J)
+            # C_xy only: the 1/sqrt(g^xx) of GENE-3D's flux_geomfac belongs to a
+            # flux per unit physical area. This is a flow, not a flux.
+            v = -np.gradient(fs, x) / C_xy
+            phi_fs.append(fs)
+            v_exb.append(v)
+            w_exb.append(np.gradient(v, x))
+
+        return {
+            "times": np.asarray(times), "x": x,
+            "x_o_a": np.asarray(self.coord["x_o_a"], dtype=float),
+            "phi_zonal": np.asarray(phi_fs),
+            "v_exb": np.asarray(v_exb),
+            "omega_exb": np.asarray(w_exb),
+        }
+
+    def _dataset_3d(self, t):
+        from genetools._xr import make_dataset, unit_attrs
+        raw = self.compute(t)
+        params = self.params
+        ds = make_dataset(
+            {"phi_zonal": (("time", "x"), raw["phi_zonal"]),
+             "v_exb": (("time", "x"), raw["v_exb"]),
+             "omega_exb": (("time", "x"), raw["omega_exb"])},
+            {"x": raw["x_o_a"], "time": raw["times"]}, params=params)
+        ds = ds.assign(x_o_rho_ref=("x", raw["x"]))
+        ds["phi_zonal"].attrs["units"] = "T_ref/e (normalised)"
+        ds["v_exb"].attrs["units"] = "c_ref (normalised)"
+        ds["omega_exb"].attrs["units"] = "c_ref/L_ref"
+        ds["omega_exb_rms_x"] = np.sqrt((ds["omega_exb"] ** 2).mean("time"))
+        ds["omega_exb_rms_t"] = np.sqrt((ds["omega_exb"] ** 2).mean("x"))
+        ds.attrs.update(unit_attrs(params))
+        ds.attrs["geometry_kind"] = self.geometry_kind
+        return ds
+
+    def _plot_3d(self, t):
+        """Three x-t maps plus the RMS shearing-rate summaries."""
+        ds = self._dataset_3d(t)
+        x = np.asarray(ds["x"])
+        times = np.asarray(ds["time"])
+
+        fig, axes = plt.subplots(1, 3, figsize=(14, 4))
+        for ax, name, title in zip(
+                axes, ("phi_zonal", "v_exb", "omega_exb"),
+                (r"$\langle\phi\rangle_{FS}$", r"$v_{E\times B}$",
+                 r"$\omega_{E\times B}$")):
+            mesh = ax.pcolormesh(times, x, np.asarray(ds[name]).T,
+                                 shading="nearest")
+            ax.set_title(title)
+            ax.set_xlabel(r"$t\;[L_{\rm ref}/c_{\rm ref}]$")
+            ax.set_ylabel(r"$x/a$")
+            fig.colorbar(mesh, ax=ax)
+        fig.tight_layout()
+
+        fig2, axes2 = plt.subplots(1, 2, figsize=(11, 4))
+        axes2[0].plot(times, np.asarray(ds["omega_exb_rms_t"]))
+        axes2[0].axhline(float(ds["omega_exb_rms_t"].mean()), ls="--", color="k")
+        axes2[0].set_xlabel(r"$t\;[L_{\rm ref}/c_{\rm ref}]$")
+        axes2[0].set_ylabel(r"$\langle|\omega_E|^2\rangle_x^{1/2}$")
+        axes2[1].plot(x, np.asarray(ds["omega_exb_rms_x"]))
+        axes2[1].axhline(float(ds["omega_exb_rms_x"].mean()), ls="--", color="k")
+        axes2[1].set_xlabel(r"$x/a$")
+        axes2[1].set_ylabel(r"$\langle|\omega_E|^2\rangle_t^{1/2}$")
+        for ax in axes2:
+            ax.grid(True, alpha=0.3)
+        fig2.tight_layout()
+        plt.show()
+        return fig
+
+    def plot(self, t=None, **kw):
+        """Plot the zonal quantities over the window *t*."""
+        if self.is_3d:
+            return self._plot_3d(t)
+        self.compute(t)
+        a, b = self._bounds(t)
+        return self._plot_spectral(self.coord, a, b)
+
+    # ------------------------------------------------------------------
+
+    def _plot_spectral(self, coord=None, t_start=None, t_stop=None) -> None:
         """
         Plot E_r and ω_ExB diagnostics from the saved HDF5 file.
  

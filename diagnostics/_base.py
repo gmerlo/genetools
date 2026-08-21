@@ -3,11 +3,19 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 """
-_base.py — Base class for HDF5-caching diagnostics.
+_base.py — Base classes for diagnostics.
 
-Provides shared logic for time-checking, loading, and time-averaging
-that is used by ShearingRate, Profiles, Fluxes2D, SpectraGlobal,
-and (partially) Spectra.
+:class:`CachingDiagnostic` carries the HDF5-persistence machinery: time
+checking, windowed loading, time averaging, and pairing field with moment
+snapshots by time value.
+
+:class:`RunDiagnostic` builds on it to give every diagnostic one uniform
+surface — constructed from a :class:`~genetools.run.Run`, offering ``.data``,
+``.plot(t=...)`` and ``.save()`` — and one place for the time-window handling
+that would otherwise be copy-pasted into each module. Set ``cache_file`` on a
+subclass to make it HDF5-backed, so its time series is streamed to disk
+incrementally and read back on demand rather than being held in memory; leave it
+unset for diagnostics whose results are small enough to keep in memory.
 """
 
 import os
@@ -31,8 +39,8 @@ class CachingDiagnostic:
     _sync_field_mom_indices(fld_reader, mom_readers, t_start, t_stop, params) → (list, list)
     """
 
-    def __init__(self, outfile: str, folder: str = None):
-        if folder is not None and not os.path.dirname(outfile):
+    def __init__(self, outfile: str = None, folder: str = None):
+        if outfile and folder is not None and not os.path.dirname(outfile):
             self.outfile = os.path.join(folder, outfile)
         else:
             self.outfile = outfile
@@ -43,7 +51,7 @@ class CachingDiagnostic:
 
     def _load_saved_times(self) -> np.ndarray:
         """Load all saved times from the HDF5 file (empty array if none)."""
-        if not os.path.exists(self.outfile):
+        if not self.outfile or not os.path.exists(self.outfile):
             return np.array([], dtype=np.float64)
         with h5py.File(self.outfile, "r") as f:
             if "time" not in f:
@@ -209,3 +217,150 @@ class CachingDiagnostic:
             pair_mom.append(int(mom_idx_sorted[j]))
 
         return pair_fld, pair_mom
+
+
+# ---------------------------------------------------------------------------
+# Run-native diagnostic base
+# ---------------------------------------------------------------------------
+
+class RunDiagnostic(CachingDiagnostic):
+    """
+    Base for diagnostics constructed from a :class:`~genetools.run.Run`.
+
+    Subclasses implement ``compute(t=None)`` and ``dataset(t=None)`` (and
+    usually ``plot``); everything shared lives here — the time-window helpers,
+    the in-memory result cache, and the ``.data`` / ``.save()`` surface.
+
+    ``run`` may be ``None`` for a *detached* instance. Nothing that reads the run
+    works then, but the pure computational helpers do, which is what lets them be
+    tested without a run directory on disk.
+
+    Class attributes
+    ----------------
+    name : str
+        Filename stem used by :meth:`save`.
+    cache_file : str or None
+        HDF5 filename for a disk-backed diagnostic, resolved relative to the run
+        directory. ``None`` keeps everything in memory.
+    supported : tuple of str or None
+        Geometry kinds this diagnostic handles, checked by :meth:`_require`.
+        ``None`` means all of them.
+    """
+
+    name = "diagnostic"
+    cache_file = None
+    supported = None
+
+    def __init__(self, run=None):
+        self.run = run
+        self._cache = {}
+        super().__init__(self.cache_file, folder=getattr(run, "_folder", None))
+        if run is not None and self.supported is not None:
+            self._require(*self.supported)
+
+    # ------------------------------------------------------------------
+    # Run shortcuts
+    # ------------------------------------------------------------------
+
+    @property
+    def params(self) -> dict:
+        """Parameter dict of the first segment."""
+        return self.run.params.get(0)
+
+    @property
+    def coord(self) -> dict:
+        """Coordinate dict of the first segment."""
+        return self.run.coords[0]
+
+    @property
+    def geom(self) -> dict:
+        """Geometry dict of the first segment."""
+        return self.run.geometry[0]
+
+    @property
+    def geometry_kind(self) -> str:
+        return self.run.geometry_kind
+
+    @property
+    def is_3d(self) -> bool:
+        return self.run.is_3d
+
+    def _require(self, *kinds) -> None:
+        """
+        Raise unless this run's geometry is one of *kinds*.
+
+        Refusing beats guessing: a diagnostic that has no meaning for a geometry
+        should say so rather than quietly reducing the data some other way.
+        """
+        if self.geometry_kind not in kinds:
+            raise NotImplementedError(
+                f"{type(self).__name__} supports {', '.join(kinds)}; this run "
+                f"is {self.geometry_kind!r}.")
+
+    # ------------------------------------------------------------------
+    # Time windows
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _window(t):
+        """Normalise *t* to ``(start, stop)``, either of which may be ``None``."""
+        if t is None:
+            return None, None
+        if isinstance(t, (tuple, list)):
+            a, b = t
+            return (None if a is None else float(a),
+                    None if b is None else float(b))
+        return float(t), None
+
+    @classmethod
+    def _bounds(cls, t):
+        """Like :meth:`_window` but with concrete float bounds for streaming."""
+        a, b = cls._window(t)
+        return (-1e30 if a is None else a, 1e30 if b is None else b)
+
+    @staticmethod
+    def _key(t):
+        """Hashable cache key for a time window."""
+        return tuple(t) if isinstance(t, (tuple, list)) else t
+
+    def _indices(self, reader, t):
+        """
+        Return ``(all_times, selected_indices)`` for the window *t*.
+
+        Raises
+        ------
+        ValueError
+            If the window selects nothing, quoting the range that is available —
+            an empty window is nearly always a mistyped time, and the available
+            range is the piece of information needed to fix it.
+        """
+        times = np.asarray(reader.read_all_times())
+        a, b = self._bounds(t)
+        idx = np.where((times >= a) & (times <= b))[0]
+        if idx.size == 0:
+            span = (f"{times[0]:.4g}..{times[-1]:.4g}" if times.size
+                    else "no output at all")
+            raise ValueError(
+                f"{type(self).__name__}: no output in the requested time "
+                f"window; available: {span}")
+        return times, idx
+
+    # ------------------------------------------------------------------
+    # Uniform surface
+    # ------------------------------------------------------------------
+
+    @property
+    def data(self):
+        """The diagnostic's :class:`xarray.Dataset` over the full time range."""
+        return self.dataset()
+
+    def save(self, t=None, path=None) -> str:
+        """Write the dataset to NetCDF and return the path."""
+        ds = self.dataset(t)
+        out = path or str(self.run.path / f"{self.name}.nc")
+        ds.to_netcdf(out)
+        return out
+
+    def __repr__(self) -> str:
+        return (f"<{type(self).__name__} {self.run.path.name!r} "
+                f"| {self.geometry_kind}>")

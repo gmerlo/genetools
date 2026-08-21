@@ -3,16 +3,24 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 """
-amplitude.py — kx/ky (local) and x/ky (global) amplitude spectra.
+amplitude.py — amplitude spectra of the fields and moments.
 
-Computes the time-averaged |·|² spectrum of each field (φ, A∥, B∥) and the
-leading moments (n, T∥, T⊥, q∥, q⊥, u∥) per species. For local runs the
-spectra are resolved in kx and ky; for global runs (``x_local = F``) the full
-2-D map |·|²(x, ky) is computed — the amplitude counterpart of
-:class:`~genetools.diagnostics.spectra_global.SpectraGlobal` — plus its 1-D
-reductions vs x and vs ky. Uses the same Hermitian ky-weighting (ky=0
-unweighted, ky>0 weighted ×2) and Jacobian-weighted z-average as the flux
-spectra (per flux surface for global geometry, where the Jacobian is (nx, nz)).
+The time-averaged ``|f|^2`` spectrum of each field (φ, A∥, B∥) and the leading
+moments, resolved differently in each geometry because the storage differs:
+
+**flux tube** — kx and ky are already the storage axes. Spectra are the
+Hermitian-weighted (ky=0 unweighted, ky>0 ×2) Jacobian-weighted z-averages, via
+:meth:`~genetools.diagnostics.spectra.Spectra.averages`.
+
+**x-global** — x is real space, ky spectral. The full 2-D map ``|f|^2(x, ky)`` is
+built (flux-surface averaged over z with a per-surface-normalised Jacobian) and
+the 1-D spectra are its reductions.
+
+**GENE-3D** — x *and* y are real space, so both spectra come from an FFT and
+there is no Hermitian factor of two anywhere: the stored real-space y direction
+already carries both signs of ky. The kx spectrum uses the full 3-D Jacobian;
+the ky spectrum uses its y-average, so the weight cannot itself mix binormal
+modes.
 """
 
 from __future__ import annotations
@@ -21,27 +29,56 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from genetools.compat import trapz as _trapz
+from genetools.diagnostics._base import RunDiagnostic
 from genetools.diagnostics.spectra import Spectra
+from genetools.diagnostics import _gene3d as g3
 from genetools import _xr
 
 _FIELD_NAMES = ["phi", "apar", "bpar"]
 _MOM_NAMES = ["dens", "T_par", "T_perp", "q_par", "q_perp", "u_par"]
 
+#: Moments given spectra by default for GENE-3D — the primitive fluctuating
+#: quantities. Its flux moments (``Gamma_*``, ``Q_*``) are products of these, so
+#: their amplitude spectra add little the flux spectra do not already show.
+MOM_NAMES_3D = ("n", "u_par", "T_par", "T_per")
 
-class AmplitudeSpectra:
-    """Time-averaged kx and ky amplitude spectra of fields and moments."""
 
-    def __init__(self, run):
-        self.run = run
-        self._cache = None
+class AmplitudeSpectra(RunDiagnostic):
+    """
+    Time-averaged amplitude spectra of fields and moments.
 
+    Parameters
+    ----------
+    run : genetools.run.Run
+    moments : sequence of str or 'all', optional
+        GENE-3D only: which moments to include (default :data:`MOM_NAMES_3D`).
+        ``'all'`` takes every moment in the file.
+    x_avg_lims : (float, float), optional
+        GENE-3D only: radial window in ``x/a`` for the ky spectrum. Defaults to
+        trimming *buffer_frac* from each end, keeping the Krook buffer regions
+        out of the average.
+    buffer_frac : float
+        GENE-3D only; fraction trimmed from each radial end.
+    """
+
+    name = "amplitude"
+
+    def __init__(self, run, moments=MOM_NAMES_3D, x_avg_lims=None,
+                 buffer_frac=0.1):
+        super().__init__(run)
+        self.moments = moments
+        self.x_avg_lims = x_avg_lims
+        self.buffer_frac = buffer_frac
+
+    # ------------------------------------------------------------------
+    # Spectral-y geometries (flux tube and x-global)
     # ------------------------------------------------------------------
 
     def _ky_weight(self):
         # Index-based Hermitian weighting (first mode 1, rest 2), matching the
         # Spectra convention — so single-ky linear runs (ky=[kymin], finite)
         # are weighted identically across the package.
-        ky = np.asarray(self.run.coords[0]["ky"])
+        ky = np.asarray(self.coord["ky"])
         w = np.full(ky.size, 2.0)
         if w.size:
             w[0] = 1.0
@@ -82,61 +119,144 @@ class AmplitudeSpectra:
                     avg = stack[0]
                 out[f"{name}_{ax}"] = avg
 
-    def compute(self, t=None):
-        """Compute the time-averaged amplitude spectra; returns a dict."""
+    def _compute_spectral(self, t):
+        """kx/ky (flux tube) or x/ky (x-global) spectra."""
         run = self.run
-        geom = run.geometry[0]
-        J = np.asarray(geom["Jacobian"])
+        J = np.asarray(self.geom["Jacobian"])
         is_local = run.is_local
         if is_local:
             J_norm = J / np.sum(J)                      # J(z)
         else:
             J_norm = J / J.sum(axis=1, keepdims=True)   # J(x, z), per flux surface
         ky_weight = self._ky_weight()
-        n_fields = int(run.params.get(0)["info"]["n_fields"])
+        n_fields = int(self.params["info"]["n_fields"])
 
         out = {}
-        _, idx = run._indices(run.field, t)
-        if idx.size:
-            field_names = [_FIELD_NAMES[i] for i in range(min(n_fields, 3))]
-            self._accumulate(run.field, idx, field_names, J_norm, ky_weight, out,
-                             is_local)
+        _, idx = self._indices(run.field, t)
+        field_names = [_FIELD_NAMES[i] for i in range(min(n_fields, 3))]
+        self._accumulate(run.field, idx, field_names, J_norm, ky_weight, out,
+                         is_local)
 
         for sp in run.species:
             rdr = run.mom(sp)
-            _, idxm = run._indices(rdr, t)
-            if idxm.size == 0:
-                continue
+            _, idxm = self._indices(rdr, t)
             names = [f"{sp}_{m}" for m in _MOM_NAMES]
             self._accumulate(rdr, idxm, names, J_norm, ky_weight, out, is_local)
-
-        self._cache = out
         return out
 
     # ------------------------------------------------------------------
+    # GENE-3D
+    # ------------------------------------------------------------------
 
-    @property
-    def data(self):
-        """Return an ``xarray.Dataset`` of the amplitude spectra: kx/ky for
-        local runs, x/ky maps (``*_xky``) plus 1-D reductions for global."""
-        out = self.compute() if self._cache is None else self._cache
-        coord = self.run.coords[0]
+    def _moment_names_3d(self, reader):
+        if self.moments == "all":
+            return list(reader.var_names)
+        return [m for m in (self.moments or ()) if g3.has_var(reader, m)]
+
+    def _accumulate_3d(self, reader, idx, names, prefix, J, J_yz, xsl, out):
+        """
+        Stream *reader*, time-averaging the kx and ky ``|f|^2`` spectra.
+
+        Both directions are real space on disk, so both need an FFT. The kx
+        spectrum is reduced over y and z with the full Jacobian; the ky spectrum
+        over x and z with the y-averaged Jacobian, since a weight that varies in
+        y would mix binormal modes.
+        """
+        slots = {n: reader.index_of(n) for n in names}
+        acc_kx = {n: [] for n in names}
+        acc_ky = {n: [] for n in names}
+        times = []
+        for time, arrays in reader.stream_selected(list(idx)):
+            times.append(time)
+            for n in names:
+                var = arrays[slots[n]]
+                pkx = np.abs(g3.to_kx(var)) ** 2
+                acc_kx[n].append(np.average(pkx, weights=J, axis=(1, 2)))
+                pky = np.abs(g3.to_ky(var)) ** 2
+                acc_ky[n].append(np.average(pky[xsl], weights=J_yz[xsl],
+                                            axis=(0, 2)))
+        times = np.asarray(times)
+        for n in names:
+            out[f"{prefix}{n}_kx"] = self._time_average(
+                np.asarray(acc_kx[n]), times)
+            out[f"{prefix}{n}_ky"] = self._time_average(
+                np.asarray(acc_ky[n]), times)
+
+    def _compute_3d(self, t):
+        """kx and ky spectra, both by FFT."""
+        run = self.run
+        J = np.asarray(self.geom["Jacobian"])
+        J_yz = g3.jacobian_yz(J)
+        xsl = g3.radial_slice(self.coord["x_o_a"], limits=self.x_avg_lims,
+                              buffer_frac=self.buffer_frac)
+
+        out = {}
+        fld = run.field
+        _, idx = self._indices(fld, t)
+        self._accumulate_3d(fld, idx, list(fld.var_names), "", J, J_yz, xsl, out)
+
+        for sp in run.species:
+            rdr = run.mom(sp)
+            names = self._moment_names_3d(rdr)
+            if not names:
+                continue
+            _, idxm = self._indices(rdr, t)
+            self._accumulate_3d(rdr, idxm, names, f"{sp}_", J, J_yz, xsl, out)
+
+        out["_xslice"] = xsl
+        return out
+
+    # ------------------------------------------------------------------
+    # Public interface
+    # ------------------------------------------------------------------
+
+    def compute(self, t=None):
+        """Compute the time-averaged amplitude spectra; returns a dict."""
+        key = self._key(t)
+        if key not in self._cache:
+            self._cache[key] = (self._compute_3d(t) if self.is_3d
+                                else self._compute_spectral(t))
+        return self._cache[key]
+
+    def dataset(self, t=None):
+        """Return the spectra as an :class:`xarray.Dataset`."""
+        out = dict(self.compute(t))
+        xsl = out.pop("_xslice", None)
+        coord = self.coord
         data_vars, used = _xr.stacked_vars(out, self.run.species,
                                            _xr.dims_from_suffix)
         candidates = {
-            "kx": np.asarray(coord.get("kx_2", coord.get("kx", []))),
+            "kx": np.asarray(coord.get("kx_2" if not self.is_3d else "kx",
+                                       coord.get("kx", []))),
             "ky": np.asarray(coord.get("ky", [])),
             "x": np.asarray(coord.get("x", coord.get("x_o_a", []))),
         }
-        return _xr.make_dataset(data_vars, candidates, species=used,
-                                params=self.run.params.get(0))
+        ds = _xr.make_dataset(data_vars, candidates, species=used,
+                              params=self.params)
+        ds.attrs["geometry_kind"] = self.geometry_kind
+        if xsl is not None:
+            x = np.asarray(coord["x_o_a"], dtype=float)[xsl]
+            ds.attrs["x_avg_range"] = [float(x[0]), float(x[-1])]
+        return ds
+
+    # ------------------------------------------------------------------
+    # Plot
+    # ------------------------------------------------------------------
 
     def plot(self, t=None, **kw):
-        """Plot ky and radial amplitude spectra (log-y) of all quantities;
-        for global runs also the |·|²(x, ky) maps of the fields."""
-        if t is not None or self._cache is None:
-            self.compute(t)
-        ds = self.data
+        """
+        Plot the ky and radial amplitude spectra of every quantity (log-y).
+
+        x-global runs additionally get the ``|f|^2(x, ky)`` field maps; GENE-3D
+        gets one row per quantity with kx beside ky, since there is no 2-D map
+        to show — both axes were transformed independently.
+        """
+        ds = self.dataset(t)
+        if self.is_3d:
+            return self._plot_3d(ds)
+        return self._plot_spectral(ds)
+
+    def _plot_spectral(self, ds):
         ky = ds["ky"].values if "ky" in ds.coords else None
         is_local = self.run.is_local
         rcoord = "kx" if is_local else "x"
@@ -169,6 +289,36 @@ class AmplitudeSpectra:
         axky.legend(fontsize=7, ncol=2)
         if not maps:
             fig.tight_layout()
+        plt.show()
+        return fig
+
+    def _plot_3d(self, ds):
+        bases = sorted({n.rsplit("_", 1)[0] for n in ds.data_vars})
+        fig, axes = plt.subplots(len(bases), 2,
+                                 figsize=(10, 2.9 * len(bases)), squeeze=False)
+        for row, base in enumerate(bases):
+            for col, axis in enumerate(("kx", "ky")):
+                ax = axes[row][col]
+                name = f"{base}_{axis}"
+                if name not in ds:
+                    ax.set_visible(False)
+                    continue
+                k_full = np.asarray(ds[axis])
+                # Only the non-negative half is independent information.
+                n_pos = (k_full.size + 1) // 2
+                k = k_full[:n_pos]
+                da = ds[name]
+                if "species" in da.dims:
+                    for sp in ds["species"].values:
+                        ax.loglog(k[1:], np.asarray(da.sel(species=sp))[1:n_pos],
+                                  label=str(sp))
+                    ax.legend(fontsize=7)
+                else:
+                    ax.loglog(k[1:], np.asarray(da)[1:n_pos])
+                ax.set_xlabel(rf"$k_{axis[1]} \rho_{{\rm ref}}$")
+                ax.set_ylabel(f"$|{base}|^2$")
+                ax.grid(True, which="both", alpha=0.3)
+        fig.tight_layout()
         plt.show()
         return fig
 

@@ -5,18 +5,25 @@
 """
 profile_diag.py — GENE ``profile_<species>`` radial profile diagnostic.
 
-Reads the ASCII radial-profile output written by GENE's profile diagnostic
-(``diag_df.F90``, the ``profile_<species><ext>`` files), which exists for
-**global, nonlinear** runs. Each file is a gnuplot-block time series: a header
-line, then per-output-time blocks of ``# <time> <block_nr>`` followed by ``nx``
-rows of 13 columns, separated by two blank lines. A ragged ``#time averaged
-profiles`` trailing block (if present) is ignored — the time average is computed
-here instead.
+Reads the ASCII radial-profile output written by the profile diagnostic, which
+exists for **global, nonlinear** runs. Each file is a gnuplot-block time series:
+a header line, then per-output-time blocks of ``# <time> <block_nr>`` followed by
+``nx`` rows, separated by two blank lines. A ragged ``#time averaged profiles``
+trailing block (if present) is ignored — the time average is computed here
+instead.
 
-Columns (per radial point):
-    x/a, x/rho_ref, T, n, omt (R/L_T), omn (R/L_n),
-    Gamma, Q, Pi (turbulent particle/heat/momentum fluxes, gyro-Bohm),
-    Gamma_neo, Q_neo, Pi_neo (neoclassical fluxes), j_boot (bootstrap current).
+**The two codes write different files under the same name.** GENE's
+``diag_df.F90`` writes thirteen columns; GENE-3D's ``diag_3d.F90`` writes eight
+and stops after the turbulent fluxes. Reading a GENE-3D file with GENE's layout
+would mis-slice every column past the sixth, so the column set is chosen from
+the run's geometry:
+
+    GENE      x/a, x/rho_ref, T, n, omt, omn, Gamma, Q, Pi,
+              Gamma_neo, Q_neo, Pi_neo, j_boot
+    GENE-3D   x/a, x/rho_ref, T, n, omt, omn, Gamma, Q
+
+GENE-3D additionally writes ``flux_profile_<species>``, carrying the same fluxes
+already time-averaged; :meth:`ProfileDiag.flux_profiles` reads it.
 
 The diagnostic returns an ``xarray.Dataset`` with dims ``(species, time, x)``,
 normalised variables plus SI-converted companions (``*_SI``) for the quantities
@@ -32,12 +39,20 @@ import warnings
 import numpy as np
 import matplotlib.pyplot as plt
 
-from genetools.compat import trapz as _trapz
+from genetools.diagnostics._base import RunDiagnostic
 
-_NCOL = 13
-# Columns 0,1 are coordinates; 2..12 are the variables.
-_VAR_COLS = ["T", "n", "omt", "omn", "Gamma", "Q", "Pi",
-             "Gamma_neo", "Q_neo", "Pi_neo", "j_boot"]
+# Columns 0,1 are always the coordinates; the rest are the variables.
+#: GENE (``diag_df.F90``) — thirteen columns.
+_VAR_COLS_GENE = ["T", "n", "omt", "omn", "Gamma", "Q", "Pi",
+                  "Gamma_neo", "Q_neo", "Pi_neo", "j_boot"]
+#: GENE-3D (``diag_3d.F90``) — eight columns, no neoclassical terms.
+_VAR_COLS_3D = ["T", "n", "omt", "omn", "Gamma", "Q"]
+
+
+def _columns(is_3d: bool):
+    """Return ``(variable names, expected column count)`` for the geometry."""
+    names = _VAR_COLS_3D if is_3d else _VAR_COLS_GENE
+    return names, 2 + len(names)
 
 # Normalised-unit labels (for plot axes / attrs).
 _NORM_UNITS = {
@@ -60,14 +75,20 @@ _SI = {
 }
 
 
-def _parse_profile_file(path: str):
+def _parse_profile_file(path: str, ncol: int):
     """
-    Parse one GENE ``profile_<species>`` file.
+    Parse one ``profile_<species>`` file.
+
+    Parameters
+    ----------
+    path : str
+    ncol : int
+        Expected column count — 13 for GENE, 8 for GENE-3D.
 
     Returns
     -------
     times : np.ndarray, shape (n_times,)
-    data  : np.ndarray, shape (n_times, nx, 13)
+    data  : np.ndarray, shape (n_times, nx, ncol)
     """
     times, blocks, current = [], [], None
     with open(path) as fh:
@@ -98,9 +119,11 @@ def _parse_profile_file(path: str):
     if any(len(b) != nx for b in blocks):
         raise ValueError(f"Inconsistent radial grid size across blocks in {path}")
     data = np.asarray(blocks, dtype=float)       # (n_times, nx, ncol)
-    if data.shape[2] < _NCOL:
+    if data.shape[2] < ncol:
         raise ValueError(
-            f"{path}: expected {_NCOL} columns, found {data.shape[2]}")
+            f"{path}: expected {ncol} columns, found {data.shape[2]}. GENE "
+            "writes 13 and GENE-3D 8; check that the run's geometry is being "
+            "detected correctly.")
     return np.asarray(times, dtype=float), data
 
 
@@ -114,35 +137,47 @@ def _dedup_later_wins(times: np.ndarray, data: np.ndarray):
     return times[keep], data[keep]
 
 
-class ProfileDiag:
-    """GENE ``profile_<species>`` radial profile diagnostic (global nonlinear runs)."""
+class ProfileDiag(RunDiagnostic):
+    """``profile_<species>`` radial profile diagnostic (global nonlinear runs)."""
 
-    def __init__(self, run):
-        self.run = run
-        self._cache = None
+    name = "profile_diag"
+
+    @property
+    def var_cols(self):
+        """Variable names in this run's ``profile_<species>`` files."""
+        return _columns(self.is_3d)[0]
 
     # ------------------------------------------------------------------
 
-    def _load_species(self, species):
+    def _load_species(self, species, prefix="profile", ncol=None):
         """Return (times, data) for one species, merged across all segments."""
+        if ncol is None:
+            ncol = _columns(self.is_3d)[1]
         all_t, all_d = [], []
         for ext in self.run.extensions:
-            path = f"{self.run._folder}profile_{species}{ext}"
+            path = f"{self.run._folder}{prefix}_{species}{ext}"
             if os.path.exists(path):
-                t, d = _parse_profile_file(path)
+                t, d = _parse_profile_file(path, ncol)
                 all_t.append(t)
                 all_d.append(d)
         if not all_t:
             raise FileNotFoundError(
-                f"No 'profile_{species}<ext>' files in {self.run._folder} — "
+                f"No '{prefix}_{species}<ext>' files in {self.run._folder} — "
                 "these are written only for global nonlinear runs "
                 "(istep_prof > 0).")
         times = np.concatenate(all_t)
         data = np.concatenate(all_d, axis=0)
         return _dedup_later_wins(times, data)
 
-    def compute(self):
-        """Parse all species; cache aligned (species, time, x) arrays."""
+    def compute(self, t=None):
+        """
+        Parse all species; cache aligned (species, time, x) arrays.
+
+        *t* is accepted for a uniform facade and ignored — the whole file is
+        parsed and the window is applied when averaging or plotting.
+        """
+        if self._cache:
+            return self._cache
         species = list(self.run.species)
         per = {sp: self._load_species(sp) for sp in species}
 
@@ -157,7 +192,7 @@ class ProfileDiag:
                     "Scope to a consistent subset with Run(path, ext=[...]).")
 
         variables = {}
-        for vi, name in enumerate(_VAR_COLS):
+        for vi, name in enumerate(self.var_cols):
             col = 2 + vi
             variables[name] = np.stack([per[sp][1][:, :, col] for sp in species],
                                        axis=0)             # (species, time, x)
@@ -173,12 +208,11 @@ class ProfileDiag:
 
     # ------------------------------------------------------------------
 
-    @property
-    def data(self):
+    def dataset(self, t=None):
         """Return an ``xarray.Dataset`` (dims species, time, x) of all quantities."""
         import xarray as xr
 
-        c = self.compute() if self._cache is None else self._cache
+        c = self.compute()
         units = self.run.params.get(0).get("units", {}) or {}
 
         ds = xr.Dataset(coords={"species": c["species"], "time": c["time"],
@@ -196,11 +230,31 @@ class ProfileDiag:
         for k in ("Tref", "nref", "Qgb", "Ggb", "Pgb"):
             if k in units and np.isscalar(units[k]):
                 ds.attrs[k] = float(units[k])
+        ds.attrs["geometry_kind"] = self.geometry_kind
+        ds.attrs["n_columns"] = _columns(self.is_3d)[1]
         return ds
 
-    def _time_average(self, t=None):
+    def flux_profiles(self):
+        """
+        Read GENE-3D's ``flux_profile_<species>`` — its own averaged fluxes.
+
+        GENE-3D writes these already time-averaged and converted to SI, so they
+        are an independent check on the conversion applied here. Returns
+        ``{species: {'x_o_a', 'Gamma', 'Q'}}``, or ``{}`` when absent.
+        """
+        out = {}
+        for sp in self.run.species:
+            try:
+                _, data = self._load_species(sp, prefix="flux_profile", ncol=3)
+            except FileNotFoundError:
+                continue
+            out[sp] = {"x_o_a": data[-1, :, 0], "Gamma": data[-1, :, 1],
+                       "Q": data[-1, :, 2]}
+        return out
+
+    def _averaged(self, t=None):
         """Return the time-averaged Dataset (dims species, x) over window *t*."""
-        ds = self.data
+        ds = self.dataset()
         if t is not None:
             tt = ds["time"].values
             a, b = (t if isinstance(t, (tuple, list)) else (t, t))
@@ -236,7 +290,7 @@ class ProfileDiag:
         Returns a single figure, or a list ``[gb_fig, si_fig]`` when both are
         drawn.
         """
-        avg, ds = self._time_average(t)
+        avg, ds = self._averaged(t)
         si_ok = self._si_available()
 
         show_gb = si in (None, False)
@@ -255,30 +309,42 @@ class ProfileDiag:
         return figs[0] if len(figs) == 1 else figs
 
     def _plot_panels(self, avg, ds, si: bool):
-        """Draw one 8-panel figure in gyro-Bohm (si=False) or SI (si=True)."""
-        panels = [("T", r"$T$"), ("n", r"$n$"),
-                  ("omt", r"$R/L_T$"), ("omn", r"$R/L_n$"),
-                  ("Gamma", r"$\Gamma$"), ("Q", r"$Q$"),
-                  ("Pi", r"$\Pi$"), ("j_boot", r"$j_{\rm boot}$")]
+        """
+        Draw one figure in gyro-Bohm (si=False) or SI (si=True).
+
+        Only panels the run actually has are drawn: a GENE-3D file carries
+        neither the momentum flux nor the neoclassical terms, so those axes are
+        dropped rather than left blank.
+        """
+        all_panels = [("T", r"$T$"), ("n", r"$n$"),
+                      ("omt", r"$R/L_T$"), ("omn", r"$R/L_n$"),
+                      ("Gamma", r"$\Gamma$"), ("Q", r"$Q$"),
+                      ("Pi", r"$\Pi$"), ("j_boot", r"$j_{\rm boot}$")]
+        panels = [(k, ttl) for k, ttl in all_panels if k in avg]
         neo_of = {"Gamma": "Gamma_neo", "Q": "Q_neo", "Pi": "Pi_neo"}
         x = ds["x"].values
 
         def pick(key):
             return f"{key}_SI" if (si and f"{key}_SI" in avg) else key
 
-        fig, axes = plt.subplots(2, 4, figsize=(16, 7), sharex=True)
+        ncol = 4 if len(panels) > 4 else max(len(panels), 1)
+        nrow = int(np.ceil(len(panels) / ncol))
+        fig, axes = plt.subplots(nrow, ncol, figsize=(4 * ncol, 3.5 * nrow),
+                                 sharex=True, squeeze=False)
         for ax, (key, title) in zip(axes.flat, panels):
             k = pick(key)
             for sp in ds["species"].values:
                 ax.plot(x, avg[k].sel(species=sp).values, label=str(sp))
                 neo = neo_of.get(key)
-                if neo:
+                if neo and neo in avg:
                     kn = pick(neo)
                     ax.plot(x, avg[kn].sel(species=sp).values, ls="--",
                             label=f"{sp} (neo)")
             ax.set_title(title)
             ax.set_ylabel(ds[k].attrs.get("units", ""))
             ax.grid(True)
+        for ax in axes.flat[len(panels):]:
+            ax.set_visible(False)
         for ax in axes[-1, :]:
             ax.set_xlabel(r"$x/a$")
         axes[0, 0].legend(fontsize=7)

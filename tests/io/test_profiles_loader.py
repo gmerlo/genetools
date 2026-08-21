@@ -10,17 +10,22 @@ from genetools.io.profiles_loader import load_equilibrium_profiles
 # Helpers
 # ---------------------------------------------------------------------------
 
-COLUMNS = ("x_o_rho_ref", "x_o_a", "T", "n", "omt", "omn")
+# File column order, per the header GENE and GENE-3D write and the code in
+# profiles.F90: x/a comes first, x/rho_ref second. The two must differ by more
+# than a scale factor in the fixture below, or a swap between them is invisible.
+COLUMNS = ("x_o_a", "x_o_rho_ref", "T", "n", "omt", "omn")
 
-# 7 data rows, one per line, values chosen to be easy to verify
+# 7 data rows, one per line, values chosen to be easy to verify.
+# x/rho_ref = (x/a) / rhostar with rhostar = 0.01, so the two radial columns
+# are an order of magnitude apart and cannot be confused.
 _DATA_ROWS = [
-    (0.1, 0.10, 1.0, 0.90, 2.5, 2.1),
-    (0.2, 0.20, 1.1, 0.91, 2.6, 2.2),
-    (0.3, 0.30, 1.2, 0.92, 2.7, 2.3),
-    (0.4, 0.40, 1.3, 0.93, 2.8, 2.4),
-    (0.5, 0.50, 1.4, 0.94, 2.9, 2.5),
-    (0.6, 0.60, 1.5, 0.95, 3.0, 2.6),
-    (0.7, 0.70, 1.6, 0.96, 3.1, 2.7),
+    (0.1, 10.0, 1.0, 0.90, 2.5, 2.1),
+    (0.2, 20.0, 1.1, 0.91, 2.6, 2.2),
+    (0.3, 30.0, 1.2, 0.92, 2.7, 2.3),
+    (0.4, 40.0, 1.3, 0.93, 2.8, 2.4),
+    (0.5, 50.0, 1.4, 0.94, 2.9, 2.5),
+    (0.6, 60.0, 1.5, 0.95, 3.0, 2.6),
+    (0.7, 70.0, 1.6, 0.96, 3.1, 2.7),
 ]
 
 

@@ -5,13 +5,16 @@
 """
 data.py — Binary and ADIOS2 BP file readers for GENE simulation output.
 
-GENE writes field and moment data in two formats:
+GENE writes field and moment data in three formats:
 
 * **Fortran unformatted binary** (default): Each iteration is a sequence of
   Fortran records — one scalar (time) followed by one record per complex array.
 * **ADIOS2 BP** (optional): Structured, self-describing HDF5-like format.
+* **HDF5** (``write_h5``, and the only format GENE-3D offers for field and
+  moment data): one group per variable holding one dataset per snapshot,
+  alongside a single ``time`` dataset.
 
-Both readers expose the same public interface so calling code can treat them
+All readers expose the same public interface so calling code can treat them
 interchangeably:
 
     reader.read_all_times()          → np.ndarray of shape (n_iters,)
@@ -29,6 +32,7 @@ Example
 import mmap
 from abc import ABC, abstractmethod
 
+import h5py
 import numpy as np
 
 try:
@@ -50,15 +54,62 @@ def _resolve_dtypes(precision: str) -> tuple:
 
 
 def _build_dims(params: dict, file_type: str) -> tuple:
-    """Extract (ni, nj, nk, n_arrays) from a params dictionary."""
+    """
+    Extract ``(ni, nj, nk, n_arrays)`` from a params dictionary.
+
+    The binormal extent is ``nky0`` for runs that are spectral in y and ``ny0``
+    for GENE-3D, which is real-space in y and writes no ``nky0`` at all.
+    """
     box = params["box"]
     info = params["info"]
     ni = box.get("nx0", 1)
-    nj = box.get("nky0", 1)
+    if info.get("is_3d") or not info.get("y_local", True):
+        nj = box.get("ny0", box.get("nky0", 1))
+    else:
+        nj = box.get("nky0", 1)
     nk = box.get("nz0", 1)
     key = "n_fields" if file_type == "field" else "n_moms"
     n_arrays = info.get(key, 1)
     return ni, nj, nk, n_arrays
+
+
+# ---------------------------------------------------------------------------
+# Variable names, in the order GENE writes them
+# ---------------------------------------------------------------------------
+
+#: ``field_label`` — same in GENE (``diag.F90``) and GENE-3D (``diag_3d.F90``).
+FIELD_VARS = ["phi", "A_par", "B_par"]
+
+#: ``mom_label`` from GENE's ``diag.F90``.
+MOM_VARS = ["dens", "T_par", "T_perp", "q_par", "q_perp", "u_par",
+            "densI1", "TparI1", "TppI1"]
+
+#: ``mom_label`` from GENE-3D's ``diag_3d.F90``. A different set *and* a
+#: different order: GENE-3D computes the fluxes itself and writes them
+#: alongside the moments, so ``Gamma_*``/``Q_*`` are moment variables here.
+MOM_VARS_3D = ["n", "u_par", "T_par", "T_per", "Gamma_es", "Gamma_em",
+               "Q_es", "Q_em", "q_par", "q_perp"]
+
+#: ``vsp_label`` from GENE-3D's ``diag_3d.F90``.
+VSP_VARS_3D = ["G_es", "G_em", "Q_ese", "Q_eme", "<f_>"]
+
+#: ``srcmom_label_1`` x ``srcmom_label_2`` from GENE-3D's ``diag_3d.F90``.
+#: Six entries — GENE-3D writes no ``f0_term_*`` source moments.
+SRCMOM_VARS_3D = [f"{a}_{b}" for a in ("ck_heat", "ck_part")
+                  for b in ("M00", "M10", "M22")]
+
+
+def canonical_vars(file_type: str, is_3d: bool) -> list:
+    """Return the canonical variable order for *file_type*."""
+    if file_type == "field":
+        return FIELD_VARS
+    if file_type == "mom":
+        return MOM_VARS_3D if is_3d else MOM_VARS
+    if file_type == "vsp":
+        return VSP_VARS_3D
+    if file_type == "srcmom":
+        return SRCMOM_VARS_3D
+    return []
 
 
 # ---------------------------------------------------------------------------
@@ -156,6 +207,13 @@ class BinaryReader(_BaseReader):
     def __init__(self, file_type: str, folder: str, ext: str, params: dict, species: str = None):
         super().__init__(file_type, folder, ext, params, species)
         self._record_index = None  # lazily built and cached
+        self._file_type = file_type
+        self._is_3d = bool(params["info"].get("is_3d", False))
+
+    @property
+    def var_names(self) -> list:
+        """Names of the arrays yielded by :meth:`stream_selected`, in order."""
+        return canonical_vars(self._file_type, self._is_3d)[:self.n_arrays]
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -347,6 +405,198 @@ class BinaryReader(_BaseReader):
 
 
 # ---------------------------------------------------------------------------
+# HDF5 reader (GENE `write_h5` and GENE-3D)
+# ---------------------------------------------------------------------------
+
+class H5Reader(_BaseReader):
+    """
+    Streaming reader for GENE and GENE-3D HDF5 output.
+
+    Both codes write these files through *futils*, which gives them a layout
+    quite unlike the Fortran-binary stream: one group per variable holding one
+    dataset per snapshot, named ``%010d``, plus a single extendible ``time``
+    dataset next to them::
+
+        /field/time                 (n_snapshots,)
+        /field/phi/0000000000       (nz0, nky0_or_ny0, nx0)
+        /field/phi/0000000001
+        /mom_ions/time
+        /mom_ions/Q_es/0000000000
+        ...
+
+    Three things about that layout drive the implementation:
+
+    **Axis order is reversed.** ``putarr`` hands HDF5 a Fortran-ordered array,
+    so what GENE calls ``(nx0, ny0, nz0)`` is stored as ``(nz0, ny0, nx0)``.
+    Every array is transposed on the way out so callers see the same
+    ``(ni, nj, nk)`` order :class:`BinaryReader` yields.
+
+    **Dtype comes from the file, not from ``PRECISION``.** ``creatf(..., 's')``
+    stores 32-bit reals regardless of the run's precision, so ``field``/``mom``
+    are ``float32`` even in a double-precision run. GENE-3D data is genuinely
+    real (real-space in x *and* y); GENE's own HDF5 output is complex, written
+    either natively or as a ``{real, imaginary}`` compound type. All three are
+    handled here.
+
+    **Variable lists are discovered, not declared.** GENE-3D's ``parameters``
+    reports ``n_moms = 6`` (``par_in``) while ``diag_3d`` writes ten moment
+    datasets — two different module variables of the same name. Trusting the
+    namelist would silently drop ``Gamma_em`` through ``q_perp``, so the groups
+    present in the file decide, ordered by :func:`canonical_vars` with any
+    unrecognised name appended alphabetically.
+
+    Exposes the same interface as :class:`BinaryReader`, plus
+    :attr:`var_names` and :meth:`index_of` for reading a variable by name.
+
+    Inherits all parameters from :class:`_BaseReader`; *ext* must include the
+    ``.h5`` suffix (e.g. ``'.dat.h5'`` or ``'_0001.h5'``).
+    """
+
+    def __init__(self, file_type: str, folder: str, ext: str, params: dict,
+                 species: str = None):
+        super().__init__(file_type, folder, ext, params, species)
+        self._file_type = file_type
+        self._is_3d = bool(params["info"].get("is_3d", False))
+        # /field/... but /mom_<spec>/..., /srcmom_<spec>/...
+        suffix = f"_{species}" if species and file_type in ("mom", "srcmom") else ""
+        self._prefix = f"{file_type}{suffix}"
+        self._layout = None      # (var_names, snapshot_indices, times)
+
+    # ------------------------------------------------------------------
+    # Layout discovery
+    # ------------------------------------------------------------------
+
+    def _discover(self, f) -> tuple:
+        """
+        Return ``(var_names, snapshot_indices, times)`` for the open file *f*.
+
+        A snapshot only counts when every variable group holds it *and* it has
+        a matching entry in ``time``. GENE appends the timestamp before writing
+        the arrays, so a run killed mid-output leaves one more time value than
+        there is data; intersecting rather than trusting ``len(time)`` keeps
+        that from surfacing as a missing-dataset crash.
+        """
+        root = f[self._prefix]
+        names = [k for k in root.keys()
+                 if k != "time" and isinstance(root[k], h5py.Group)]
+
+        order = canonical_vars(self._file_type, self._is_3d)
+        rank = {name: i for i, name in enumerate(order)}
+        known = sorted((n for n in names if n in rank), key=rank.__getitem__)
+        unknown = sorted(n for n in names if n not in rank)
+        var_names = known + unknown
+
+        times = np.asarray(root["time"][...], dtype=np.float64).ravel()
+
+        common = None
+        for name in var_names:
+            present = {int(k) for k in root[name].keys()}
+            common = present if common is None else (common & present)
+        snapshots = sorted(i for i in (common or set()) if 0 <= i < times.size)
+
+        return var_names, snapshots, times[snapshots]
+
+    def _layout_cached(self):
+        """Open the file once to discover its layout, then reuse the answer."""
+        if self._layout is None:
+            with h5py.File(self.filename, "r") as f:
+                self._layout = self._discover(f)
+            self.n_arrays = len(self._layout[0])
+        return self._layout
+
+    @property
+    def var_names(self) -> list:
+        """Names of the arrays yielded by :meth:`stream_selected`, in order."""
+        return list(self._layout_cached()[0])
+
+    def index_of(self, name: str) -> int:
+        """
+        Return the position of variable *name* in the yielded array list.
+
+        Raises
+        ------
+        KeyError
+            If the file holds no such variable, listing what it does hold.
+        """
+        names = self.var_names
+        try:
+            return names.index(name)
+        except ValueError:
+            raise KeyError(
+                f"{self.filename!r} has no variable {name!r}; "
+                f"available: {', '.join(names)}") from None
+
+    # ------------------------------------------------------------------
+    # Array decoding
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _decode(dset) -> np.ndarray:
+        """
+        Read one snapshot dataset and return it in GENE's axis order.
+
+        Complex data reaches us either as a native complex dtype or as a
+        ``{real, imaginary}`` compound type, depending on how the writer was
+        built; real data (GENE-3D) needs neither. The transpose reverses every
+        axis, undoing the Fortran-to-C flip that ``putarr`` introduced — it
+        works for the 1-D source moments and 4-D velocity-space arrays as well
+        as the usual 3-D fields.
+        """
+        raw = dset[...]
+        if raw.dtype.names:
+            fields = set(raw.dtype.names)
+            if {"real", "imaginary"} <= fields:
+                raw = raw["real"] + 1j * raw["imaginary"]
+            elif {"r", "i"} <= fields:
+                raw = raw["r"] + 1j * raw["i"]
+            else:                                  # pragma: no cover
+                raise ValueError(
+                    f"unrecognised compound dtype {raw.dtype} in {dset.name}")
+        return np.asarray(raw).T
+
+    # ------------------------------------------------------------------
+    # Public interface
+    # ------------------------------------------------------------------
+
+    def read_all_times(self) -> np.ndarray:
+        """
+        Return the simulation times of every complete snapshot in the file.
+
+        Returns
+        -------
+        np.ndarray
+            Shape ``(n_snapshots,)``.
+        """
+        return self._layout_cached()[2].copy()
+
+    def stream_selected(self, iteration_indices):
+        """
+        Stream only the requested snapshots from the HDF5 file.
+
+        Yields ``(time, [array_0, array_1, ...])`` with one array per variable
+        in :attr:`var_names` order, each in GENE's ``(ni, nj, nk)`` axis order.
+        Unlike the BP reader, HDF5 allows random access, so the requested order
+        is honoured directly with no reorder buffer.
+
+        Parameters
+        ----------
+        iteration_indices : sequence of int
+            Positions into the array returned by :meth:`read_all_times`.
+        """
+        var_names, snapshots, times = self._layout_cached()
+        indices = list(iteration_indices)
+        if not indices:
+            return
+        with h5py.File(self.filename, "r") as f:
+            root = f[self._prefix]
+            for pos in indices:
+                snap = snapshots[pos]
+                data = [self._decode(root[f"{name}/{snap:010d}"])
+                        for name in var_names]
+                yield float(times[pos]), data
+
+
+# ---------------------------------------------------------------------------
 # ADIOS2 BP reader (only defined when adios2 is importable)
 # ---------------------------------------------------------------------------
 
@@ -415,6 +665,7 @@ if _ADIOS2_AVAILABLE:
                      params: dict, species: str = None):
             super().__init__(file_type, folder, ext, params, species)
             self._file_type = file_type   # 'field' or 'mom'
+            self._is_3d = bool(params["info"].get("is_3d", False))
 
         def read_all_times(self) -> np.ndarray:
             """
@@ -429,16 +680,20 @@ if _ADIOS2_AVAILABLE:
                      for read in _bp_step_reads(self.filename)]
             return np.array(times, dtype=self.real_dtype)
 
-        # Variable names written by GENE for each file type, in array order
-        _FIELD_VARS = ["phi", "A_par", "B_par"]
-        _MOM_VARS   = ["dens", "T_par", "T_perp", "q_par", "q_perp",
-                       "u_par", "densI1", "T_parI1", "T_ppI1"]
-
         def _var_names(self) -> list:
-            """Return the ordered list of variable names for this file type."""
-            if self._file_type == "field":
-                return self._FIELD_VARS[:self.n_arrays]
-            return self._MOM_VARS[:self.n_arrays]
+            """
+            Return the ordered list of variable names for this file type.
+
+            GENE defines its ADIOS2 variables from the same ``field_label`` /
+            ``mom_label`` arrays it uses for HDF5, so the names come from the
+            shared tables above rather than a private copy.
+            """
+            return canonical_vars(self._file_type, self._is_3d)[:self.n_arrays]
+
+        @property
+        def var_names(self) -> list:
+            """Names of the arrays yielded by :meth:`stream_selected`."""
+            return self._var_names()
 
         def stream_selected(self, iteration_indices):
             """
@@ -544,6 +799,28 @@ class MultiSegmentReader:
         self.n_arrays = readers[0].n_arrays
         self._global_times = None
         self._global_map   = None
+
+    @property
+    def var_names(self) -> list:
+        """
+        Variable names from the first segment.
+
+        Segments of one run write the same variables, and the grid-consistency
+        check in :class:`~genetools.run.Run` already warns when they diverge.
+        """
+        return list(getattr(self.readers[0], "var_names", []))
+
+    def index_of(self, name: str) -> int:
+        """Return the position of variable *name* in the yielded array list."""
+        reader = self.readers[0]
+        if hasattr(reader, "index_of"):
+            return reader.index_of(name)
+        names = self.var_names
+        try:
+            return names.index(name)
+        except ValueError:
+            raise KeyError(
+                f"no variable {name!r}; available: {', '.join(names)}") from None
 
     def _build_timeline(self) -> None:
         """Scan all segments, deduplicate overlapping times (later wins), sort."""

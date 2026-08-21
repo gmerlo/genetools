@@ -59,7 +59,9 @@ import matplotlib.pyplot as plt
 import h5py
 
 from genetools.compat import trapz as _trapz
-from genetools.diagnostics._base import CachingDiagnostic
+from genetools.diagnostics._base import (CachingDiagnostic,
+                                        RunDiagnostic)
+from genetools.diagnostics import _gene3d as g3
 
 
 # ---------------------------------------------------------------------------
@@ -262,7 +264,7 @@ def _compute_em_fluxes(v_A: np.ndarray, moments: list,
 # Main class
 # ---------------------------------------------------------------------------
 
-class Fluxes2D(CachingDiagnostic):
+class Fluxes2D(RunDiagnostic):
     """
     Compute, cache, and plot radial flux profile diagnostics.
 
@@ -275,8 +277,34 @@ class Fluxes2D(CachingDiagnostic):
         Path to the output HDF5 file (default ``'fluxes_2D.h5'``).
     """
 
-    def __init__(self, outfile: str = "fluxes_2D.h5", folder: str = None):
-        super().__init__(outfile, folder)
+    name = "fluxes2d"
+    cache_file = "fluxes_2D.h5"
+
+    def __init__(self, run=None, outfile: str = None, folder: str = None):
+        """
+        Parameters
+        ----------
+        run : genetools.run.Run, optional
+        outfile, folder : str, optional
+            Override the HDF5 cache location; normally derived from the run.
+        """
+        if run is not None:
+            RunDiagnostic.__init__(self, run)
+            if outfile:
+                self.outfile = outfile
+            return
+        self._legacy_init(outfile or self.cache_file, folder)
+
+    def _legacy_init(self, outfile: str, folder: str = None):
+        """
+        Detached construction: HDF5 cache only, no run attached.
+
+        Goes straight to the caching layer — ``super()`` is now
+        :class:`RunDiagnostic`, whose constructor takes a run.
+        """
+        self.run = None
+        self._cache = {}
+        CachingDiagnostic.__init__(self, outfile, folder)
 
     # ------------------------------------------------------------------
     # HDF5 helpers
@@ -637,7 +665,25 @@ class Fluxes2D(CachingDiagnostic):
 
         return result
 
-    def dataset(self, coords, params, species, t_start=None, t_stop=None):
+    def dataset(self, t=None, params=None, species=None, t_start=None,
+                t_stop=None):
+        """
+        Return the x-resolved fluxes as an :class:`xarray.Dataset`.
+
+        Called with a time window when bound to a run; the older
+        ``dataset(coords, params, species, ...)`` form still works.
+        """
+        if self.run is not None and not isinstance(t, dict):
+            if self.is_3d:
+                return self._dataset_3d(t)
+            self.compute(t)
+            a, b = self._window(t)
+            return self._dataset_from_cache(self.coord, self.params,
+                                            self.run.species, a, b)
+        return self._dataset_from_cache(t, params, species, t_start, t_stop)
+
+    def _dataset_from_cache(self, coords, params, species, t_start=None,
+                            t_stop=None):
         """Return the time-averaged x-resolved fluxes as an ``xarray.Dataset``."""
         import xarray as xr
         from genetools import _xr
@@ -656,7 +702,212 @@ class Fluxes2D(CachingDiagnostic):
     # Plotting
     # ------------------------------------------------------------------
 
-    def plot(self, coords: dict, params: dict,
+    # ------------------------------------------------------------------
+    # Run-native front end
+    # ------------------------------------------------------------------
+
+    #: GENE-3D moment -> (species prefactor, gyro-Bohm reference, SI unit).
+    _FLUXES_3D = {
+        "Gamma_es": ("dens", "Ggb", "1e19 m^-2 s^-1"),
+        "Gamma_em": ("dens", "Ggb", "1e19 m^-2 s^-1"),
+        "Q_es": ("dens_temp", "Qgb", "W m^-2"),
+        "Q_em": ("dens_temp", "Qgb", "W m^-2"),
+    }
+
+    def compute(self, t=None):
+        """
+        Stream the data and cache the x-resolved fluxes.
+
+        The spectral geometries reconstruct the fluxes from the potential and the
+        moments and append to the HDF5 cache. GENE-3D computes its own fluxes and
+        writes them to the moment file, so its path is a flux-surface average of
+        data already on disk — no reconstruction, and nothing that depends on the
+        ExB normalisation.
+        """
+        if self.is_3d:
+            key = self._key(t)
+            if key not in self._cache:
+                self._cache[key] = self._compute_3d(t)
+            return self._cache[key]
+        a, b = self._bounds(t)
+        r = self.run
+        self.compute_and_save(r.field, [r.mom(n) for n in r.species],
+                              self.coord, self.geom, self.params, a, b,
+                              equilibrium_profiles=r.eq_profiles)
+        return self
+
+    def _prefactor_3d(self, kind: str, species: str) -> float:
+        """
+        Species factor from the namelist.
+
+        GENE-3D's own ``diag_prof`` applies ``dens`` to the particle fluxes and
+        ``dens*temp`` to the heat fluxes — to the electromagnetic parts exactly
+        as to the electrostatic ones. (The reference GUI normalises only the
+        electrostatic terms, leaving its EM fluxes inconsistent with both its own
+        ES fluxes and the code's ``profile_<species>`` output.)
+        """
+        spec = next(s for s in self.params["species"] if s["name"] == species)
+        dens = float(spec.get("dens", 1.0))
+        return dens if kind == "dens" else dens * float(spec.get("temp", 1.0))
+
+    def _compute_3d(self, t):
+        run = self.run
+        J = self.geom["Jacobian"]
+        out, times = {}, None
+        for name in run.species:
+            reader = run.mom(name)
+            _, idx = self._indices(reader, t)
+            wanted = [v for v in self._FLUXES_3D if g3.has_var(reader, v)]
+            slots = {v: reader.index_of(v) for v in wanted}
+            stacks = {v: [] for v in wanted}
+            got = []
+            for time, arrays in reader.stream_selected(idx):
+                got.append(time)
+                for v in wanted:
+                    stacks[v].append(
+                        g3.flux_surface_average(arrays[slots[v]], J))
+            out[name] = {
+                v: np.asarray(stacks[v]) * self._prefactor_3d(
+                    self._FLUXES_3D[v][0], name)
+                for v in wanted}
+            if times is None:
+                times = np.asarray(got)
+        return {"species": out, "times": times}
+
+    def _surface_area_3d(self):
+        """
+        The area that turns a flux density into a total.
+
+        ``norm_flux_projection`` decides, and it is the same flag that decides
+        whether GENE-3D's ``flux_geomfac`` carries a ``1/sqrt(g^xx)``: with the
+        projection on, the flux is per unit *physical* area and pairs with the
+        ``sqrt(g^xx)``-weighted surface area; with it off, it is per unit ``x``
+        and pairs with ``dVdx``. Mixing the two rescales every total.
+        """
+        projected = self.params.get("geometry", {}).get(
+            "norm_flux_projection", False)
+        return np.asarray(self.geom["area"]["Area" if projected else "dVdx"],
+                          dtype=float)
+
+    def _dataset_3d(self, t):
+        from genetools._xr import make_dataset, unit_attrs
+        raw = self.compute(t)
+        params = self.params
+        units = params.get("units", {}) or {}
+        area = self._surface_area_3d()
+        names = [n for n in self.run.species if n in raw["species"]]
+        present = [v for v in self._FLUXES_3D
+                   if all(v in raw["species"][n] for n in names)]
+
+        data_vars = {}
+        for v in present:
+            data_vars[v] = (("species", "time", "x"),
+                            np.stack([raw["species"][n][v] for n in names],
+                                     axis=0))
+        for base in ("Gamma", "Q"):
+            parts = [v for v in present if v.startswith(base + "_")]
+            if not parts:
+                continue
+            total = sum(np.asarray(data_vars[v][1]) for v in parts)
+            data_vars[base + "_total"] = (("species", "time", "x"), total)
+            data_vars[base + "_integrated"] = (
+                ("species", "time", "x"),
+                total * area[np.newaxis, np.newaxis, :])
+
+        ds = make_dataset(data_vars,
+                          {"x": self.coord.get("x_o_a"), "time": raw["times"]},
+                          species=names, params=params)
+        ds = ds.assign(
+            Area=("x", area),
+            dVdx=("x", np.asarray(self.geom["area"]["dVdx"], dtype=float)),
+            x_o_rho_ref=("x", np.asarray(self.coord["x"], dtype=float)))
+        ds["Area"].attrs["units"] = "m^2 (per dx/Lref)"
+        ds["dVdx"].attrs["units"] = "m^3 (per dx/Lref)"
+
+        for v in present:
+            _, ref_key, si_unit = self._FLUXES_3D[v]
+            ds[v].attrs["units"] = f"{ref_key} (normalised)"
+            ref = units.get(ref_key)
+            if ref is not None:
+                ds[v + "_SI"] = ds[v] * float(ref)
+                ds[v + "_SI"].attrs["units"] = si_unit
+        for base, unit in (("Gamma", "1e19 s^-1"), ("Q", "W")):
+            key = base + "_integrated"
+            if key not in ds:
+                continue
+            ref = units.get("Ggb" if base == "Gamma" else "Qgb")
+            if ref is not None:
+                ds[key + "_SI"] = ds[key] * float(ref)
+                ds[key + "_SI"].attrs["units"] = unit
+        ds.attrs.update(unit_attrs(params))
+        ds.attrs["geometry_kind"] = self.geometry_kind
+        return ds
+
+    def _plot_3d(self, t, si=True, x_avg_lims=None, buffer_frac=0.1,
+                 show_traces=False):
+        ds = self._dataset_3d(t)
+        x = np.asarray(ds["x"])
+        sl = g3.radial_slice(x, limits=x_avg_lims, buffer_frac=buffer_frac)
+        bases = [b for b in ("Q", "Gamma") if f"{b}_total" in ds]
+        if not bases:
+            raise ValueError("No flux variables available to plot.")
+
+        fig, axes = plt.subplots(len(bases), 2,
+                                 figsize=(11, 3.6 * len(bases)), squeeze=False)
+        for row, base in enumerate(bases):
+            symbol = r"\Gamma" if base == "Gamma" else "Q"
+            for suffix, ax in ((f"{base}_total", axes[row][0]),
+                               (f"{base}_integrated", axes[row][1])):
+                key = f"{suffix}_SI" if (si and f"{suffix}_SI" in ds) else suffix
+                da = ds[key].mean("time")
+                for name in ds["species"].values:
+                    trace = np.asarray(da.sel(species=name))
+                    ax.plot(x, trace,
+                            label=f"{name} (mean {trace[sl].mean():.3g})")
+                ax.set_xlabel(r"$x/a$")
+                ax.set_ylabel(ds[key].attrs.get("units", ""))
+                ax.grid(True, alpha=0.3)
+                ax.legend(fontsize=8)
+                ax.axvline(x[sl][0], ls="--", lw=0.8, color="k")
+                ax.axvline(x[sl][-1], ls="--", lw=0.8, color="k")
+            axes[row][0].set_title(rf"$\langle {symbol} \rangle_{{FS,t}}$")
+            axes[row][1].set_title(
+                rf"$\langle {symbol} \rangle_{{FS,t}} \times A$")
+        fig.tight_layout()
+
+        if show_traces:
+            times = np.asarray(ds["time"])
+            keys = [f"{b}_total" for b in bases]
+            names = list(ds["species"].values)
+            fig2, ax2 = plt.subplots(len(keys), len(names),
+                                     figsize=(5 * len(names), 3.4 * len(keys)),
+                                     squeeze=False)
+            for r, key in enumerate(keys):
+                for col, name in enumerate(names):
+                    ax = ax2[r][col]
+                    mesh = ax.pcolormesh(
+                        times, x, np.asarray(ds[key].sel(species=name)).T,
+                        shading="nearest")
+                    ax.set_title(f"{key} — {name}")
+                    ax.set_xlabel(r"$t\;[L_{\rm ref}/c_{\rm ref}]$")
+                    ax.set_ylabel(r"$x/a$")
+                    fig2.colorbar(mesh, ax=ax)
+            fig2.tight_layout()
+        plt.show()
+        return fig
+
+    # ------------------------------------------------------------------
+
+    def plot(self, t=None, show_heatmaps=False, **kw):
+        """Plot the x-resolved fluxes over the window *t*."""
+        if self.is_3d:
+            return self._plot_3d(t, **kw)
+        self.compute(t)
+        a, b = self._bounds(t)
+        return self._plot_spectral(self.coord, self.params, a, b,
+                                   show_heatmaps=show_heatmaps, **kw)
+
+    def _plot_spectral(self, coords: dict, params: dict,
              t_start: float = None, t_stop: float = None,
              show_heatmaps: bool = False) -> None:
         """

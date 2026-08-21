@@ -15,60 +15,83 @@ except ImportError:
     NUMBA_AVAILABLE = False
 
 from genetools.compat import trapz as _trapz
-from genetools.diagnostics._base import CachingDiagnostic
+from genetools.diagnostics._base import (CachingDiagnostic,
+                                        RunDiagnostic)
+from genetools.diagnostics import _gene3d as g3
 
 
-class Spectra(CachingDiagnostic):
-    def __init__(self, outfile="flux_spectra.h5", folder: str = None):
-        super().__init__(outfile, folder)
+class Spectra(RunDiagnostic):
+    name = "spectra"
+    cache_file = "flux_spectra.h5"
+
+    #: GENE-3D flux moments, electrostatic then electromagnetic.
+    _ES_FLUXES = ("Gamma_es", "Q_es")
+    _EM_FLUXES = ("Gamma_em", "Q_em")
+
+    _TITLES_3D = {
+        "Gamma_es": r"$\Gamma_{es}$", "Gamma_em": r"$\Gamma_{em}$",
+        "Q_es": r"$Q_{es}$", "Q_em": r"$Q_{em}$",
+    }
+
+    def __init__(self, run=None, outfile: str = None, folder: str = None,
+                 x_avg_lims=None, buffer_frac=0.1):
+        """
+        Parameters
+        ----------
+        run : genetools.run.Run, optional
+        outfile, folder : str, optional
+            Override the HDF5 cache location; normally derived from the run.
+        x_avg_lims : (float, float), optional
+            GENE-3D only: radial averaging range in ``x/a``. Defaults to
+            trimming *buffer_frac* from each end, keeping the Krook buffer
+            regions out of the spectrum.
+        buffer_frac : float
+            GENE-3D only; fraction trimmed from each radial end.
+        """
+        self.x_avg_lims = x_avg_lims
+        self.buffer_frac = buffer_frac
+        self.consistency = {}
+        self._global = None
+        if run is not None:
+            RunDiagnostic.__init__(self, run)
+            if outfile:
+                self.outfile = outfile
+            if self.geometry_kind == "x_global":
+                from genetools.diagnostics.spectra_global import SpectraGlobal
+                self._global = SpectraGlobal(run)
+            return
+        self._legacy_init(outfile or self.cache_file, folder)
+
+    def _legacy_init(self, outfile: str, folder: str = None):
+        """
+        Detached construction: HDF5 cache only, no run attached.
+
+        Goes straight to the caching layer — ``super()`` is now
+        :class:`RunDiagnostic`, whose constructor takes a run.
+        """
+        self.run = None
+        self._cache = {}
+        CachingDiagnostic.__init__(self, outfile, folder)
 
     # ------------------------------------------------------------------
     # Synchronisation
     # ------------------------------------------------------------------
 
     def sync_indices(self, fld_reader, mom_readers, t_start, t_stop, params):
-        istep_fld = int(params["in_out"]["istep_field"])
-        istep_mom = int(params["in_out"]["istep_mom"])
-        if istep_fld <= 0 or istep_mom <= 0:
-            raise ValueError("istep_field and istep_mom must be positive integers")
-        L          = int(np.lcm(istep_fld, istep_mom))
-        stride_fld = L // istep_fld
-        stride_mom = L // istep_mom
-        times_fld  = fld_reader.read_all_times()
-        idx_fld    = np.where((times_fld >= t_start) & (times_fld <= t_stop))[0][::stride_fld]
-        times_mom  = mom_readers[0].read_all_times()
-        idx_mom    = np.where((times_mom >= t_start) & (times_mom <= t_stop))[0][::stride_mom]
-        if os.path.exists(self.outfile):
-            with h5py.File(self.outfile, "r") as f:
-                saved_times = f["time"][...] if "time" in f else np.array([], dtype=np.float64)
-        else:
-            saved_times = np.array([], dtype=np.float64)
+        """
+        Return time-aligned, not-yet-cached field and moment indices.
 
-        if saved_times.size == 0:
-            return idx_fld.tolist(), idx_mom.tolist()
-
-        # Compare in float64 regardless of on-disk precision (tolerance-based).
-        saved_sorted = np.sort(saved_times.astype(np.float64))
-
-        def _filter_unsaved(indices, all_times):
-            if len(indices) == 0:
-                return []
-            candidate = all_times[indices].astype(np.float64)
-            tol = np.maximum(1e-6, np.abs(candidate) * 1e-6)
-            pos = np.searchsorted(saved_sorted, candidate)
-            found = np.zeros(len(candidate), dtype=bool)
-            for offset in (0, -1):
-                idx_check = np.clip(pos + offset, 0, len(saved_sorted) - 1)
-                found |= np.abs(saved_sorted[idx_check] - candidate) <= tol
-            return [i for i, f in zip(indices, found) if not f]
-
-        idx_fld_filtered = _filter_unsaved(idx_fld, times_fld)
-        idx_mom_filtered = _filter_unsaved(idx_mom, times_mom)
-        return idx_fld_filtered, idx_mom_filtered
-
-    # ------------------------------------------------------------------
-    # Spectral computation
-    # ------------------------------------------------------------------
+        Delegates to :meth:`CachingDiagnostic._sync_field_mom_indices`, which
+        pairs the two files by *time value*. The previous implementation here
+        derived strides from ``istep_field``/``istep_mom`` and sliced each index
+        list independently, which assumes both files start at the same time and
+        are complete. When they are not — different cadences, or a run killed
+        mid-write — the two lists come out different lengths and the streaming
+        loop exhausts the moment iterators, surfacing as
+        ``RuntimeError: generator raised StopIteration``.
+        """
+        return self._sync_field_mom_indices(fld_reader, mom_readers,
+                                           t_start, t_stop, params)
 
     def compute_spectra(self, fields, moments, ky3, J_norm, Bfield, params,
                         ky_weight=None):
@@ -312,7 +335,26 @@ class Spectra(CachingDiagnostic):
                     flux_avg[key] = _trapz(data, x=time, axis=0) / (time[-1] - time[0])
         return flux_avg
 
-    def dataset(self, coords, params, species, t_start=None, t_stop=None):
+    def dataset(self, t=None, params=None, species=None, t_start=None,
+                t_stop=None):
+        """
+        Return the flux spectra as an :class:`xarray.Dataset`.
+
+        Called with a time window when bound to a run; the older
+        ``dataset(coords, params, species, ...)`` form still works.
+        """
+        if self.run is not None and not isinstance(t, dict):
+            if self.is_3d:
+                return self._dataset_3d(t)
+            self.compute(t)
+            lo, hi = self._window(t)
+            target = self._global if self._global is not None else self
+            return target._dataset_from_cache(self.coord, self.params,
+                                              self.run.species, lo, hi)
+        return self._dataset_from_cache(t, params, species, t_start, t_stop)
+
+    def _dataset_from_cache(self, coords, params, species, t_start=None,
+                            t_stop=None):
         """Return the time-averaged flux spectra as an ``xarray.Dataset``."""
         import xarray as xr
         from genetools import _xr
@@ -332,7 +374,265 @@ class Spectra(CachingDiagnostic):
         }
         return _xr.make_dataset(data_vars, candidates, species=used, params=params)
 
-    def plot(self, fld_reader, mom_readers, coords, geom, params_list,
+    # ------------------------------------------------------------------
+    # Run-native front end
+    # ------------------------------------------------------------------
+
+    def compute(self, t=None):
+        """
+        Stream the data and cache the flux spectra.
+
+        Flux tubes append kx/ky/z spectra to the HDF5 cache. x-global runs build
+        the ``(x, ky)`` maps through
+        :class:`~genetools.diagnostics.spectra_global.SpectraGlobal`, whose cache
+        schema is different enough to be worth keeping separate; this class owns
+        the facade either way. GENE-3D rebuilds ky spectra in memory and
+        cross-checks them against the fluxes the code wrote itself.
+        """
+        key = (self._key(t),
+               tuple(self.x_avg_lims) if self.x_avg_lims else None)
+        if self.is_3d:
+            if key not in self._cache:
+                self._cache[key] = self._compute_3d(t)
+            return self._cache[key]
+        lo, hi = self._bounds(t)
+        r = self.run
+        moms = [r.mom(n) for n in r.species]
+        if self._global is not None:
+            self._global.compute_and_save(
+                r.field, moms, self.coord, self.geom, self.params, lo, hi,
+                equilibrium_profiles=r.eq_profiles)
+        else:
+            self.compute_missing(r.field, moms, self.coord, self.geom,
+                                 r.params, lo, hi)
+        return self
+
+    def _background(self, species):
+        """
+        Return ``(n_0, T_0)`` normalised to this species' namelist values.
+
+        The heat flux needs the background profiles: GENE-3D's moments are
+        perturbations about ``n_0(x)`` and ``T_0(x)``, and the profile files
+        store them in keV / 1e19 m^-3, so both are divided back down by the
+        species factor and the reference value.
+        """
+        params = self.params
+        spec = next(s for s in params["species"] if s["name"] == species)
+        units = params["units"]
+        prof = self.run.eq_profiles[species]
+        T0 = (np.asarray(prof["T"], dtype=float)
+              / (float(spec.get("temp", 1.0)) * float(units["Tref"])))
+        n0 = (np.asarray(prof["n"], dtype=float)
+              / (float(spec.get("dens", 1.0)) * float(units["nref"])))
+        return n0, T0
+
+    # ------------------------------------------------------------------
+    # Computation
+    # ------------------------------------------------------------------
+
+    def _compute_3d(self, t):
+        """Stream field and moments, returning per-species ky spectra."""
+        run = self.run
+        J = self.geom["Jacobian"]
+        geomfac = g3.flux_geomfac(self.geom, self.params)
+        coord = self.coord
+        ky = np.asarray(coord["ky"], dtype=float)
+        xsl = g3.radial_slice(coord["x_o_a"], limits=self.x_avg_lims,
+                             buffer_frac=self.buffer_frac)
+
+        fld = run.field
+        lo, hi = self._bounds(t)
+
+        mom_readers = {n: run.mom(n) for n in run.species}
+        # istep_field and istep_mom need not agree, so a flux built from both
+        # files may only be evaluated where the two coincide. The shared
+        # helper pairs them by time value, never by position.
+        idx_f, idx_m = self._sync_field_mom_indices(
+            fld, list(mom_readers.values()), lo, hi, self.params)
+        if not idx_f:
+            raise ValueError(
+                "No time at which both field and moment output exist inside "
+                "the requested window.")
+        common = {"times": np.asarray(fld.read_all_times())[idx_f],
+                  "field": idx_f}
+        common.update({n: idx_m for n in mom_readers})
+
+        i_phi = fld.index_of("phi")
+        i_apar = fld.index_of("A_par") if g3.has_var(fld, "A_par") else None
+
+        spectra = {n: {} for n in run.species}
+        code_flux = {n: {} for n in run.species}
+        for name in run.species:
+            n0, T0 = self._background(name)
+            reader = mom_readers[name]
+            wanted = [v for v in self._ES_FLUXES + self._EM_FLUXES
+                      if g3.has_var(reader, v)]
+            acc = {v: [] for v in wanted}
+            ref = {v: [] for v in wanted}
+
+            stream_f = fld.stream_selected(common["field"])
+            stream_m = reader.stream_selected(common[name])
+            for (_, f_arrays), (_, m_arrays) in zip(stream_f, stream_m):
+                phi = f_arrays[i_phi]
+                v_E = g3.exb_velocity_ky(phi, ky, geomfac)
+                b_x = (g3.flutter_velocity_ky(f_arrays[i_apar], ky, geomfac)
+                       if i_apar is not None else None)
+
+                fluxes = self._fluxes_from_moments(
+                    reader, m_arrays, v_E, b_x, n0, T0, wanted)
+                for v in wanted:
+                    acc[v].append(g3.xz_average(fluxes[v], J, xsl))
+                    # The reference has to be reduced identically, or the
+                    # comparison measures the difference between two averaging
+                    # weights rather than a normalisation error: summing the
+                    # spectrum over ky is a Jacobian-weighted average over
+                    # x, y and z, so the code's own flux gets the same.
+                    ref[v].append(np.average(g3.pick(reader, m_arrays, v)[xsl],
+                                             weights=J[xsl]))
+
+            for v in wanted:
+                spectra[name][v] = self._time_average(
+                    np.asarray(acc[v]), common["times"])
+                code_flux[name][v] = self._time_average(
+                    np.asarray(ref[v]), common["times"])
+
+        result = {"ky": ky, "times": common["times"], "spectra": spectra,
+                  "code_flux": code_flux, "xslice": xsl}
+        self._check(result)
+        return result
+
+    def _fluxes_from_moments(self, reader, arrays, v_E, b_x, n0, T0, wanted):
+        """
+        Build the complex per-mode flux densities from one snapshot.
+
+        Both integrands follow from GENE-3D's own moment slots rather than
+        being assumed. Its heat flux is built from ``momc(5) = mat_20 + mat_01``
+        after the FLR corrections; undoing the post-processing that turns those
+        into the written ``T_par``/``T_per``/``n`` leaves
+
+            n_0 (T_par/2 + T_per) + 3/2 T_0 n
+
+        which is the integrand used here. Its electromagnetic heat flux uses
+        ``momc(6) = mat_30 + mat_11``, and those are written verbatim as
+        ``q_par`` and ``q_perp`` — so ``Q_em`` is an exact identity in the data
+        on disk. The reference GUI omits both from its variable map and
+        therefore reports ``Q_em = 0`` for every GENE-3D run.
+        """
+        nx = n0[:, np.newaxis, np.newaxis]
+        tx = T0[:, np.newaxis, np.newaxis]
+
+        dens = g3.to_ky(g3.pick(reader, arrays, "n"))
+        t_par = g3.to_ky(g3.pick(reader, arrays, "T_par"))
+        t_perp = g3.to_ky(g3.pick(reader, arrays, "T_per"))
+
+        out = {}
+        if "Gamma_es" in wanted:
+            out["Gamma_es"] = np.conj(v_E) * dens
+        if "Q_es" in wanted:
+            integrand = (0.5 * t_par + t_perp) * nx + 1.5 * dens * tx
+            out["Q_es"] = np.conj(v_E) * integrand
+
+        if b_x is not None:
+            if "Gamma_em" in wanted:
+                u_par = g3.to_ky(g3.pick(reader, arrays, "u_par"))
+                out["Gamma_em"] = np.conj(b_x) * u_par
+            if "Q_em" in wanted:
+                if g3.has_var(reader, "q_par") and g3.has_var(reader, "q_perp"):
+                    q_tot = (g3.to_ky(g3.pick(reader, arrays, "q_par"))
+                             + g3.to_ky(g3.pick(reader, arrays, "q_perp")))
+                    out["Q_em"] = np.conj(b_x) * q_tot
+                else:
+                    out["Q_em"] = np.zeros_like(out.get("Gamma_em", dens))
+        return out
+
+    def _check(self, result):
+        """Compare each ky-summed spectrum against the code's own flux."""
+        self.consistency = {}
+        for name, per in result["spectra"].items():
+            for v, spectrum in per.items():
+                ratio = g3.check_flux_consistency(
+                    np.sum(spectrum), result["code_flux"][name][v],
+                    f"{name} {v}")
+                self.consistency[f"{name}/{v}"] = ratio
+
+
+    # ------------------------------------------------------------------
+    # GENE-3D dataset and plot
+    # ------------------------------------------------------------------
+
+    def _dataset_3d(self, t):
+        from genetools._xr import make_dataset, unit_attrs
+        raw = self.compute(t)
+        params = self.params
+        names = list(self.run.species)
+        present = [v for v in self._ES_FLUXES + self._EM_FLUXES
+                   if all(v in raw["spectra"][n] for n in names)]
+        ds = make_dataset(
+            {v + "_ky": (("species", "ky"),
+                         np.stack([np.real(raw["spectra"][n][v])
+                                   for n in names], axis=0))
+             for v in present},
+            {"ky": raw["ky"]}, species=names, params=params)
+        ds.attrs.update(unit_attrs(params))
+        ds.attrs["geometry_kind"] = self.geometry_kind
+        x = np.asarray(self.coord["x_o_a"], dtype=float)[raw["xslice"]]
+        ds.attrs["x_avg_range"] = [float(x[0]), float(x[-1])]
+        ds.attrs["n_times"] = int(np.size(raw["times"]))
+        for label, ratio in self.consistency.items():
+            ds.attrs["consistency_" + label.replace("/", "_")] = float(ratio)
+        return ds
+
+    def _plot_3d(self, t):
+        """Three panels per flux: log-log, ky-weighted, and lin-lin."""
+        ds = self._dataset_3d(t)
+        ky_full = np.asarray(ds["ky"])
+        n_pos = (ky_full.size + 1) // 2
+        ky = ky_full[:n_pos]
+        keys = [k for k in ds.data_vars if k.endswith("_ky")]
+        if not keys:
+            raise ValueError("No flux spectra available to plot.")
+
+        fig, axes = plt.subplots(len(keys), 3,
+                                 figsize=(13, 3.2 * len(keys)), squeeze=False)
+        for row, key in enumerate(keys):
+            label = self._TITLES_3D.get(key[:-3], key)
+            for name in ds["species"].values:
+                vals = np.asarray(ds[key].sel(species=name))[:n_pos]
+                axes[row][0].plot(ky, np.abs(vals), label=str(name))
+                axes[row][1].plot(ky, vals * ky, label=str(name))
+                axes[row][2].plot(ky, vals, label=str(name))
+            axes[row][0].loglog()
+            axes[row][0].set_ylabel("|" + label + "|")
+            axes[row][1].set_xscale("log")
+            axes[row][1].set_ylabel(label + r"$\,k_y$")
+            axes[row][2].set_ylabel(label)
+            for ax in axes[row]:
+                ax.set_xlabel(r"$k_y \rho_{\rm ref}$")
+                ax.grid(True, alpha=0.3)
+                ax.legend(fontsize=8)
+        lo, hi = ds.attrs["x_avg_range"]
+        fig.suptitle("GENE-3D flux spectra, "
+                     rf"$x/a \in [{lo:.2f}, {hi:.2f}]$")
+        fig.tight_layout()
+        plt.show()
+        return fig
+
+    # ------------------------------------------------------------------
+
+    def plot(self, t=None, x_avg_lims=None, **kw):
+        """Plot the flux spectra over the window *t*."""
+        if self.is_3d:
+            return self._plot_3d(t)
+        lo, hi = self._bounds(t)
+        r = self.run
+        if self._global is not None:
+            self.compute(t)
+            return self._global.plot(self.coord, self.params, lo, hi,
+                                     x_avg_lims=x_avg_lims, **kw)
+        return self._plot_local(r.field, [r.mom(n) for n in r.species],
+                                r.coords, r.geometry, r.params, lo, hi, **kw)
+
+    def _plot_local(self, fld_reader, mom_readers, coords, geom, params_list,
              t_start, t_stop):
         if hasattr(params_list, 'tolist'):
             params_list = params_list.tolist()

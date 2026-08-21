@@ -20,29 +20,53 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from genetools.compat import trapz as _trapz
+from genetools.diagnostics._base import RunDiagnostic
 from genetools.diagnostics.shearingrate import compute_exb
 
 
-class Zonal:
-    """Zonal (ky=0) potential x-t evolution."""
+class Zonal(RunDiagnostic):
+    """
+    Zonal potential x-t evolution.
 
-    def __init__(self, run):
-        self.run = run
-        self._cache = None
+    For the spectral geometries the zonal component is the ``ky = 0`` mode, via
+    :func:`~genetools.diagnostics.shearingrate.compute_exb`. GENE-3D is real
+    space in y, so its zonal component is a Jacobian-weighted average over y and
+    z; that path reuses
+    :class:`~genetools.diagnostics.shearingrate.ShearingRate` rather than
+    repeating the reduction.
+    """
+
+    name = "zonal"
 
     # ------------------------------------------------------------------
 
     def compute(self, t=None):
         """Stream the field and build φ_zonal(x, t); returns a dict."""
-        run = self.run
-        coord = run.coords[0]
-        geom = run.geometry[0]
-        p = run.params.get(0)
+        key = self._key(t)
+        if key in self._cache:
+            return self._cache[key]
+        result = self._compute_3d(t) if self.is_3d else self._compute_spectral(t)
+        self._cache[key] = result
+        return result
 
-        _, idx = run._indices(run.field, t)
-        if idx.size == 0:
-            raise ValueError(
-                "Zonal: no field time steps in the requested window.")
+    def _compute_3d(self, t):
+        """Delegate to ShearingRate, which owns the GENE-3D reduction."""
+        from genetools.diagnostics.shearingrate import ShearingRate
+        raw = ShearingRate(self.run).compute(t)
+        return {
+            "time": raw["times"],
+            "x": raw["x"],
+            "phi_zonal": raw["phi_zonal"],
+            "omega_ExB": raw["omega_exb"],
+        }
+
+    def _compute_spectral(self, t):
+        run = self.run
+        coord = self.coord
+        geom = self.geom
+        p = self.params
+
+        _, idx = self._indices(run.field, t)
         times, phiz, omeg = [], [], []
         for time, arrays in run.field.stream_selected(list(idx)):
             res = compute_exb(arrays[0], p, geom, coord)
@@ -54,21 +78,19 @@ class Zonal:
         if x.size == 0:
             x = np.asarray(coord["x_o_a"])
 
-        self._cache = {
+        return {
             "time": np.asarray(times),
             "x": x,
             "phi_zonal": np.asarray(phiz),     # (nt, nx)
             "omega_ExB": np.asarray(omeg),     # (nt, nx)
         }
-        return self._cache
 
     # ------------------------------------------------------------------
 
-    @property
-    def data(self):
+    def dataset(self, t=None):
         """Return an ``xarray.Dataset`` with φ_zonal(time, x) and ω_ExB(time, x)."""
         import xarray as xr
-        c = self.compute() if self._cache is None else self._cache
+        c = self.compute(t)
         ds = xr.Dataset(
             {
                 "phi_zonal": (("time", "x"), c["phi_zonal"]),
@@ -76,13 +98,12 @@ class Zonal:
             },
             coords={"time": c["time"], "x": c["x"]},
         )
+        ds.attrs["geometry_kind"] = self.geometry_kind
         return ds
 
     def plot(self, t=None, **kw):
         """Plot the φ_zonal x-t contour and the time-averaged radial profile."""
-        if t is not None or self._cache is None:
-            self.compute(t)
-        c = self._cache
+        c = self.compute(t)
         time, x, phiz = c["time"], c["x"], c["phi_zonal"]
 
         fig, (ax_xt, ax_prof) = plt.subplots(
