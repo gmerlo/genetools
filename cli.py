@@ -37,6 +37,7 @@ DIAGNOSTICS = {
     "growthrate": "growthrate",
     "amplitude": "amplitude",
     "zonal": "zonal",
+    "vexmax": "vexmax",
     "profile_diag": "profile_diag",
 }
 

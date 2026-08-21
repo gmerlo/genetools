@@ -352,6 +352,11 @@ class Run:
         return Zonal(self)
 
     @cached_property
+    def vexmax(self):
+        from .diagnostics.vexmax import VexMax
+        return VexMax(self)
+
+    @cached_property
     def profile_diag(self):
         from .diagnostics.profile_diag import ProfileDiag
         return ProfileDiag(self)
