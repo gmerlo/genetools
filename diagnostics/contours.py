@@ -79,17 +79,46 @@ class Contours(RunDiagnostic):
     # GENE-3D: delegate the reduction, keep the xy product
     # ------------------------------------------------------------------
 
+    #: Planes drawn, in order, and the coordinate each one holds fixed.
+    _PLANES = (("xy", "z"), ("xz", "y"))
+
+    @staticmethod
+    def _at(values, target=0.0):
+        """
+        Return equal bounds on the grid point of *values* nearest *target*.
+
+        Equal bounds make :func:`~genetools.diagnostics.slices._index_window`
+        pick exactly that index, so the plane is a slice and not an average.
+        """
+        arr = np.asarray(values, dtype=float)
+        if arr.size == 0:
+            return None
+        v = float(arr[int(np.argmin(np.abs(arr - target)))])
+        return (v, v)
+
     def _reducer(self, kw):
         """
         Return a :class:`~genetools.diagnostics.slices.Slices` for *kw*.
+
+        The defaults are the two cuts almost always wanted: ``xy`` at the
+        parallel position nearest ``z = 0`` (the outboard midplane on a standard
+        grid) and ``xz`` at ``y = 0``. A bare reduction averages over the whole
+        of ``z`` instead, which smears the outboard and inboard sides of a global
+        run together. Pass ``zlim``/``ylim`` to average over a range, or to cut
+        elsewhere.
 
         Rebuilt only when the selection changes, so repeated plots of the same
         thing reuse the streamed data.
         """
         from genetools.diagnostics.slices import Slices
+        # Built from the defaults and *this* call's arguments only. Carrying the
+        # previous call's arguments forward would make an earlier `zlim` leak
+        # into a later plot that never asked for it — the cached reducer below
+        # is the only thing that persists.
         merged = {"quantities": ("phi",)}
-        merged.update(self._slice_kw)
         merged.update(kw)
+        merged.setdefault("zlim", self._at(self.coord["z"]))
+        merged.setdefault("ylim", self._at(self.coord["y"]))
         if self._slices is None or merged != self._slice_kw:
             self._slice_kw = merged
             self._slices = Slices(self.run, **merged)
@@ -102,7 +131,7 @@ class Contours(RunDiagnostic):
 
     def dataset(self, t=None, **kw):
         """
-        GENE-3D only: the ``xy`` contour as an :class:`xarray.Dataset`.
+        GENE-3D only: the ``xy`` and ``xz`` cuts as an :class:`xarray.Dataset`.
 
         The spectral paths are plot-only — they stream, draw and discard, which
         is what makes them usable on runs whose field file does not fit in
@@ -110,7 +139,9 @@ class Contours(RunDiagnostic):
         """
         self._require("xy_global")
         ds = self._reducer(kw).dataset(t)
-        return ds[[n for n in ds.data_vars if n.endswith("_xy")]]
+        keep = [n for n in ds.data_vars
+                if any(n.endswith("_" + p) for p, _ in self._PLANES)]
+        return ds[keep]
 
     def plot(self, t=None, **kw):
         """
@@ -132,47 +163,80 @@ class Contours(RunDiagnostic):
             reader, a, b, params_list=self.params, coords=self.coord,
             species=species, **kw)
 
-    def _plot_3d(self, t, n_max=6, **kw):
-        """One panel per output time, at most *n_max*, evenly spaced."""
+    def _plot_3d(self, t, n_max=4, **kw):
+        """
+        Plot the ``xy`` and ``xz`` cuts, one column per output time.
+
+        ``x`` runs horizontally in both, so the two rows share a radial axis and
+        read together. At most *n_max* times are drawn, evenly spaced through the
+        window, so a long run does not open hundreds of axes.
+        """
         ds = self.dataset(t, **kw)
-        names = [n for n in ds.data_vars if n.endswith("_xy")]
-        if not names:
-            raise ValueError("No xy slice available to plot.")
+        quantities = sorted({n.rsplit("_", 1)[0] for n in ds.data_vars})
+        if not quantities:
+            raise ValueError("No slice available to plot.")
 
-        for name in names:
-            da = ds[name]
-            if "time" in da.dims:
-                n_t = da.sizes["time"]
-                picks = np.unique(np.linspace(0, n_t - 1,
-                                              min(n_max, n_t)).astype(int))
-                frames = [(float(da["time"].values[i]), da.isel(time=i))
-                          for i in picks]
-                if n_t > len(picks):
-                    print(f"contours: showing {len(picks)} of {n_t} times.")
-            else:
-                frames = [(None, da)]
+        held_of = dict(self._PLANES)
+        fixed = self._fixed_values()
+        figs = []
+        for name in quantities:
+            planes = [p for p, _ in self._PLANES if f"{name}_{p}" in ds]
+            frames, n_total = self._pick_times(ds[f"{name}_{planes[0]}"], n_max)
+            if n_total > len(frames):
+                print(f"contours: showing {len(frames)} of {n_total} times.")
 
-            ncol = min(3, len(frames))
-            nrow = int(np.ceil(len(frames) / ncol))
-            fig, axes = plt.subplots(nrow, ncol,
-                                     figsize=(4.6 * ncol, 3.6 * nrow),
+            fig, axes = plt.subplots(len(planes), len(frames),
+                                     figsize=(4.4 * len(frames),
+                                              3.5 * len(planes)),
                                      squeeze=False)
-            flat = axes.ravel()
-            for ax, (time, frame) in zip(flat, frames):
-                dims = frame.dims
-                mesh = ax.pcolormesh(np.asarray(ds[dims[1]]),
-                                     np.asarray(ds[dims[0]]),
-                                     np.asarray(frame), shading="nearest",
-                                     cmap=self.cmap)
-                ax.set_xlabel(_AXIS_LABELS.get(dims[1], dims[1]))
-                ax.set_ylabel(_AXIS_LABELS.get(dims[0], dims[0]))
-                ax.set_title(name if time is None else f"{name}  t={time:.4g}")
-                fig.colorbar(mesh, ax=ax)
-            for ax in flat[len(frames):]:
-                ax.set_visible(False)
+            for row, plane in enumerate(planes):
+                da = ds[f"{name}_{plane}"]
+                # One symmetric colour scale per plane, so the time panels are
+                # comparable instead of each being self-normalised.
+                vmax = float(np.max(np.abs(np.asarray(da)))) or 1.0
+                for col, (time, index) in enumerate(frames):
+                    ax = axes[row][col]
+                    frame = da if index is None else da.isel(time=index)
+                    dims = frame.dims
+                    # dims[0] is the radial axis: put it horizontal.
+                    h, v = np.asarray(ds[dims[0]]), np.asarray(ds[dims[1]])
+                    mesh = ax.pcolormesh(h, v, np.asarray(frame).T,
+                                         shading="nearest", cmap=self.cmap,
+                                         vmin=-vmax, vmax=vmax)
+                    ax.set_xlabel(_AXIS_LABELS.get(dims[0], dims[0]))
+                    ax.set_ylabel(_AXIS_LABELS.get(dims[1], dims[1]))
+                    bits = [plane]
+                    held = fixed.get(held_of[plane])
+                    if held is not None:
+                        bits.append(f"{held_of[plane]}={held:.3g}")
+                    if time is not None:
+                        bits.append(f"t={time:.4g}")
+                    ax.set_title("  ".join(bits), fontsize=9)
+                    fig.colorbar(mesh, ax=ax)
+            fig.suptitle(name)
             fig.tight_layout()
+            figs.append(fig)
         plt.show()
-        return fig
+        return figs
+
+    def _fixed_values(self):
+        """The coordinate values the cuts hold fixed, for the panel titles."""
+        out = {}
+        for _, held in self._PLANES:
+            limits = self._slice_kw.get(f"{held}lim")
+            if limits and limits[0] == limits[1]:
+                out[held] = float(limits[0])
+        return out
+
+    @staticmethod
+    def _pick_times(da, n_max):
+        """Return ``([(time, index), ...], n_total)`` evenly spaced in time."""
+        if "time" not in da.dims:
+            return [(None, None)], 1
+        n_total = da.sizes["time"]
+        picks = np.unique(np.linspace(0, n_total - 1,
+                                      min(n_max, n_total)).astype(int))
+        return [(float(da["time"].values[i]), int(i)) for i in picks], n_total
 
     def select_indices(self, reader, t_start, t_stop, max_loads):
         """Return downsampled iteration indices within the time window."""

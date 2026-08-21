@@ -178,8 +178,7 @@ def radial_slice(x_o_a, limits=None, buffer_frac=None) -> slice:
         i1 = int(np.argmin(np.abs(x - hi)))
         if i1 < i0:
             i0, i1 = i1, i0
-        if i0 == i1:                    # degenerate request: keep two points
-            i1 = min(i0 + 1, n - 1)
+        # Equal bounds select the single nearest point rather than widening.
         return slice(i0, i1 + 1)
     if buffer_frac:
         cut = int(n * float(buffer_frac))

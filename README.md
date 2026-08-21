@@ -40,7 +40,7 @@ genetools /path/to/run3d --chi --t 200 800
 | `run.profiles` · `--profiles` | Flux-surface-averaged radial profiles |
 | `run.fluxes2d` · `--fluxes2d` | x-resolved transport fluxes (Γ, Q, Π; ES/EM) — time-averaged profiles in gyro-Bohm *and* SI, plus the (x, t) map |
 | `run.shearing` · `--shearing` | ExB shearing rate / zonal Eᵣ |
-| `run.contours` · `--contours` | 2-D field/moment slices |
+| `run.contours` · `--contours` | 2-D field/moment slices — `xy` at z=0 and `xz` at y=0 |
 | `run.ballooning(ky=…)` · `--ballooning` | Field-line (ballooning) mode structure |
 | `run.growthrate` · `--growthrate` | Linear γ/ω from the field time evolution |
 | `run.amplitude` · `--amplitude` | kx/ky amplitude spectra of fields & moments |

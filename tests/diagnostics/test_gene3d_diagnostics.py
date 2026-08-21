@@ -85,7 +85,7 @@ class TestCommon:
     @pytest.mark.parametrize("limits, expected", [
         ((0.3, 0.5), (2, 5)),
         ((0.5, 0.3), (2, 5)),          # reversed bounds are accepted
-        ((0.4, 0.4), (3, 5)),          # degenerate request keeps two points
+        ((0.4, 0.4), (3, 4)),          # equal bounds -> the single nearest point
     ])
     def test_radial_slice_from_limits(self, limits, expected):
         x = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6])
@@ -259,17 +259,92 @@ class TestSlices3D:
         with pytest.raises(KeyError, match="phi"):
             g3.Slices(run, quantities=("nonsense",)).compute()
 
-    def test_contours_keeps_only_the_xy_plane(self, run3d):
+    def test_contours_gives_the_xy_and_xz_cuts(self, run3d):
         _, run = run3d
         ds = g3.Contours(run).dataset()
-        assert list(ds.data_vars) == ["phi_xy"]
+        assert set(ds.data_vars) == {"phi_xy", "phi_xz"}
+        assert ds["phi_xy"].dims == ("time", "x", "y")
+        assert ds["phi_xz"].dims == ("time", "x", "z")
+
+    def test_contours_default_is_a_slice_at_z0_not_a_z_average(self, tmp_path):
+        """
+        Averaging over the whole of z smears the outboard and inboard sides of a
+        global run together, so the default has to be a single cut.
+        """
+        g = make_gene3d_run(tmp_path / "run", nx0=8, nz0=8, n_times=2,
+                            physical=True)
+        run = Run(g.folder)
+        z = np.asarray(run.coords[0]["z"])
+        iz0 = int(np.argmin(np.abs(z)))
+        raw = g.fields["phi"][0].astype(np.float32)
+
+        ds = g3.Contours(run).dataset()
+        got = np.asarray(ds["phi_xy"].isel(time=0))
+        assert np.allclose(got, raw[:, :, iz0])
+        assert not np.allclose(got, raw.mean(axis=2))
+
+    def test_contours_xz_default_is_a_slice_at_y0(self, tmp_path):
+        g = make_gene3d_run(tmp_path / "run", nx0=8, nz0=8, n_times=2,
+                            physical=True)
+        run = Run(g.folder)
+        iy0 = int(np.argmin(np.abs(np.asarray(run.coords[0]["y"]))))
+        raw = g.fields["phi"][0].astype(np.float32)
+        ds = g3.Contours(run).dataset()
+        assert np.allclose(np.asarray(ds["phi_xz"].isel(time=0)),
+                           raw[:, iy0, :])
+
+    def test_explicit_zlim_range_still_averages(self, tmp_path):
+        g = make_gene3d_run(tmp_path / "run", nx0=8, nz0=8, n_times=2,
+                            physical=True)
+        run = Run(g.folder)
+        z = np.asarray(run.coords[0]["z"])
+        raw = g.fields["phi"][0].astype(np.float32)
+        ds = g3.Contours(run).dataset(zlim=(z[0], z[-1]))
+        assert np.allclose(np.asarray(ds["phi_xy"].isel(time=0)),
+                           raw.mean(axis=2))
+
+    def test_options_do_not_leak_between_calls(self, tmp_path):
+        """
+        An explicit zlim on one call must not silently persist into the next,
+        which would show a different cut than the caller asked for.
+        """
+        g = make_gene3d_run(tmp_path / "run", nx0=8, nz0=8, n_times=2,
+                            physical=True)
+        run = Run(g.folder)
+        z = np.asarray(run.coords[0]["z"])
+        iz0 = int(np.argmin(np.abs(z)))
+        raw = g.fields["phi"][0].astype(np.float32)
+        diag = g3.Contours(run)
+
+        diag.dataset(zlim=(z[2], z[2]))                 # override
+        after = np.asarray(diag.dataset()["phi_xy"].isel(time=0))
+        assert np.allclose(after, raw[:, :, iz0])
+
+    def test_contours_puts_x_on_the_horizontal_axis(self, run3d, headless):
+        """Both cuts share a radial axis, so they can be read together."""
+        _, run = run3d
+        figs = g3.Contours(run).plot()
+        labelled = [(a.get_title(), a.get_xlabel(), a.get_ylabel())
+                    for a in figs[0].axes if a.get_title()]
+        xy = next(t for t in labelled if t[0].startswith("xy"))
+        xz = next(t for t in labelled if t[0].startswith("xz"))
+        assert xy[1] == r"$x/a$"
+        assert xz[1] == r"$x/a$"
+        assert xz[2] == r"$z/\pi$"
+
+    def test_contour_titles_name_the_held_coordinate(self, run3d, headless):
+        _, run = run3d
+        figs = g3.Contours(run).plot()
+        titles = [a.get_title() for a in figs[0].axes if a.get_title()]
+        assert any(t.startswith("xy") and "z=0" in t for t in titles)
+        assert any(t.startswith("xz") and "y=0" in t for t in titles)
 
     def test_contours_accepts_options_at_plot_time(self, run3d):
         """run.contours is a property, so selection happens later."""
         _, run = run3d
         diag = g3.Contours(run)
         ds = diag.dataset(quantities=("phi", "n"))
-        assert set(ds.data_vars) == {"phi_xy", "n_xy"}
+        assert set(ds.data_vars) == {"phi_xy", "phi_xz", "n_xy", "n_xz"}
 
 
 # ---------------------------------------------------------------------------

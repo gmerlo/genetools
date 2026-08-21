@@ -281,6 +281,6 @@ def _index_window(values, limits, n):
     i1 = int(np.argmin(np.abs(arr - hi)))
     if i1 < i0:
         i0, i1 = i1, i0
-    if i0 == i1:
-        i1 = min(i0 + 1, n - 1)
+    # Equal bounds mean one grid point, not two: widening would average in a
+    # neighbour, which defeats asking for a single slice.
     return slice(i0, i1 + 1)
