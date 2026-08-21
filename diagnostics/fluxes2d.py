@@ -54,6 +54,8 @@ Example
 """
 
 import os
+import warnings
+
 import numpy as np
 import matplotlib.pyplot as plt
 import h5py
@@ -824,27 +826,76 @@ class Fluxes2D(RunDiagnostic):
         ds["Area"].attrs["units"] = "m^2 (per dx/Lref)"
         ds["dVdx"].attrs["units"] = "m^3 (per dx/Lref)"
 
+        gb_label = {"Gamma": r"$\Gamma_{gB}$", "Q": r"$Q_{gB}$"}
         for v in present:
             _, ref_key, si_unit = self._FLUXES_3D[v]
-            ds[v].attrs["units"] = f"{ref_key} (normalised)"
+            base = v.split("_")[0]
+            ds[v].attrs["units"] = gb_label[base]
             ref = units.get(ref_key)
             if ref is not None:
                 ds[v + "_SI"] = ds[v] * float(ref)
                 ds[v + "_SI"].attrs["units"] = si_unit
-        for base, unit in (("Gamma", "1e19 s^-1"), ("Q", "W")):
-            key = base + "_integrated"
-            if key not in ds:
-                continue
+        # The totals and area-integrated companions need units too, or the
+        # gyro-Bohm figure comes out with blank y-axes.
+        for base, dens_unit, int_unit in (
+                ("Gamma", "1e19 m^-2 s^-1", "1e19 s^-1"), ("Q", "W m^-2", "W")):
             ref = units.get("Ggb" if base == "Gamma" else "Qgb")
-            if ref is not None:
-                ds[key + "_SI"] = ds[key] * float(ref)
-                ds[key + "_SI"].attrs["units"] = unit
+            for key, si_unit in ((base + "_total", dens_unit),
+                                 (base + "_integrated", int_unit)):
+                if key not in ds:
+                    continue
+                ds[key].attrs["units"] = (
+                    gb_label[base] if key.endswith("_total")
+                    else gb_label[base] + r"$\,\mathrm{m^2}$")
+                if ref is not None:
+                    ds[key + "_SI"] = ds[key] * float(ref)
+                    ds[key + "_SI"].attrs["units"] = si_unit
         ds.attrs.update(unit_attrs(params))
         ds.attrs["geometry_kind"] = self.geometry_kind
         return ds
 
-    def _plot_3d(self, t, si=True, x_avg_lims=None, buffer_frac=0.1,
-                 show_traces=False):
+    @staticmethod
+    def _t_average(da):
+        """
+        Trapezoidal average of *da* over its ``time`` dimension.
+
+        Not ``.mean("time")``: GENE uses an adaptive timestep and writes every
+        ``istep_mom`` *steps*, so output times are generally unevenly spaced. A
+        plain mean weights every sample equally regardless of how much time it
+        stands for, which on a strongly varying dt biases the answer badly — 50%
+        on a realistically uneven axis.
+        """
+        t = np.asarray(da["time"], dtype=float)
+        if t.size <= 1:
+            return da.isel(time=0)
+        span = float(t[-1] - t[0])
+        if span == 0:
+            return da.isel(time=0)
+        return da.integrate("time") / span
+
+    def _si_available(self) -> bool:
+        """
+        Whether the parameter file provides real reference units.
+
+        An all-1.0 ``&units`` block means nobody filled it in, and the SI
+        conversion would just relabel gyro-Bohm numbers as watts.
+        """
+        units = self.params.get("units", {}) or {}
+        return any(float(units.get(k, 1.0)) != 1.0
+                   for k in ("Lref", "Bref", "Tref", "nref", "mref"))
+
+    def _plot_3d(self, t, si=None, x_avg_lims=None, buffer_frac=0.1,
+                 show_map=True, show_traces=None, **kw):
+        """
+        Time-averaged radial flux profiles, and the ``(x, t)`` map.
+
+        Draws the gyro-Bohm figure and, when the parameter file carries real
+        reference units, an SI figure alongside it (flux density in W/m^2 or
+        1e19 m^-2 s^-1, and the area-integrated total in W or 1e19 s^-1).
+        ``si=False`` gives gyro-Bohm only, ``si=True`` SI only.
+
+        Returns the list of figures drawn.
+        """
         ds = self._dataset_3d(t)
         x = np.asarray(ds["x"])
         sl = g3.radial_slice(x, limits=x_avg_lims, buffer_frac=buffer_frac)
@@ -852,14 +903,43 @@ class Fluxes2D(RunDiagnostic):
         if not bases:
             raise ValueError("No flux variables available to plot.")
 
+        si_ok = self._si_available()
+        show_gb = si in (None, False)
+        show_si = si is True or (si is None and si_ok)
+        if si is True and not si_ok:
+            warnings.warn(
+                "fluxes2d: SI requested but the parameter file has no reference "
+                "units; plotting gyro-Bohm instead.", RuntimeWarning)
+            show_gb, show_si = True, False
+        if show_traces is not None:      # older keyword
+            show_map = show_traces
+
+        figs = []
+        if show_gb:
+            figs.append(self._plot_3d_profiles(ds, x, sl, bases, si=False))
+        if show_si:
+            figs.append(self._plot_3d_profiles(ds, x, sl, bases, si=True))
+        if show_map:
+            figs.append(self._plot_3d_map(ds, x, bases, si=show_si and not show_gb))
+        plt.show()
+        return figs
+
+    def _plot_3d_profiles(self, ds, x, sl, bases, si: bool):
+        """One row per flux: the density profile and the area-integrated total."""
         fig, axes = plt.subplots(len(bases), 2,
                                  figsize=(11, 3.6 * len(bases)), squeeze=False)
         for row, base in enumerate(bases):
             symbol = r"\Gamma" if base == "Gamma" else "Q"
             for suffix, ax in ((f"{base}_total", axes[row][0]),
                                (f"{base}_integrated", axes[row][1])):
-                key = f"{suffix}_SI" if (si and f"{suffix}_SI" in ds) else suffix
-                da = ds[key].mean("time")
+                key = f"{suffix}_SI" if si else suffix
+                if key not in ds:
+                    raise KeyError(
+                        f"{key} is not in the dataset. An SI figure must not "
+                        "quietly fall back to gyro-Bohm values under an SI "
+                        "axis label; check that &units carries real reference "
+                        "quantities.")
+                da = self._t_average(ds[key])
                 for name in ds["species"].values:
                     trace = np.asarray(da.sel(species=name))
                     ax.plot(x, trace,
@@ -868,32 +948,43 @@ class Fluxes2D(RunDiagnostic):
                 ax.set_ylabel(ds[key].attrs.get("units", ""))
                 ax.grid(True, alpha=0.3)
                 ax.legend(fontsize=8)
+                # Mark the window the quoted means are taken over.
                 ax.axvline(x[sl][0], ls="--", lw=0.8, color="k")
                 ax.axvline(x[sl][-1], ls="--", lw=0.8, color="k")
             axes[row][0].set_title(rf"$\langle {symbol} \rangle_{{FS,t}}$")
             axes[row][1].set_title(
                 rf"$\langle {symbol} \rangle_{{FS,t}} \times A$")
+        fig.suptitle("Radial flux profiles " + ("[SI]" if si else "[gyro-Bohm]"))
         fig.tight_layout()
+        return fig
 
-        if show_traces:
-            times = np.asarray(ds["time"])
-            keys = [f"{b}_total" for b in bases]
-            names = list(ds["species"].values)
-            fig2, ax2 = plt.subplots(len(keys), len(names),
-                                     figsize=(5 * len(names), 3.4 * len(keys)),
-                                     squeeze=False)
-            for r, key in enumerate(keys):
-                for col, name in enumerate(names):
-                    ax = ax2[r][col]
-                    mesh = ax.pcolormesh(
-                        times, x, np.asarray(ds[key].sel(species=name)).T,
-                        shading="nearest")
-                    ax.set_title(f"{key} — {name}")
-                    ax.set_xlabel(r"$t\;[L_{\rm ref}/c_{\rm ref}]$")
-                    ax.set_ylabel(r"$x/a$")
-                    fig2.colorbar(mesh, ax=ax)
-            fig2.tight_layout()
-        plt.show()
+    def _plot_3d_map(self, ds, x, bases, si: bool):
+        """``(x, t)`` heatmap per flux and species — shows avalanches and drift."""
+        times = np.asarray(ds["time"])
+        names = list(ds["species"].values)
+        fig, axes = plt.subplots(len(bases), len(names),
+                                 figsize=(5.2 * len(names), 3.6 * len(bases)),
+                                 squeeze=False)
+        for row, base in enumerate(bases):
+            key = f"{base}_total"
+            if si and f"{key}_SI" in ds:
+                key = f"{key}_SI"
+            arr_all = np.asarray(ds[key])
+            # One symmetric colour scale per flux, so species are comparable.
+            vmax = float(np.max(np.abs(arr_all))) or 1.0
+            for col, name in enumerate(names):
+                ax = axes[row][col]
+                mesh = ax.pcolormesh(times, x,
+                                     np.asarray(ds[key].sel(species=name)).T,
+                                     shading="nearest", cmap="RdBu_r",
+                                     vmin=-vmax, vmax=vmax)
+                ax.set_title(f"{key} — {name}")
+                ax.set_xlabel(r"$t\;[L_{\rm ref}/c_{\rm ref}]$")
+                ax.set_ylabel(r"$x/a$")
+                cb = fig.colorbar(mesh, ax=ax)
+                cb.set_label(ds[key].attrs.get("units", ""))
+        fig.suptitle("Flux evolution")
+        fig.tight_layout()
         return fig
 
     # ------------------------------------------------------------------

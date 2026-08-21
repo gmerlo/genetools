@@ -195,10 +195,94 @@ class TestFluxProfiles3D:
         with pytest.raises(ValueError, match="no output in the requested time"):
             Fluxes2D(Run(noisy_run.folder)).compute(t=(1e6, 2e6))
 
-    def test_plot_runs_headless(self, noisy_run, monkeypatch):
+    def test_time_average_is_trapezoidal_not_a_plain_mean(self, tmp_path):
+        """
+        GENE's timestep is adaptive and output happens every istep_mom *steps*,
+        so output times are generally unevenly spaced. A plain mean weights every
+        sample equally regardless of the interval it stands for; on a realistic
+        uneven axis the two differ by tens of percent, and the time-averaged
+        flux is the number people quote.
+        """
+        import h5py
+        g = make_gene3d_run(tmp_path / "run", nx0=8, n_times=6, physical=True)
+        uneven = np.array([0.0, 1.0, 2.0, 10.0, 30.0, 70.0])
+        for name in ["field.dat.h5"] + [f"mom_{s}.dat.h5" for s in g.species]:
+            with h5py.File(g.folder / name, "a") as f:
+                key = list(f.keys())[0]
+                f[f"{key}/time"][...] = uneven
+
+        diag = Fluxes2D(Run(g.folder))
+        da = diag.dataset()["Q_total"].sel(species="ions")
+        got = np.asarray(diag._t_average(da))
+        expected = (np.trapezoid(np.asarray(da), x=uneven, axis=0)
+                    / (uneven[-1] - uneven[0]))
+        assert np.allclose(got, expected)
+        # And it must actually differ from the plain mean, or the test is vacuous.
+        assert not np.allclose(got, np.asarray(da).mean(axis=0))
+
+    def test_single_sample_time_average(self, tmp_path):
+        """One snapshot has no interval to integrate; return it unchanged."""
+        g = make_gene3d_run(tmp_path / "run", nx0=6, n_times=1, physical=True)
+        diag = Fluxes2D(Run(g.folder))
+        da = diag.dataset()["Q_total"].sel(species="ions")
+        assert np.allclose(np.asarray(diag._t_average(da)),
+                           np.asarray(da.isel(time=0)))
+
+    def test_totals_have_si_companions(self, noisy_run):
+        """
+        Without Q_total_SI an SI figure would fall back to the gyro-Bohm array
+        under an SI axis label.
+        """
+        ds = Fluxes2D(Run(noisy_run.folder)).dataset()
+        assert ds["Q_total_SI"].attrs["units"] == "W m^-2"
+        assert ds["Q_integrated_SI"].attrs["units"] == "W"
+        assert ds["Gamma_total_SI"].attrs["units"] == "1e19 m^-2 s^-1"
+        assert ds["Gamma_integrated_SI"].attrs["units"] == "1e19 s^-1"
+
+    def test_si_is_gyrobohm_times_the_reference(self, noisy_run):
+        run = Run(noisy_run.folder)
+        ds = Fluxes2D(run).dataset()
+        gb = np.asarray(ds["Q_total"].sel(species="ions").isel(time=0))
+        si = np.asarray(ds["Q_total_SI"].sel(species="ions").isel(time=0))
+        area = np.asarray(ds["Area"])
+        Qgb = float(run.params.get(0)["units"]["Qgb"])
+        assert np.allclose(si, gb * Qgb)
+        assert np.allclose(
+            np.asarray(ds["Q_integrated_SI"].sel(species="ions").isel(time=0)),
+            gb * area * Qgb)
+
+    def test_gyrobohm_axes_are_labelled(self, noisy_run):
+        """The gyro-Bohm figure needs units on the totals, not just the parts."""
+        ds = Fluxes2D(Run(noisy_run.folder)).dataset()
+        for key in ("Q_total", "Q_integrated", "Gamma_total"):
+            assert ds[key].attrs.get("units")
+
+    def test_plot_draws_gyrobohm_si_and_the_map(self, noisy_run, monkeypatch):
         import matplotlib.pyplot as plt
         monkeypatch.setattr(plt, "show", lambda *a, **k: None)
-        Fluxes2D(Run(noisy_run.folder)).plot(show_traces=True)
+        figs = Fluxes2D(Run(noisy_run.folder)).plot()
+        titles = [f._suptitle.get_text() for f in figs]
+        assert titles == ["Radial flux profiles [gyro-Bohm]",
+                          "Radial flux profiles [SI]", "Flux evolution"]
+        plt.close("all")
+
+    @pytest.mark.parametrize("si, expected", [
+        (False, ["Radial flux profiles [gyro-Bohm]"]),
+        (True, ["Radial flux profiles [SI]"]),
+    ])
+    def test_si_override(self, noisy_run, monkeypatch, si, expected):
+        import matplotlib.pyplot as plt
+        monkeypatch.setattr(plt, "show", lambda *a, **k: None)
+        figs = Fluxes2D(Run(noisy_run.folder)).plot(si=si, show_map=False)
+        assert [f._suptitle.get_text() for f in figs] == expected
+        plt.close("all")
+
+    def test_map_covers_every_flux_and_species(self, noisy_run, monkeypatch):
+        import matplotlib.pyplot as plt
+        monkeypatch.setattr(plt, "show", lambda *a, **k: None)
+        figs = Fluxes2D(Run(noisy_run.folder)).plot(si=False, show_map=True)
+        # 2 fluxes x 2 species, each with a colourbar axis.
+        assert len(figs[-1].axes) == 8
         plt.close("all")
 
 
