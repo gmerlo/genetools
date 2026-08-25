@@ -179,6 +179,36 @@ class TestProfiles3D:
         ds = g3.Profiles(run).dataset()
         assert ds["T_SI"].attrs["units"] == "keV"
 
+    def test_matches_the_code_when_temp_and_dens_are_not_one(self, tmp_path):
+        """
+        profiles_<species> stores Tref*temp*temp_prof and GENE-3D's own
+        profile_<species> writes spec%temp*(temp_prof + ...), so the dataset must
+        be in T_ref units. Dividing by `temp` as well normalises to the species
+        temperature instead — a factor `temp` away from the code's own output,
+        with the T_ref label and the SI conversion wrong by the same factor.
+        A fixture with every temp = 1 cannot see this.
+        """
+        g = make_gene3d_run(tmp_path / "run", nx0=8, n_times=3, physical=True,
+                            write_profile_diag=True,
+                            temps=[2.0, 0.5], denss=[3.0, 1.5])
+        run = Run(g.folder)
+        mine = g3.Profiles(run).dataset()
+        code = g3.ProfileDiag(run).dataset()
+        for sp in run.species:
+            for v in ("T", "n", "omt", "omn"):
+                a = np.asarray(mine[v].sel(species=sp).isel(time=0))
+                b = np.asarray(code[v].sel(species=sp).isel(time=0))
+                assert np.allclose(a, b, rtol=1e-6), f"{sp} {v}"
+
+    def test_gradient_units_name_the_reference_length(self, run3d):
+        """The quantity is -L_ref dln(T)/dx, not R/L_T or a/L_T."""
+        _, run = run3d
+        ds = g3.Profiles(run).dataset()
+        assert ds["omt"].attrs["units"] == "L_ref/L_T"
+        assert ds["omn"].attrs["units"] == "L_ref/L_n"
+        assert ds["T"].attrs["units"] == "T_ref"
+        assert ds["T_SI"].attrs["units"] == "keV"
+
     def test_compare_with_code_reports_per_variable(self, run3d):
         _, run = run3d
         report = g3.Profiles(run).compare_with_code()

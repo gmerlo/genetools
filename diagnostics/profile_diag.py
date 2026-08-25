@@ -56,7 +56,7 @@ def _columns(is_3d: bool):
 
 # Normalised-unit labels (for plot axes / attrs).
 _NORM_UNITS = {
-    "T": "T_ref", "n": "n_ref", "omt": "R/L_T", "omn": "R/L_n",
+    "T": "T_ref", "n": "n_ref", "omt": "L_ref/L_T", "omn": "L_ref/L_n",
     "Gamma": "Gamma_gb", "Q": "Q_gb", "Pi": "Pi_gb",
     "Gamma_neo": "Gamma_gb", "Q_neo": "Q_gb", "Pi_neo": "Pi_gb",
     "j_boot": "normalised",
@@ -317,7 +317,8 @@ class ProfileDiag(RunDiagnostic):
         dropped rather than left blank.
         """
         all_panels = [("T", r"$T$"), ("n", r"$n$"),
-                      ("omt", r"$R/L_T$"), ("omn", r"$R/L_n$"),
+                      ("omt", r"$L_{\rm ref}/L_T$"),
+                      ("omn", r"$L_{\rm ref}/L_n$"),
                       ("Gamma", r"$\Gamma$"), ("Q", r"$Q$"),
                       ("Pi", r"$\Pi$"), ("j_boot", r"$j_{\rm boot}$")]
         panels = [(k, ttl) for k, ttl in all_panels if k in avg]

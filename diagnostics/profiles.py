@@ -563,15 +563,21 @@ class Profiles(RunDiagnostic):
         return self
 
     def _background_3d(self, species):
-        """Background ``(n_0, T_0)`` normalised to the species namelist values."""
-        params = self.params
-        spec = next(s for s in params["species"] if s["name"] == species)
-        units = params["units"]
+        """
+        Background ``(n_0, T_0)`` in units of ``n_ref`` / ``T_ref``.
+
+        ``profiles_<species>`` stores ``Tref*temp*temp_prof`` (``profiles.F90``),
+        so dividing by ``Tref`` alone leaves ``temp*temp_prof`` — the same
+        normalisation GENE-3D's own ``profile_<species>`` uses, which writes
+        ``spec%temp*(temp_prof + ...)`` (``diag_3d.F90``). Dividing by ``temp``
+        as well would normalise to the *species* temperature instead, putting the
+        dataset a factor ``temp`` away from the code's own output and making the
+        ``T_ref`` label and the SI conversion wrong by that factor.
+        """
+        units = self.params["units"]
         prof = self.run.eq_profiles[species]
-        T0 = (np.asarray(prof["T"], dtype=float)
-              / (float(spec.get("temp", 1.0)) * float(units["Tref"])))
-        n0 = (np.asarray(prof["n"], dtype=float)
-              / (float(spec.get("dens", 1.0)) * float(units["nref"])))
+        T0 = np.asarray(prof["T"], dtype=float) / float(units["Tref"])
+        n0 = np.asarray(prof["n"], dtype=float) / float(units["nref"])
         return n0, T0
 
     def _compute_3d(self, t):
@@ -595,6 +601,9 @@ class Profiles(RunDiagnostic):
         out, times = {}, None
         for name in run.species:
             n0, T0 = self._background_3d(name)
+            spec = next(s for s in params["species"] if s["name"] == name)
+            f_T = float(spec.get("temp", 1.0))
+            f_n = float(spec.get("dens", 1.0))
             reader = run.mom(name)
             _, idx = self._indices(reader, t)
             i_n = reader.index_of("n")
@@ -608,8 +617,10 @@ class Profiles(RunDiagnostic):
                 t_pert = g3.flux_surface_average(
                     arrays[i_tpar] / 3.0 + 2.0 * arrays[i_tper] / 3.0, J)
                 n_pert = g3.flux_surface_average(arrays[i_n], J)
-                T_tot = T0 + scale * t_pert
-                n_tot = n0 + scale * n_pert
+                # The perturbation is per species, so it carries the same
+                # species factor the background already has baked in.
+                T_tot = T0 + f_T * scale * t_pert
+                n_tot = n0 + f_n * scale * n_pert
                 stacks["T"].append(T_tot)
                 stacks["n"].append(n_tot)
                 stacks["omt"].append(_log_gradient(T_tot, x_o_a) / minor_r)
@@ -632,7 +643,8 @@ class Profiles(RunDiagnostic):
              for v in variables},
             {"x": raw["x_o_a"], "time": raw["times"]},
             species=names, params=params)
-        labels = {"T": "T_ref", "n": "n_ref", "omt": "a/L_T", "omn": "a/L_n"}
+        labels = {"T": "T_ref", "n": "n_ref",
+                  "omt": "L_ref/L_T", "omn": "L_ref/L_n"}
         si_ref = {"T": ("Tref", "keV"), "n": ("nref", "1e19 m^-3")}
         for v in variables:
             ds[v].attrs["units"] = labels[v]

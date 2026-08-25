@@ -81,6 +81,7 @@ def gene3d_parameters(nx0=6, ny0=8, nz0=4, nv0=8, nw0=4, n_spec=2,
                       n_fields=2, lx=60.0, ly=80.0, x0=0.5,
                       rhostar=0.01, minor_r=1.0, major_R=3.0,
                       species=("ions", "electrons"),
+                      temps=None, denss=None,
                       magn_geometry="circular", n_pol=1,
                       norm_flux_projection=True, radial_dependence=True,
                       nonlinear=True, beta=0.001):
@@ -91,6 +92,8 @@ def gene3d_parameters(nx0=6, ny0=8, nz0=4, nv0=8, nw0=4, n_spec=2,
     and ``ly`` are in ``&info``, not ``&general``/``&in_out``/``&box``, and
     ``&box`` carries ``ny0`` with no ``nky0`` or ``kymin`` at all.
     """
+    temps = list(temps) if temps else [1.0] * n_spec
+    denss = list(denss) if denss else [1.0] * n_spec
     spec_blocks = []
     for i, name in enumerate(species[:n_spec]):
         charge = -1 if name.startswith("e") else 1
@@ -106,8 +109,8 @@ def gene3d_parameters(nx0=6, ny0=8, nz0=4, nv0=8, nw0=4, n_spec=2,
             "Ln_center =   0.5000000\n"
             "Ln_width  =   0.2000000\n"
             f"mass   =   {mass}\n"
-            "temp   =    1.000000\n"
-            "dens   =    1.000000\n"
+            f"temp   =   {temps[i]}\n"
+            f"dens   =   {denss[i]}\n"
             f"charge = {charge}\n"
             "/\n")
 
@@ -371,7 +374,8 @@ def make_gene3d_run(tmp_path, ext=".dat", nx0=6, ny0=8, nz0=4, nv0=8, nw0=4,
                     rhostar=0.01, minor_r=1.0, major_R=3.0, n_pol=1,
                     write_vsp=False, write_srcmom=False,
                     write_profile_diag=False, nonlinear=True,
-                    norm_flux_projection=True, physical=False):
+                    norm_flux_projection=True, physical=False,
+                    temps=None, denss=None):
     """
     Build a complete synthetic GENE-3D run directory under *tmp_path*.
 
@@ -397,7 +401,8 @@ def make_gene3d_run(tmp_path, ext=".dat", nx0=6, ny0=8, nz0=4, nv0=8, nw0=4,
         n_fields=n_fields, lx=lx, ly=ly, x0=x0, rhostar=rhostar,
         minor_r=minor_r, major_R=major_R, species=species,
         magn_geometry=magn_geometry, n_pol=n_pol, nonlinear=nonlinear,
-        norm_flux_projection=norm_flux_projection))
+        norm_flux_projection=norm_flux_projection,
+        temps=temps, denss=denss))
 
     # --- coord<ext>.h5 ----------------------------------------------------
     xval, xval_a, yval, zval = gene3d_grids(
@@ -525,9 +530,13 @@ def make_gene3d_run(tmp_path, ext=".dat", nx0=6, ny0=8, nz0=4, nv0=8, nw0=4,
                              f"srcmom_{spec}", SRCMOM_LABELS, times, src)
 
     # --- profiles_<spec><ext> (+ .h5) ------------------------------------
+    temps_l = list(temps) if temps else [1.0] * n_spec
+    denss_l = list(denss) if denss else [1.0] * n_spec
     profiles = {}
     for s, spec in enumerate(species):
-        T, n = T_bg, n_bg
+        # profiles.F90 writes my_Tref*sp%temp*sp%temp_prof, so the file column is
+        # the species temperature times the normalised profile shape.
+        T, n = T_bg * temps_l[s], n_bg * denss_l[s]
         omt = -np.gradient(np.log(T), xval_a)
         omn = -np.gradient(np.log(n), xval_a)
         profiles[spec] = {"x_o_a": xval_a, "x_o_rho_ref": xval,
