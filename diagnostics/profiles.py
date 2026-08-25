@@ -598,22 +598,21 @@ class Profiles(RunDiagnostic):
                  * float(params["geometry"].get("minor_r") or 1.0))
         minor_r = float(params["geometry"].get("minor_r") or 1.0)
 
-        out, times = {}, None
-        for name in run.species:
+        readers = [run.mom(n) for n in run.species]
+        times, index_of = self._common_indices(readers, t)
+        out = {}
+        for name, reader in zip(run.species, readers):
             n0, T0 = self._background_3d(name)
             spec = next(s for s in params["species"] if s["name"] == name)
             f_T = float(spec.get("temp", 1.0))
             f_n = float(spec.get("dens", 1.0))
-            reader = run.mom(name)
-            _, idx = self._indices(reader, t)
+            idx = index_of[id(reader)]
             i_n = reader.index_of("n")
             i_tpar = reader.index_of("T_par")
             i_tper = reader.index_of("T_per")
 
             stacks = {v: [] for v in ("T", "n", "omt", "omn")}
-            got = []
-            for time, arrays in reader.stream_selected(idx):
-                got.append(time)
+            for _, arrays in reader.stream_selected(idx):
                 t_pert = g3.flux_surface_average(
                     arrays[i_tpar] / 3.0 + 2.0 * arrays[i_tper] / 3.0, J)
                 n_pert = g3.flux_surface_average(arrays[i_n], J)
@@ -626,8 +625,6 @@ class Profiles(RunDiagnostic):
                 stacks["omt"].append(_log_gradient(T_tot, x_o_a) / minor_r)
                 stacks["omn"].append(_log_gradient(n_tot, x_o_a) / minor_r)
             out[name] = {v: np.asarray(stacks[v]) for v in stacks}
-            if times is None:
-                times = np.asarray(got)
         return {"species": out, "times": times, "x_o_a": x_o_a}
 
     def _dataset_3d(self, t):

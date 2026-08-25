@@ -77,7 +77,7 @@ class SrcMom(RunDiagnostic):
                 for j, v in enumerate(labels):
                     stacks[v].append(np.asarray(arrays[j], dtype=float))
             per[name] = {v: np.asarray(stacks[v]) for v in labels}
-            if times is None:
+            if times is None or len(got) < len(times):
                 times = np.asarray(got)
 
         if not per:

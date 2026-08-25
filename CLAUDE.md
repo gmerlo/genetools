@@ -76,7 +76,12 @@ rather than re-implementing it in a diagnostic:
   field snapshot with moments from another time.
   `RunDiagnostic`: the Run-native surface every diagnostic inherits — `run`,
   `params`/`coord`/`geom`/`geometry_kind`/`is_3d` shortcuts, `_window`/`_bounds`/
-  `_key`/`_indices`, `_require`, `_t_average`, and `.data`/`.save()`. Set
+  `_key`/`_indices`, `_common_indices`, `_require`, `_t_average`, and
+  `.data`/`.save()`. **When a diagnostic reads more than one file per time step
+  (all species' moments, say), use `_common_indices`, not `_indices` per file.**
+  GENE-3D writes `mom_<species>` one species at a time, so a running or
+  interrupted job leaves one file a snapshot short; streaming each over its own
+  indices yields ragged arrays that only fail later at `np.stack`. Set
   `cache_file` on a subclass to make it HDF5-backed.
   **Always time-average through `_t_average` (xarray DataArray) or
   `_time_average` (ndarray), never `.mean("time")`**: GENE's dt is adaptive and

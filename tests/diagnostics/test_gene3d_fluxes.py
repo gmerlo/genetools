@@ -182,6 +182,51 @@ class TestFluxProfiles3D:
                 b = np.asarray(code[code_v].sel(species=sp).isel(time=0))
                 assert np.allclose(a, b, rtol=1e-5), f"{sp} {code_v}"
 
+    @staticmethod
+    def _truncate_one_species(folder, species, index):
+        """Drop one snapshot from a single species' moment file."""
+        import h5py
+        with h5py.File(folder / f"mom_{species}.dat.h5", "a") as f:
+            grp = f[f"mom_{species}"]
+            for label in list(grp.keys()):
+                if label != "time":
+                    del grp[f"{label}/{index:010d}"]
+
+    def test_species_with_unequal_snapshot_counts(self, tmp_path):
+        """
+        GENE-3D writes mom_<species> one species at a time, so a run that is
+        still going -- or was killed mid-write -- leaves one file a snapshot
+        short. Streaming each species over its own indices then produces arrays
+        of different lengths, surfacing much later as
+        'all input arrays must have the same shape'.
+        """
+        g = make_gene3d_run(tmp_path / "run", nx0=8, n_times=5, physical=True)
+        self._truncate_one_species(g.folder, g.species[-1], 4)
+        run = Run(g.folder)
+        assert (run.mom(g.species[0]).read_all_times().size
+                != run.mom(g.species[-1]).read_all_times().size)
+
+        ds = Fluxes2D(run).dataset()
+        assert ds.sizes["time"] == 4                     # the common times
+        assert np.allclose(np.asarray(ds["time"]), [0.0, 10.0, 20.0, 30.0])
+
+    def test_profiles_also_handles_unequal_counts(self, tmp_path):
+        from genetools.diagnostics import Profiles
+        g = make_gene3d_run(tmp_path / "run", nx0=8, n_times=5, physical=True)
+        self._truncate_one_species(g.folder, g.species[-1], 4)
+        ds = Profiles(Run(g.folder)).dataset()
+        assert ds.sizes["time"] == 4
+
+    def test_no_common_time_is_reported_clearly(self, tmp_path):
+        """Disjoint species files must say so, not stack mismatched arrays."""
+        import h5py
+        g = make_gene3d_run(tmp_path / "run", nx0=8, n_times=4, physical=True)
+        with h5py.File(g.folder / f"mom_{g.species[-1]}.dat.h5", "a") as f:
+            key = f"mom_{g.species[-1]}"
+            f[f"{key}/time"][...] = np.asarray(f[f"{key}/time"][...]) + 1e5
+        with pytest.raises(ValueError, match="no output time is common"):
+            Fluxes2D(Run(g.folder)).dataset()
+
     def test_si_companions_carry_units(self, noisy_run):
         ds = Fluxes2D(Run(noisy_run.folder)).dataset()
         assert ds["Q_es_SI"].attrs["units"] == "W m^-2"

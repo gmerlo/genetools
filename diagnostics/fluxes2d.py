@@ -755,16 +755,17 @@ class Fluxes2D(RunDiagnostic):
     def _compute_3d(self, t):
         run = self.run
         J = self.geom["Jacobian"]
-        out, times = {}, None
-        for name in run.species:
-            reader = run.mom(name)
-            _, idx = self._indices(reader, t)
+        readers = [run.mom(n) for n in run.species]
+        # Species files can hold different numbers of complete snapshots, so
+        # take only the times all of them have (see _common_indices).
+        times, index_of = self._common_indices(readers, t)
+        out = {}
+        for name, reader in zip(run.species, readers):
+            idx = index_of[id(reader)]
             wanted = [v for v in self._FLUXES_3D if g3.has_var(reader, v)]
             slots = {v: reader.index_of(v) for v in wanted}
             stacks = {v: [] for v in wanted}
-            got = []
-            for time, arrays in reader.stream_selected(idx):
-                got.append(time)
+            for _, arrays in reader.stream_selected(idx):
                 for v in wanted:
                     stacks[v].append(
                         g3.flux_surface_average(arrays[slots[v]], J))
@@ -772,8 +773,6 @@ class Fluxes2D(RunDiagnostic):
                 v: np.asarray(stacks[v]) * self._prefactor_3d(
                     self._FLUXES_3D[v][0], name)
                 for v in wanted}
-            if times is None:
-                times = np.asarray(got)
         return {"species": out, "times": times}
 
     def _surface_area_3d(self):

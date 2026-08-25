@@ -349,6 +349,73 @@ class RunDiagnostic(CachingDiagnostic):
     # Uniform surface
     # ------------------------------------------------------------------
 
+    def _common_indices(self, readers, t, tol=1e-6):
+        """
+        Return ``(times, {id(reader): indices})`` for the times *all* readers have.
+
+        Per-species moment files do not always hold the same number of complete
+        snapshots: output is written species by species, so a run that is still
+        going — or was killed mid-write — leaves one file a snapshot short. The
+        H5 reader drops those incomplete snapshots, and streaming each species
+        over its own index list then yields arrays of different lengths, which
+        only shows up later as ``all input arrays must have the same shape``.
+
+        Matching by time value rather than by position also keeps a species from
+        being paired with another's snapshot from a different time.
+
+        Raises
+        ------
+        ValueError
+            If no time is common to every reader inside the window.
+        """
+        readers = list(readers)
+        lo, hi = self._bounds(t)
+        per = []
+        for reader in readers:
+            times = np.asarray(reader.read_all_times(), dtype=np.float64)
+            keep = np.where((times >= lo) & (times <= hi))[0]
+            per.append((times, keep))
+
+        base_times, base_keep = per[0]
+        common, index_of = [], [[] for _ in readers]
+        for i0 in base_keep:
+            tv = base_times[i0]
+            atol = max(tol, abs(tv) * tol)
+            picks = [int(i0)]
+            for times, keep in per[1:]:
+                if keep.size == 0:
+                    picks = None
+                    break
+                j = keep[int(np.argmin(np.abs(times[keep] - tv)))]
+                if abs(times[j] - tv) > atol:
+                    picks = None
+                    break
+                picks.append(int(j))
+            if picks is None:
+                continue
+            common.append(tv)
+            for slot, k in enumerate(picks):
+                index_of[slot].append(k)
+
+        if not common:
+            # Two distinct failures: the window catches nothing at all (usually a
+            # mistyped time), or the files each have output but never at the same
+            # time. Say which, and quote the ranges needed to fix it.
+            if all(kp.size == 0 for _, kp in per):
+                spans = "; ".join(
+                    f"{tm[0]:.4g}..{tm[-1]:.4g}" if tm.size else "no output"
+                    for tm, _ in per)
+                raise ValueError(
+                    f"{type(self).__name__}: no output in the requested time "
+                    f"window; available: {spans}")
+            spans = "; ".join(
+                f"{np.min(tm[kp]):.4g}..{np.max(tm[kp]):.4g}" if kp.size else "empty"
+                for tm, kp in per)
+            raise ValueError(
+                f"{type(self).__name__}: no output time is common to all files "
+                f"in the requested window (per-file ranges: {spans})")
+        return np.asarray(common), {id(r): idx for r, idx in zip(readers, index_of)}
+
     @staticmethod
     def _t_average(da):
         """
