@@ -162,6 +162,26 @@ class TestFluxProfiles3D:
         got = np.asarray(ds["Q_em"].sel(species="ions").isel(time=0))
         assert np.allclose(got, expected, rtol=1e-5)
 
+    def test_matches_the_code_when_temp_and_dens_are_not_one(self, tmp_path):
+        """
+        diag_3d.F90 applies dens to Gamma and dens*temp to Q before writing
+        profile_<species>. Fluxes2D must apply the same factors to the moment
+        values, or the two disagree by them. A fixture with every temp = dens = 1
+        cannot see this.
+        """
+        from genetools.diagnostics import ProfileDiag
+        g = make_gene3d_run(tmp_path / "run", nx0=8, n_times=3, physical=True,
+                            write_profile_diag=True,
+                            temps=[2.0, 0.5], denss=[3.0, 1.5])
+        run = Run(g.folder)
+        mine = Fluxes2D(run).dataset()
+        code = ProfileDiag(run).dataset()
+        for sp in run.species:
+            for mine_v, code_v in (("Gamma_total", "Gamma"), ("Q_total", "Q")):
+                a = np.asarray(mine[mine_v].sel(species=sp).isel(time=0))
+                b = np.asarray(code[code_v].sel(species=sp).isel(time=0))
+                assert np.allclose(a, b, rtol=1e-5), f"{sp} {code_v}"
+
     def test_si_companions_carry_units(self, noisy_run):
         ds = Fluxes2D(Run(noisy_run.folder)).dataset()
         assert ds["Q_es_SI"].attrs["units"] == "W m^-2"

@@ -574,6 +574,29 @@ def make_gene3d_run(tmp_path, ext=".dat", nx0=6, ny0=8, nz0=4, nv0=8, nw0=4,
 
     # --- profile_<spec><ext> (GENE-3D 8-column flavour) ------------------
     if write_profile_diag:
+        # diag_3d.F90's diag_prof writes, per species:
+        #   Gamma = <Gamma_es + Gamma_em>_FS * dens
+        #   Q     = <Q_es     + Q_em    >_FS * dens * temp
+        # with a Jacobian-weighted flux-surface average. Deriving them here
+        # keeps profile_<species> consistent with mom_<species>, so a
+        # diagnostic that computes them from the moments can be checked against
+        # the file.
+        Jw = geometry["Jacobian"]
+
+        def _fsa(arr):
+            return np.average(arr, weights=Jw, axis=(1, 2))
+
+        flux_cols = {}
+        for s_i, spec in enumerate(species):
+            m = moments[spec]
+            g_t, q_t = [], []
+            for it in range(n_times):
+                g_t.append(_fsa(m["Gamma_es"][it] + m["Gamma_em"][it])
+                           * denss_l[s_i])
+                q_t.append(_fsa(m["Q_es"][it] + m["Q_em"][it])
+                           * denss_l[s_i] * temps_l[s_i])
+            flux_cols[spec] = (np.asarray(g_t), np.asarray(q_t))
+
         for spec in species:
             blocks = [("#   x/a             x/rho_ref       T/Tref          "
                        "n/nref             omt             omn            "
@@ -581,12 +604,13 @@ def make_gene3d_run(tmp_path, ext=".dat", nx0=6, ny0=8, nz0=4, nv0=8, nw0=4,
             for it in range(n_times):
                 blocks.append(f"#{times[it]:14.6f}     0")
                 prof = profiles[spec]
+                g_col, q_col = flux_cols[spec]
                 for i in range(nx0):
                     blocks.append(
                         f"{prof['x_o_a'][i]:16.6e}{prof['x_o_rho_ref'][i]:16.6e}"
                         f"{prof['T'][i]:16.6e}{prof['n'][i]:16.6e}"
                         f"{prof['omt'][i]:16.6e}{prof['omn'][i]:16.6e}"
-                        f"{0.1 * (it + 1):16.6e}{0.2 * (it + 1):16.6e}")
+                        f"{g_col[it, i]:16.6e}{q_col[it, i]:16.6e}")
                 blocks.append("")
                 blocks.append("")
             (folder / f"profile_{spec}{ext}").write_text("\n".join(blocks) + "\n")
