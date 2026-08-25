@@ -12,7 +12,7 @@ import pytest
 
 import genetools.diagnostics as g3
 from genetools.diagnostics import _gene3d as c
-from genetools.diagnostics._base import CachingDiagnostic
+from genetools.diagnostics._base import CachingDiagnostic, RunDiagnostic
 from genetools.run import Run
 from tests.gene3d_fixture import make_gene3d_run
 
@@ -72,6 +72,42 @@ class TestCommon:
 
     def test_single_sample_returns_itself(self):
         assert CachingDiagnostic._time_average(np.array([[5.0]]), [2.0])[0] == 5.0
+
+    def test_t_average_is_trapezoidal_on_a_dataarray(self):
+        """
+        Every diagnostic that time-averages a DataArray must go through this,
+        not `.mean("time")`. GENE's dt is adaptive, so output times are unevenly
+        spaced and a plain mean is biased by tens of percent.
+        """
+        import xarray as xr
+        t = np.array([0.0, 1.0, 2.0, 10.0, 30.0, 70.0])
+        y = np.array([1.0, 5.0, 2.0, 8.0, 3.0, 9.0])
+        da = xr.DataArray(y, dims="time", coords={"time": t})
+        expected = np.trapezoid(y, x=t) / (t[-1] - t[0])
+        assert float(RunDiagnostic._t_average(da)) == pytest.approx(expected)
+        # And it must differ from the plain mean, or the test is vacuous.
+        assert abs(float(RunDiagnostic._t_average(da)) - y.mean()) > 0.5
+
+    def test_t_average_degenerate_windows(self):
+        import xarray as xr
+        one = xr.DataArray([7.0], dims="time", coords={"time": [3.0]})
+        assert float(RunDiagnostic._t_average(one)) == 7.0
+        flat = xr.DataArray([2.0, 6.0], dims="time", coords={"time": [5.0, 5.0]})
+        assert float(RunDiagnostic._t_average(flat)) == 2.0
+
+    def test_no_diagnostic_uses_a_plain_time_mean(self):
+        """
+        Guard against the bias creeping back in: `.mean("time")` on a time axis
+        that GENE wrote unevenly is wrong wherever a physical average is meant.
+        """
+        import pathlib
+        root = pathlib.Path(__file__).resolve().parents[2] / "diagnostics"
+        offenders = []
+        for path in sorted(root.glob("*.py")):
+            for n, line in enumerate(path.read_text().splitlines(), 1):
+                if 'mean("time")' in line and "Not ``" not in line:
+                    offenders.append(f"{path.name}:{n}")
+        assert not offenders, f"plain time means found: {offenders}"
 
     def test_zero_length_window_returns_the_first_sample(self):
         """

@@ -241,7 +241,7 @@ class Planes(RunDiagnostic):
                 continue
             da = ds[name]
             if "time" in da.dims:
-                da = da.mean("time")
+                da = self._t_average(da)
             plane = np.asarray(da.mean("x") if "x" in da.dims else da)
             alpha = np.asarray(ds["alpha"].mean("x"))
 

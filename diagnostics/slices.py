@@ -239,7 +239,7 @@ class Slices(RunDiagnostic):
     def _plot_plane(self, fig, ax, ds, name, plane):
         da = ds[f"{name}_{plane}"]
         if "time" in da.dims:
-            da = da.mean("time")
+            da = self._t_average(da)
         dims = da.dims
         h, v = np.asarray(ds[dims[0]]), np.asarray(ds[dims[1]])
         mesh = ax.pcolormesh(v, h, np.asarray(da), shading="nearest")
@@ -250,7 +250,7 @@ class Slices(RunDiagnostic):
     def _plot_line(self, ax, ds, name, line):
         da = ds[f"{name}_{line}"]
         if "time" in da.dims:
-            da = da.mean("time")
+            da = self._t_average(da)
         dim = da.dims[0]
         ax.plot(np.asarray(ds[dim]), np.asarray(da))
         ax.set_xlabel(_AXIS_LABELS.get(dim, dim))

@@ -854,25 +854,6 @@ class Fluxes2D(RunDiagnostic):
         ds.attrs["geometry_kind"] = self.geometry_kind
         return ds
 
-    @staticmethod
-    def _t_average(da):
-        """
-        Trapezoidal average of *da* over its ``time`` dimension.
-
-        Not ``.mean("time")``: GENE uses an adaptive timestep and writes every
-        ``istep_mom`` *steps*, so output times are generally unevenly spaced. A
-        plain mean weights every sample equally regardless of how much time it
-        stands for, which on a strongly varying dt biases the answer badly — 50%
-        on a realistically uneven axis.
-        """
-        t = np.asarray(da["time"], dtype=float)
-        if t.size <= 1:
-            return da.isel(time=0)
-        span = float(t[-1] - t[0])
-        if span == 0:
-            return da.isel(time=0)
-        return da.integrate("time") / span
-
     def _si_available(self) -> bool:
         """
         Whether the parameter file provides real reference units.

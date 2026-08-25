@@ -76,8 +76,13 @@ rather than re-implementing it in a diagnostic:
   field snapshot with moments from another time.
   `RunDiagnostic`: the Run-native surface every diagnostic inherits — `run`,
   `params`/`coord`/`geom`/`geometry_kind`/`is_3d` shortcuts, `_window`/`_bounds`/
-  `_key`/`_indices`, `_require`, and `.data`/`.save()`. Set `cache_file` on a
-  subclass to make it HDF5-backed.
+  `_key`/`_indices`, `_require`, `_t_average`, and `.data`/`.save()`. Set
+  `cache_file` on a subclass to make it HDF5-backed.
+  **Always time-average through `_t_average` (xarray DataArray) or
+  `_time_average` (ndarray), never `.mean("time")`**: GENE's dt is adaptive and
+  output happens every `istep_*` *steps*, so output times are unevenly spaced and
+  a plain mean is biased by tens of percent (~18% on a realistic axis).
+  `test_no_diagnostic_uses_a_plain_time_mean` greps `diagnostics/` to keep it out.
 - **`_gene3d.py`** — GENE-3D-specific physics only: `flux_geomfac`,
   `exb_velocity_ky`, `flutter_velocity_ky`, `check_flux_consistency`,
   `to_ky`/`to_kx`, `flux_surface_average`, `xz_average`, `jacobian_yz`,

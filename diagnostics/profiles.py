@@ -653,7 +653,7 @@ class Profiles(RunDiagnostic):
         for ax, v in zip(axes.ravel(), ("T", "n", "omt", "omn")):
             key = f"{v}_SI" if (si and f"{v}_SI" in ds) else v
             for name in ds["species"].values:
-                ax.plot(x, np.asarray(ds[key].sel(species=name).mean("time")),
+                ax.plot(x, np.asarray(self._t_average(ds[key].sel(species=name))),
                         label=str(name))
             ax.set_xlabel(r"$x/a$")
             ax.set_ylabel(ds[key].attrs.get("units", ""))
@@ -683,8 +683,8 @@ class Profiles(RunDiagnostic):
             for v in ("T", "n", "omt", "omn"):
                 if v not in code:
                     continue
-                a = np.asarray(mine[v].sel(species=name).mean("time"))
-                b = np.asarray(code[v].sel(species=name).mean("time"))
+                a = np.asarray(self._t_average(mine[v].sel(species=name)))
+                b = np.asarray(self._t_average(code[v].sel(species=name)))
                 per[v] = float(np.max(np.abs(a - b))
                                / max(np.max(np.abs(b)), 1e-300))
             report[name] = per

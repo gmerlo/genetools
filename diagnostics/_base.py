@@ -349,6 +349,26 @@ class RunDiagnostic(CachingDiagnostic):
     # Uniform surface
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _t_average(da):
+        """
+        Trapezoidal average of a DataArray over its ``time`` dimension.
+
+        Not ``.mean("time")``. GENE's timestep is adaptive and output happens
+        every ``istep_*`` *steps*, so output times are generally unevenly spaced
+        and a plain mean weights every sample equally regardless of the interval
+        it stands for. On a realistically uneven axis the two differ by tens of
+        percent, and a time-averaged profile or flux is usually the number being
+        quoted.
+        """
+        t = np.asarray(da["time"], dtype=float)
+        if t.size <= 1:
+            return da.isel(time=0)
+        span = float(t[-1] - t[0])
+        if span == 0:
+            return da.isel(time=0)
+        return da.integrate("time") / span
+
     @property
     def data(self):
         """The diagnostic's :class:`xarray.Dataset` over the full time range."""

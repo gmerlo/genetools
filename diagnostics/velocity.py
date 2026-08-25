@@ -121,7 +121,7 @@ class SrcMom(RunDiagnostic):
         flat = axes.ravel()
         for ax, name in zip(flat, names):
             for sp in ds["species"].values:
-                ax.plot(x, np.asarray(ds[name].sel(species=sp).mean("time")),
+                ax.plot(x, np.asarray(self._t_average(ds[name].sel(species=sp))),
                         label=str(sp))
             ax.set_xlabel(r"$x/a$")
             ax.set_title(name)
@@ -217,8 +217,8 @@ class VspSlice(RunDiagnostic):
         for r, name in enumerate(names):
             for col, sp in enumerate(species):
                 ax = axes[r][col]
-                arr = np.asarray(ds[name].sel(species=sp)
-                                 .isel(z=iz).mean("time"))
+                arr = np.asarray(self._t_average(
+                    ds[name].sel(species=sp).isel(z=iz)))
                 if vpar is not None and mu is not None and mu.size:
                     mesh = ax.pcolormesh(mu, vpar, arr, shading="nearest")
                     ax.set_xlabel(r"$\mu$")

@@ -509,7 +509,7 @@ class ShearingRate(RunDiagnostic):
         ds["phi_zonal"].attrs["units"] = "T_ref/e (normalised)"
         ds["v_exb"].attrs["units"] = "c_ref (normalised)"
         ds["omega_exb"].attrs["units"] = "c_ref/L_ref"
-        ds["omega_exb_rms_x"] = np.sqrt((ds["omega_exb"] ** 2).mean("time"))
+        ds["omega_exb_rms_x"] = np.sqrt(self._t_average(ds["omega_exb"] ** 2))
         ds["omega_exb_rms_t"] = np.sqrt((ds["omega_exb"] ** 2).mean("x"))
         ds.attrs.update(unit_attrs(params))
         ds.attrs["geometry_kind"] = self.geometry_kind

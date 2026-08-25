@@ -190,7 +190,7 @@ class ChiGradient(RunDiagnostic):
 
         fig, axes = plt.subplots(1, 3, figsize=(14, 4))
         for name in ds["species"].values:
-            axes[0].plot(x, np.asarray(ds[key].sel(species=name).mean("time")),
+            axes[0].plot(x, np.asarray(self._t_average(ds[key].sel(species=name))),
                          label=str(name))
             axes[1].plot(times, np.asarray(ds[key_avg].sel(species=name)),
                          label=str(name))
