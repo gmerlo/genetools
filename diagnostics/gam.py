@@ -83,7 +83,11 @@ class Gam(RunDiagnostic):
             amplitude.append(float(np.max(np.abs(phi))))
             fs = g3.flux_surface_average(phi, J)
             zonal.append(fs)
-            dzonal.append(-np.gradient(fs, x) / C_xy)
+            # v_ExB = -E_r/C_xy with E_r = -dphi/dx, i.e. +dphi/dx / C_xy.
+            # See the convention note in `_gene3d`; the GAM frequency is
+            # sign-blind but the trace is labelled `v_exb` and must agree with
+            # what `ShearingRate` calls by that name.
+            dzonal.append(np.gradient(fs, x) / C_xy)
             # First radial harmonic of the zonal (ky=0) component, z-averaged
             # with the y-averaged Jacobian (the radial transform leaves no
             # radial index to weight by).

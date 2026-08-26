@@ -253,16 +253,67 @@ class TestProfiles3D:
 
 class TestShearing3D:
 
-    def test_velocity_and_shear_are_successive_radial_derivatives(self, run3d):
-        g, run = run3d
+    @staticmethod
+    def _write_zonal_ramp(folder, nx0):
+        """
+        Replace phi with a y- and z-independent radial ramp.
+
+        The stock fixture field is built from cos(m*y) modes only, so its
+        flux-surface average is round-off (~1e-9) and every sign assertion on it
+        passes vacuously — `allclose(v, -v)` is True at that magnitude. A ramp
+        rising in x makes dphi/dx unambiguously positive, which pins the sign.
+        """
+        import h5py
+        with h5py.File(folder / "field.dat.h5", "a") as f:
+            times = np.asarray(f["field/time"][...])
+            shape = f["field/phi/0000000000"].shape        # (nz, ny, nx)
+            ramp = np.linspace(0.0, 1.0, nx0)
+            for it in range(len(times)):
+                f[f"field/phi/{it:010d}"][...] = np.broadcast_to(ramp, shape)
+
+    def test_velocity_and_shear_are_successive_radial_derivatives(self, tmp_path):
+        # On the stock fixture this passes whatever the signs are: its field has
+        # no ky=0 part, so every array here is round-off.
+        g = make_gene3d_run(tmp_path / "run", nx0=12, nz0=8, n_times=2)
+        self._write_zonal_ramp(g.folder, 12)
+        run = Run(g.folder)
         ds = g3.ShearingRate(run).dataset()
         x = np.asarray(ds["x_o_rho_ref"])
         C_xy = np.asarray(run.geometry[0]["metric"]["C_xy"])
         phi_fs = np.asarray(ds["phi_zonal"].isel(time=0))
-        v = -np.gradient(phi_fs, x) / C_xy
+        e_r = -np.gradient(phi_fs, x)
+        v = -e_r / C_xy
+        assert np.allclose(np.asarray(ds["e_r"].isel(time=0)), e_r)
         assert np.allclose(np.asarray(ds["v_exb"].isel(time=0)), v)
         assert np.allclose(np.asarray(ds["omega_exb"].isel(time=0)),
                            np.gradient(v, x))
+
+    def test_v_exb_sign_follows_gene(self, tmp_path):
+        """
+        `v_ExB = -E_r/C_xy` with `E_r = -dphi/dx`, so a potential rising in x
+        gives a *positive* v_ExB. GENE fixes this: `profiles.F90` defines
+        `ExBrate = -dEraddx_prof(0)`, i.e. omega_ExB = -dE_r/dx = d(v_ExB)/dx.
+        The GENE-3D path used to return the opposite sign.
+        """
+        g = make_gene3d_run(tmp_path / "run", nx0=12, nz0=8, n_times=2)
+        self._write_zonal_ramp(g.folder, 12)
+        ds = g3.ShearingRate(Run(g.folder)).dataset()
+        e_r = np.asarray(ds["e_r"].isel(time=0))
+        v = np.asarray(ds["v_exb"].isel(time=0))
+        # Interior points only: np.gradient's one-sided ends are noisier.
+        assert np.all(e_r[1:-1] < 0), "E_r = -dphi/dx must be negative on a ramp"
+        assert np.all(v[1:-1] > 0), "v_ExB = -E_r/C_xy must be positive"
+        # And the assertion is not vacuous at this amplitude.
+        assert not np.allclose(v, -v)
+
+    def test_gam_v_exb_agrees_with_shearing(self, tmp_path):
+        """Both call it `v_exb`; they must mean the same thing."""
+        g = make_gene3d_run(tmp_path / "run", nx0=12, nz0=8, n_times=2)
+        self._write_zonal_ramp(g.folder, 12)
+        run = Run(g.folder)
+        sr = np.asarray(g3.ShearingRate(run).dataset()["v_exb"].isel(time=0))
+        gam = np.asarray(g3.Gam(run).dataset()["v_exb"].isel(time=0))
+        assert np.allclose(sr, gam), "Gam and ShearingRate disagree on v_exb"
 
     def test_zonal_potential_is_the_flux_surface_average(self, run3d):
         g, run = run3d
@@ -289,11 +340,13 @@ class TestShearing3D:
         for name in ("phi_zonal", "e_r", "v_exb", "omega_exb"):
             assert name in ds, name
 
-    def test_e_r_is_v_exb_times_C_xy(self, run3d):
-        _, run = run3d
+    def test_e_r_is_v_exb_times_C_xy(self, tmp_path):
+        g = make_gene3d_run(tmp_path / "run", nx0=12, nz0=8, n_times=2)
+        self._write_zonal_ramp(g.folder, 12)
+        run = Run(g.folder)
         ds = g3.ShearingRate(run).dataset()
         C_xy = np.asarray(run.geometry[0]["metric"]["C_xy"])
-        assert np.allclose(np.asarray(ds["e_r"].isel(time=0)) / C_xy,
+        assert np.allclose(-np.asarray(ds["e_r"].isel(time=0)) / C_xy,
                            np.asarray(ds["v_exb"].isel(time=0)))
 
     def test_zonal_view_is_one_figure(self, run3d, headless):

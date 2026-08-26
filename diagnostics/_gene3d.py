@@ -65,6 +65,18 @@ def _as_radial(value):
 #     Gamma_es = -n * dphi/dy * flux_geomfac
 #     Gamma_em = +u_par * dA_par/dy * flux_geomfac
 #
+# so the *radial* ExB velocity is -(1/C_xy) dphi/dy. The zonal flow is the
+# binormal component of the same drift, which therefore carries the opposite
+# sign of the perpendicular derivative:
+#
+#     E_r    = -dphi/dx                (the radial electric field)
+#     v_ExB  = -E_r / C_xy = +dphi/dx / C_xy
+#     w_ExB  = d(v_ExB)/dx = -dE_r/dx / C_xy
+#
+# The last line is GENE's own definition of the shearing rate: `profiles.F90`
+# sets `ExBrate = -dEraddx_prof(0)`. Every diagnostic that reports `v_exb` or
+# `omega_exb` uses these, whatever the geometry -- see `ShearingRate` and `Gam`.
+#
 # and ``flux_geomfac`` (``geometry.F90``) is
 #
 #     1 / C_xy                        (norm_flux_projection = F)

@@ -349,3 +349,93 @@ class TestLegacyCacheNames:
             ShearingRate._migrate_legacy_names(f)
             assert sorted(f.keys()) == sorted(
                 ["time", "shearing_rms"] + list(self.LEGACY.values()))
+
+
+# ---------------------------------------------------------------------------
+# Conventions shared by every geometry
+# ---------------------------------------------------------------------------
+
+class TestExbConventions:
+    """
+    `v_ExB = -E_r/C_xy` with `E_r = -dphi/dx`, so `omega_ExB = d(v_ExB)/dx`
+    matches GENE's own `ExBrate = -dEraddx_prof(0)` (`profiles.F90`). The global
+    branch used to return `v_exb = e_r` — the opposite sign, and with no C_xy at
+    all, so it disagreed with the flux tube on both counts.
+    """
+
+    @staticmethod
+    def _ramp_phi(nx, nky, nz):
+        """A y- and z-independent radial ramp: dphi/dx > 0 everywhere."""
+        phi = np.zeros((nx, nky, nz), dtype=complex)
+        phi[:, 0, :] = np.linspace(0.0, 1.0, nx)[:, None]
+        return phi
+
+    def test_global_v_exb_is_minus_e_r_over_C_xy(self):
+        nx, nky, nz = 10, 3, 8
+        cxy = 1.7
+        geom = _make_global_geom(nx, nz)
+        geom["metric"]["C_xy"] = np.full((nx, nz), cxy)
+        result = compute_exb(self._ramp_phi(nx, nky, nz),
+                             _make_global_params(nx, nky, nz),
+                             geom, _make_global_coord(nx))
+        np.testing.assert_allclose(result["v_exb"],
+                                   -result["e_r"] / cxy, rtol=1e-12)
+
+    def test_global_ramp_gives_negative_e_r_and_positive_v_exb(self):
+        nx, nky, nz = 10, 3, 8
+        geom = _make_global_geom(nx, nz)
+        geom["metric"]["C_xy"] = np.full((nx, nz), 2.0)
+        result = compute_exb(self._ramp_phi(nx, nky, nz),
+                             _make_global_params(nx, nky, nz),
+                             geom, _make_global_coord(nx))
+        assert np.all(result["e_r"][1:-1] < 0)
+        assert np.all(result["v_exb"][1:-1] > 0)
+
+    def test_local_v_exb_is_minus_e_r_over_C_xy(self):
+        """The flux tube was already right; pin it so it stays that way."""
+        nx, nky, nz = 8, 3, 8
+        rng = np.random.default_rng(3)
+        phi = rng.normal(size=(nx, nky, nz)) + 1j * rng.normal(size=(nx, nky, nz))
+        cxy = 1.9
+        result = compute_exb(phi, _make_local_params(nx, nky, nz),
+                             _make_local_geom(nx, nz, C_xy=cxy),
+                             _make_local_coord(nx))
+        np.testing.assert_allclose(result["v_exb"],
+                                   -result["e_r"] / cxy, rtol=1e-12)
+
+    def test_global_flux_surface_average_normalises_per_surface(self):
+        """
+        A 2-D Jacobian must be normalised over z alone. Dividing by its total
+        sum makes every flux-surface average a factor ~1/nx too small, and
+        x-dependently so — invisible with the uniform Jacobian the other
+        fixtures use, so this one varies it in both directions.
+        """
+        nx, nky, nz = 6, 3, 4
+        rng = np.random.default_rng(11)
+        J = 1.0 + rng.uniform(size=(nx, nz))
+        geom = _make_global_geom(nx, nz)
+        geom["Jacobian"] = J
+        phi = np.zeros((nx, nky, nz), dtype=complex)
+        phi[:, 0, :] = rng.normal(size=(nx, nz))
+
+        result = compute_exb(phi, _make_global_params(nx, nky, nz),
+                             geom, _make_global_coord(nx))
+        expected = ((phi[:, 0, :].real * J).sum(axis=1) / J.sum(axis=1))
+        np.testing.assert_allclose(result["phi_zonal"], expected, rtol=1e-12)
+
+    def test_uniform_phi_averages_to_itself(self):
+        """
+        The sharpest check that the weights normalise: a potential constant on
+        each flux surface must come back unchanged, whatever the Jacobian.
+        """
+        nx, nky, nz = 6, 3, 4
+        rng = np.random.default_rng(5)
+        geom = _make_global_geom(nx, nz)
+        geom["Jacobian"] = 1.0 + rng.uniform(size=(nx, nz))
+        profile = np.linspace(2.0, 5.0, nx)
+        phi = np.zeros((nx, nky, nz), dtype=complex)
+        phi[:, 0, :] = profile[:, None]
+
+        result = compute_exb(phi, _make_global_params(nx, nky, nz),
+                             geom, _make_global_coord(nx))
+        np.testing.assert_allclose(result["phi_zonal"], profile, rtol=1e-12)

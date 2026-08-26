@@ -100,6 +100,21 @@ def _central_diff(f: np.ndarray) -> np.ndarray:
 # Core physics — compute all ExB quantities from a single phi snapshot
 # ---------------------------------------------------------------------------
 
+def _radial_C_xy(geom: dict, J_norm: np.ndarray):
+    """
+    ``C_xy`` as a scalar or radial profile, whatever shape the loader gave it.
+
+    A ``(nx, nz)`` array is reduced with the Jacobian weights of the surface, so
+    the result is exact when ``C_xy`` is genuinely constant on a flux surface
+    (which it is, analytically) and a sensible average when the derived-from-
+    metric version wobbles numerically in z.
+    """
+    C_xy = np.asarray(geom["metric"]["C_xy"], dtype=float)
+    if C_xy.ndim < 2:
+        return C_xy
+    return (C_xy * J_norm).sum(axis=-1)
+
+
 def compute_exb(phi: np.ndarray, params: dict, geom: dict, coord: dict) -> dict:
     """
     Compute ExB shearing quantities from a single phi snapshot.
@@ -130,8 +145,13 @@ def compute_exb(phi: np.ndarray, params: dict, geom: dict, coord: dict) -> dict:
     """
     x_local = params["general"].get("x_local", True)
     nx  = params["box"]["nx0"]
-    J   = geom["Jacobian"]                          # shape (nz,)
-    J_norm = J / J.sum()
+    # (nz,) for a flux tube — one flux surface — but (nx, nz) for a global run,
+    # where the weights must normalise per surface. Dividing a 2-D Jacobian by
+    # its total sum instead makes every flux-surface average a factor
+    # ~sum_z J(x) / sum_xz J too small, and x-dependently so.
+    J = np.asarray(geom["Jacobian"], dtype=float)
+    J_norm = (J / J.sum() if J.ndim == 1
+              else J / J.sum(axis=-1, keepdims=True))
 
     # ── ky=0 component ────────────────────────────────────────────────────
     phi_zonal_kx = phi[:, 0, :]                     # shape (nx, nz)
@@ -188,8 +208,11 @@ def compute_exb(phi: np.ndarray, params: dict, geom: dict, coord: dict) -> dict:
         # Radial electric field: E_r = -∂phi_zonal/∂x
         e_r = -_central_diff(phi_zonal) / dx
 
-        # ExB velocity (global: no C_xy factor, already in correct units)
-        v_exb = e_r.copy()
+        # ExB velocity, same convention as the flux tube: v_ExB = -E_r / C_xy.
+        # C_xy is a flux-surface quantity but the loader may hand it over as
+        # (nx, nz), so reduce it with the same Jacobian weights used above --
+        # exact when it really is constant on a surface.
+        v_exb = -e_r / _radial_C_xy(geom, J_norm)
 
         # ExB shearing rate (global) needs the safety-factor profile:
         #   ω_ExB = (x/q) * ∂/∂x (q * E_r / x) / dx
@@ -534,9 +557,10 @@ class ShearingRate(RunDiagnostic):
             times.append(time)
             fs = g3.flux_surface_average(arrays[i_phi], J)
             E = -np.gradient(fs, x)
+            # v_ExB = -E_r / C_xy, the same convention as the spectral paths.
             # C_xy only: the 1/sqrt(g^xx) of GENE-3D's flux_geomfac belongs to a
             # flux per unit physical area. This is a flow, not a flux.
-            v = E / C_xy
+            v = -E / C_xy
             phi_fs.append(fs)
             e_r.append(E)
             v_exb.append(v)
