@@ -4,6 +4,7 @@
 
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.colors import LogNorm, SymLogNorm
 import os
 import h5py
 from concurrent.futures import ThreadPoolExecutor
@@ -18,6 +19,110 @@ from genetools.compat import trapz as _trapz
 from genetools.diagnostics._base import (CachingDiagnostic,
                                         RunDiagnostic)
 from genetools.diagnostics import _gene3d as g3
+
+
+#: Cache file per geometry. The two schemas differ in dimension order and
+#: grouping, so they stay in separate files; merging them would invalidate every
+#: existing cache for no visible gain.
+_CACHE_FILES = {"flux_tube": "flux_spectra.h5",
+                "x_global": "spectra_global.h5"}
+
+#: HDF5 keys written before the geometries were made to agree on flux names.
+#: Both caches are translated on read and migrated in place before an append.
+_LEGACY_FLUX_NAMES = {
+    # x-global, inside each species group
+    "Qes_ky": "Q_es_ky", "Ges_ky": "Gamma_es_ky", "Pes_ky": "Pi_es_ky",
+    "Qem_ky": "Q_em_ky", "Gem_ky": "Gamma_em_ky", "Pem_ky": "Pi_em_ky",
+}
+#: Flux-tube substitutions, applied to the flat ``{species}_{flux}_{axis}`` keys.
+_LEGACY_FLUX_INFIX = {"_G_es_": "_Gamma_es_", "_G_em_": "_Gamma_em_"}
+
+
+def _compute_flux_yspectra(a: np.ndarray, b: np.ndarray,
+                           C_xy: np.ndarray,
+                           J_norm: np.ndarray) -> np.ndarray:
+    """
+    Compute ky-resolved, flux-surface-averaged cross-correlation.
+
+    Parameters
+    ----------
+    a, b : np.ndarray
+        Complex arrays of shape ``(nx, nky, nz)``.
+    C_xy : np.ndarray or float
+        Metric coefficient, shape ``(nx, nz)`` or scalar.
+    J_norm : np.ndarray
+        Normalised Jacobian, shape ``(nx, nz)``.
+
+    Returns
+    -------
+    np.ndarray
+        Real array of shape ``(nx, nky)``.
+    """
+    nky = a.shape[1]
+
+    # z-summed cross-correlation per ky (vectorised over ky), with Hermitian
+    # weighting: factor 1 for ky=0, factor 2 for ky>0. J_norm may be (nx, nz)
+    # or (nz,); insert the ky axis so it broadcasts over ky either way.
+    J = np.asarray(J_norm)
+    Jb = J[:, np.newaxis, :] if J.ndim == 2 else J[np.newaxis, np.newaxis, :]
+    cross = np.real(np.conj(a) * b)                       # (nx, nky, nz)
+    out = np.sum(cross * Jb, axis=2)                      # (nx, nky)
+    if nky > 1:
+        out[:, 1:] *= 2.0
+
+    # Division by C_xy (applied after z-summation, matching MATLAB)
+    C_xy_arr = np.asarray(C_xy)
+    if C_xy_arr.ndim == 2:
+        # (nx, nz) -> average over z to get per-x scalar
+        out /= np.mean(C_xy_arr, axis=1)[:, np.newaxis]
+    elif C_xy_arr.ndim == 1:
+        out /= C_xy_arr[:, np.newaxis]
+    else:
+        out /= float(C_xy_arr)
+
+    return out
+
+
+def _ky_weighted_label(label: str) -> str:
+    """Turn ``'$Q_{\\rm es}$'`` into ``'$k_y\\,Q_{\\rm es}$'``."""
+    return r"$k_y\," + label.lstrip("$")
+
+
+def _flux_norm_and_cmap(data: np.ndarray):
+    """
+    Return ``(norm, cmap)`` for a logarithmic flux panel.
+
+    A flux that keeps one sign — the usual case for heat flux — is scaled with
+    a plain :class:`LogNorm` over a sequential map, so the whole colour range
+    covers the actual dynamic range. Forcing a symmetric range on such data
+    would spend half the colours on values that never occur and wash the panel
+    out.
+
+    A flux that genuinely changes sign (inward particle transport,
+    counter-current momentum) cannot use LogNorm at all, since it blanks the
+    negative half. Those get a symmetric-log norm — logarithmic in magnitude,
+    linear through zero — over a diverging map so the sign stays readable.
+
+    ``(None, ...)`` falls back to matplotlib's linear default when there is no
+    dynamic range to scale.
+    """
+    finite = np.asarray(data)[np.isfinite(data)]
+    nonzero = finite[finite != 0]
+    if nonzero.size == 0:
+        return None, "viridis"
+
+    vmax = float(np.abs(nonzero).max())
+    vmin = float(np.abs(nonzero).min())
+
+    if (nonzero < 0).any():
+        # Keep the linear window below the smallest resolved magnitude, but do
+        # not let it collapse to zero when the dynamic range is extreme.
+        linthresh = float(max(vmin, vmax * 1e-6))
+        return SymLogNorm(linthresh=linthresh, vmin=-vmax, vmax=vmax,
+                          base=10), "RdBu_r"
+    if vmin == vmax:
+        return None, "viridis"
+    return LogNorm(vmin=vmin, vmax=vmax), "viridis"
 
 
 class Spectra(RunDiagnostic):
@@ -51,14 +156,17 @@ class Spectra(RunDiagnostic):
         self.x_avg_lims = x_avg_lims
         self.buffer_frac = buffer_frac
         self.consistency = {}
-        self._global = None
         if run is not None:
             RunDiagnostic.__init__(self, run)
+            # One class, one cache per geometry: the flux-tube and x-global
+            # schemas differ in dimension order and grouping, so they keep
+            # separate files rather than one being misread as the other.
+            default = _CACHE_FILES.get(self.geometry_kind)
             if outfile:
                 self.outfile = outfile
-            if self.geometry_kind == "x_global":
-                from genetools.diagnostics.spectra_global import SpectraGlobal
-                self._global = SpectraGlobal(run)
+            elif default:
+                self.outfile = os.path.join(os.path.dirname(self.outfile),
+                                            default)
             return
         self._legacy_init(outfile or self.cache_file, folder)
 
@@ -195,7 +303,7 @@ class Spectra(RunDiagnostic):
                          maxshape=(None,), chunks=True)
         for i_sp, name in enumerate(species_names):
             Q_es, Q_em, G_es, G_em = fluxes[i_sp]
-            for label, flux in zip(["Q_es", "Q_em", "G_es", "G_em"],
+            for label, flux in zip(["Q_es", "Q_em", "Gamma_es", "Gamma_em"],
                                    [Q_es,    Q_em,   G_es,   G_em]):
                 for axis_name, arr in zip(["kx", "ky", "z"], flux):
                     dsname = f"{name}_{label}_{axis_name}"
@@ -215,7 +323,7 @@ class Spectra(RunDiagnostic):
             f["time"].resize((new_size,))
             for i_sp, name in enumerate(species_names):
                 Q_es, Q_em, G_es, G_em = fluxes[i_sp]
-                for label, flux in zip(["Q_es", "Q_em", "G_es", "G_em"],
+                for label, flux in zip(["Q_es", "Q_em", "Gamma_es", "Gamma_em"],
                                        [Q_es,    Q_em,   G_es,   G_em]):
                     for axis_name, arr in zip(["kx", "ky", "z"], flux):
                         dsname = f"{name}_{label}_{axis_name}"
@@ -228,7 +336,7 @@ class Spectra(RunDiagnostic):
         f["time"][row_idx] = time_value   # cast to the dataset's dtype by h5py
         for i_sp, name in enumerate(species_names):
             Q_es, Q_em, G_es, G_em = fluxes[i_sp]
-            for label, flux in zip(["Q_es", "Q_em", "G_es", "G_em"],
+            for label, flux in zip(["Q_es", "Q_em", "Gamma_es", "Gamma_em"],
                                    [Q_es,    Q_em,   G_es,   G_em]):
                 for axis_name, arr in zip(["kx", "ky", "z"], flux):
                     dsname = f"{name}_{label}_{axis_name}"
@@ -238,6 +346,21 @@ class Spectra(RunDiagnostic):
     # ------------------------------------------------------------------
     # Main entry points
     # ------------------------------------------------------------------
+
+    def _migrate_cache(self) -> None:
+        """
+        Migrate an existing cache's legacy flux names, in place.
+
+        Done before the "is anything missing?" check, not inside the write
+        block: when every requested step is already cached the writer returns
+        early, so a legacy cache would sit unmigrated until the first append —
+        which is exactly when the rename becomes mandatory, and by then `time`
+        has already been extended.
+        """
+        if not os.path.exists(self.outfile):
+            return
+        with h5py.File(self.outfile, "a") as f:
+            self._migrate_legacy_names(f)
 
     def compute_missing(self, fld_reader, mom_readers, coords, geom,
                         params_list, t_start, t_stop):
@@ -271,6 +394,7 @@ class Spectra(RunDiagnostic):
         ky_weight = np.ones(len(ky_arr))
         ky_weight[1:] = 2.0
 
+        self._migrate_cache()
         idx_fld, idx_mom = self.sync_indices(fld_reader, mom_readers,
                                              t_start, t_stop, params)
 
@@ -329,10 +453,11 @@ class Spectra(RunDiagnostic):
                 if key in ("time", "kx", "ky", "z"):
                     continue
                 data = f[key][read_idx][unsort]
+                name = self._current_name(key)
                 if len(time) <= 1:
-                    flux_avg[key] = data[0] if len(time) == 1 else data
+                    flux_avg[name] = data[0] if len(time) == 1 else data
                 else:
-                    flux_avg[key] = _trapz(data, x=time, axis=0) / (time[-1] - time[0])
+                    flux_avg[name] = _trapz(data, x=time, axis=0) / (time[-1] - time[0])
         return flux_avg
 
     def dataset(self, t=None, params=None, species=None, t_start=None,
@@ -348,9 +473,11 @@ class Spectra(RunDiagnostic):
                 return self._dataset_3d(t)
             self.compute(t)
             lo, hi = self._window(t)
-            target = self._global if self._global is not None else self
-            return target._dataset_from_cache(self.coord, self.params,
-                                              self.run.species, lo, hi)
+            if self.geometry_kind == "x_global":
+                return self._dataset_global(self.coord, self.params,
+                                            self.run.species, lo, hi)
+            return self._dataset_from_cache(self.coord, self.params,
+                                            self.run.species, lo, hi)
         return self._dataset_from_cache(t, params, species, t_start, t_stop)
 
     def _dataset_from_cache(self, coords, params, species, t_start=None,
@@ -383,11 +510,9 @@ class Spectra(RunDiagnostic):
         Stream the data and cache the flux spectra.
 
         Flux tubes append kx/ky/z spectra to the HDF5 cache. x-global runs build
-        the ``(x, ky)`` maps through
-        :class:`~genetools.diagnostics.spectra_global.SpectraGlobal`, whose cache
-        schema is different enough to be worth keeping separate; this class owns
-        the facade either way. GENE-3D rebuilds ky spectra in memory and
-        cross-checks them against the fluxes the code wrote itself.
+        ``(x, ky)`` maps into their own cache, whose schema differs enough to
+        keep a separate file. GENE-3D builds the same ``(x, ky)`` maps in memory
+        and cross-checks them against the fluxes the code wrote itself.
         """
         key = (self._key(t),
                tuple(self.x_avg_lims) if self.x_avg_lims else None)
@@ -398,8 +523,8 @@ class Spectra(RunDiagnostic):
         lo, hi = self._bounds(t)
         r = self.run
         moms = [r.mom(n) for n in r.species]
-        if self._global is not None:
-            self._global.compute_and_save(
+        if self.geometry_kind == "x_global":
+            self._compute_global(
                 r.field, moms, self.coord, self.geom, self.params, lo, hi,
                 equilibrium_profiles=r.eq_profiles)
         else:
@@ -481,7 +606,11 @@ class Spectra(RunDiagnostic):
                 fluxes = self._fluxes_from_moments(
                     reader, m_arrays, v_E, b_x, n0, T0, wanted)
                 for v in wanted:
-                    acc[v].append(g3.xz_average(fluxes[v], J, xsl))
+                    # Keep the radial axis: the (x, ky) map is the primary
+                    # product and both 1-D views are reductions of it. Averaging
+                    # x away here, as this used to, threw the radial structure
+                    # of the spectrum out before anyone could look at it.
+                    acc[v].append(g3.z_average_ky(fluxes[v], J))
                     # The reference has to be reduced identically, or the
                     # comparison measures the difference between two averaging
                     # weights rather than a normalisation error: summing the
@@ -497,9 +626,23 @@ class Spectra(RunDiagnostic):
                     np.asarray(ref[v]), common["times"])
 
         result = {"ky": ky, "times": common["times"], "spectra": spectra,
-                  "code_flux": code_flux, "xslice": xsl}
+                  "code_flux": code_flux, "xslice": xsl,
+                  "x_weights": g3.radial_weights(J)}
         self._check(result)
         return result
+
+    @staticmethod
+    def _reduce_x(spectrum, weights, xsl):
+        """
+        Radially average an ``(x, ky)`` map over the retained window.
+
+        Weighted by each surface's ``sum_z J``, which makes this exactly the
+        joint x-z average :func:`~genetools.diagnostics._gene3d.xz_average`
+        performs in one step -- so the consistency check below still compares
+        like with like.
+        """
+        w = np.asarray(weights)[xsl]
+        return (np.asarray(spectrum)[xsl] * w).sum(axis=0) / w.sum(axis=0)
 
     def _fluxes_from_moments(self, reader, arrays, v_E, b_x, n0, T0, wanted):
         """
@@ -550,8 +693,12 @@ class Spectra(RunDiagnostic):
         self.consistency = {}
         for name, per in result["spectra"].items():
             for v, spectrum in per.items():
+                # Reduce the map the same way the reference was reduced: over
+                # the retained radial window, then summed over ky.
+                reduced = self._reduce_x(spectrum, result["x_weights"],
+                                         result["xslice"])
                 ratio = g3.check_flux_consistency(
-                    np.sum(spectrum), result["code_flux"][name][v],
+                    np.sum(reduced), result["code_flux"][name][v],
                     f"{name} {v}")
                 self.consistency[f"{name}/{v}"] = ratio
 
@@ -561,21 +708,41 @@ class Spectra(RunDiagnostic):
     # ------------------------------------------------------------------
 
     def _dataset_3d(self, t):
+        """
+        The GENE-3D spectra as ``(x, ky)`` maps plus their two reductions.
+
+        Same three products as the x-global path, so a script does not have to
+        know which global geometry it is looking at: ``*_xky`` is the map,
+        ``*_x`` the flux profile summed over ky, and ``*_ky`` the ky spectrum
+        averaged over the retained radial window.
+        """
         from genetools._xr import make_dataset, unit_attrs
         raw = self.compute(t)
         params = self.params
         names = list(self.run.species)
         present = [v for v in self._ES_FLUXES + self._EM_FLUXES
                    if all(v in raw["spectra"][n] for n in names)]
+        xsl, weights = raw["xslice"], raw["x_weights"]
+
+        data_vars = {}
+        for v in present:
+            maps = [np.real(raw["spectra"][n][v]) for n in names]
+            data_vars[v + "_xky"] = (("species", "x", "ky"),
+                                     np.stack(maps, axis=0))
+            data_vars[v + "_x"] = (("species", "x"),
+                                   np.stack([m.sum(axis=1) for m in maps],
+                                            axis=0))
+            data_vars[v + "_ky"] = (
+                ("species", "ky"),
+                np.stack([self._reduce_x(m, weights, xsl) for m in maps],
+                         axis=0))
         ds = make_dataset(
-            {v + "_ky": (("species", "ky"),
-                         np.stack([np.real(raw["spectra"][n][v])
-                                   for n in names], axis=0))
-             for v in present},
-            {"ky": raw["ky"]}, species=names, params=params)
+            data_vars,
+            {"x": np.asarray(self.coord["x_o_a"], dtype=float),
+             "ky": raw["ky"]}, species=names, params=params)
         ds.attrs.update(unit_attrs(params))
         ds.attrs["geometry_kind"] = self.geometry_kind
-        x = np.asarray(self.coord["x_o_a"], dtype=float)[raw["xslice"]]
+        x = np.asarray(self.coord["x_o_a"], dtype=float)[xsl]
         ds.attrs["x_avg_range"] = [float(x[0]), float(x[-1])]
         ds.attrs["n_times"] = int(np.size(raw["times"]))
         for label, ratio in self.consistency.items():
@@ -583,21 +750,64 @@ class Spectra(RunDiagnostic):
         return ds
 
     def _plot_3d(self, t):
-        """Three panels per flux: log-log, ky-weighted, and lin-lin."""
+        """
+        Three figures: the ``(x, ky)`` maps, the ky spectra, the flux profiles.
+
+        Mirrors the x-global layout, so the two global geometries are read the
+        same way.
+        """
         ds = self._dataset_3d(t)
+        bases = [k[:-4] for k in ds.data_vars if k.endswith("_xky")]
+        if not bases:
+            raise ValueError("No flux spectra available to plot.")
+        lo, hi = ds.attrs["x_avg_range"]
+        window = rf"$x/a \in [{lo:.2f}, {hi:.2f}]$"
+        figs = [self._fig_3d_maps(ds, bases),
+                self._fig_3d_ky(ds, bases, window),
+                self._fig_3d_profiles(ds, bases)]
+        plt.show()
+        return figs
+
+    @staticmethod
+    def _positive_ky(ds):
+        """Indices of the non-negative half of a full FFT ky axis."""
         ky_full = np.asarray(ds["ky"])
         n_pos = (ky_full.size + 1) // 2
-        ky = ky_full[:n_pos]
-        keys = [k for k in ds.data_vars if k.endswith("_ky")]
-        if not keys:
-            raise ValueError("No flux spectra available to plot.")
+        return ky_full[:n_pos], n_pos
 
-        fig, axes = plt.subplots(len(keys), 3,
-                                 figsize=(13, 3.2 * len(keys)), squeeze=False)
-        for row, key in enumerate(keys):
-            label = self._TITLES_3D.get(key[:-3], key)
+    def _fig_3d_maps(self, ds, bases):
+        """One ``(x, ky)`` colour map per flux and species."""
+        ky, n_pos = self._positive_ky(ds)
+        names = list(ds["species"].values)
+        fig, axes = plt.subplots(len(bases), len(names),
+                                 figsize=(5.0 * len(names), 3.4 * len(bases)),
+                                 squeeze=False)
+        x = np.asarray(ds["x"])
+        for row, base in enumerate(bases):
+            for col, name in enumerate(names):
+                ax = axes[row][col]
+                arr = np.asarray(ds[base + "_xky"].sel(species=name))[:, :n_pos]
+                vmax = float(np.max(np.abs(arr))) or 1.0
+                mesh = ax.pcolormesh(x, ky, arr.T, shading="auto", cmap="bwr",
+                                     vmin=-vmax, vmax=vmax)
+                ax.set_xlabel(r"$x/a$")
+                ax.set_ylabel(r"$k_y \rho_{\rm ref}$")
+                ax.set_title(f"{self._TITLES_3D.get(base, base)}  {name}",
+                             fontsize=9)
+                fig.colorbar(mesh, ax=ax)
+        fig.suptitle("GENE-3D flux spectra — (x, ky) maps")
+        fig.tight_layout()
+        return fig
+
+    def _fig_3d_ky(self, ds, bases, window):
+        """Three views of each radially averaged ky spectrum."""
+        ky, n_pos = self._positive_ky(ds)
+        fig, axes = plt.subplots(len(bases), 3,
+                                 figsize=(13, 3.2 * len(bases)), squeeze=False)
+        for row, base in enumerate(bases):
+            label = self._TITLES_3D.get(base, base)
             for name in ds["species"].values:
-                vals = np.asarray(ds[key].sel(species=name))[:n_pos]
+                vals = np.asarray(ds[base + "_ky"].sel(species=name))[:n_pos]
                 axes[row][0].plot(ky, np.abs(vals), label=str(name))
                 axes[row][1].plot(ky, vals * ky, label=str(name))
                 axes[row][2].plot(ky, vals, label=str(name))
@@ -610,11 +820,25 @@ class Spectra(RunDiagnostic):
                 ax.set_xlabel(r"$k_y \rho_{\rm ref}$")
                 ax.grid(True, alpha=0.3)
                 ax.legend(fontsize=8)
-        lo, hi = ds.attrs["x_avg_range"]
-        fig.suptitle("GENE-3D flux spectra, "
-                     rf"$x/a \in [{lo:.2f}, {hi:.2f}]$")
+        fig.suptitle("GENE-3D flux spectra, " + window)
         fig.tight_layout()
-        plt.show()
+        return fig
+
+    def _fig_3d_profiles(self, ds, bases):
+        """The ky-summed flux profile against radius."""
+        x = np.asarray(ds["x"])
+        fig, axes = plt.subplots(1, len(bases),
+                                 figsize=(4.6 * len(bases), 3.8), squeeze=False)
+        for ax, base in zip(axes[0], bases):
+            for name in ds["species"].values:
+                ax.plot(x, np.asarray(ds[base + "_x"].sel(species=name)),
+                        label=str(name))
+            ax.set_xlabel(r"$x/a$")
+            ax.set_ylabel(self._TITLES_3D.get(base, base))
+            ax.grid(True, alpha=0.3)
+            ax.legend(fontsize=8)
+        fig.suptitle(r"GENE-3D flux profiles, $\sum_{k_y}$")
+        fig.tight_layout()
         return fig
 
     # ------------------------------------------------------------------
@@ -625,9 +849,9 @@ class Spectra(RunDiagnostic):
             return self._plot_3d(t)
         lo, hi = self._bounds(t)
         r = self.run
-        if self._global is not None:
+        if self.geometry_kind == "x_global":
             self.compute(t)
-            return self._global.plot(self.coord, self.params, lo, hi,
+            return self._plot_global(self.coord, self.params, lo, hi,
                                      x_avg_lims=x_avg_lims, **kw)
         return self._plot_local(r.field, [r.mom(n) for n in r.species],
                                 r.coords, r.geometry, r.params, lo, hi, **kw)
@@ -651,9 +875,10 @@ class Spectra(RunDiagnostic):
             ky            = f["ky"][...]
             z             = f["z"][...]
             # Extract species names by stripping known flux suffixes
-            _suffixes = ("_Q_es_kx", "_Q_em_kx", "_G_es_kx", "_G_em_kx",
-                         "_Q_es_ky", "_Q_em_ky", "_G_es_ky", "_G_em_ky",
-                         "_Q_es_z",  "_Q_em_z",  "_G_es_z",  "_G_em_z")
+            _suffixes = tuple(
+                f"_{flux}_{axis}"
+                for flux in ("Q_es", "Q_em", "Gamma_es", "Gamma_em")
+                for axis in ("kx", "ky", "z"))
             species_set = set()
             for name in f.keys():
                 for sfx in _suffixes:
@@ -664,7 +889,7 @@ class Spectra(RunDiagnostic):
 
         nx2     = len(kx) // 2 + 1
         kx_half = kx[:nx2]
-        labels  = ["Q_es", "Q_em", "G_es", "G_em"]
+        labels  = ["Q_es", "Q_em", "Gamma_es", "Gamma_em"]
 
         def _get(key):
             """Return array if present and non-empty, else None."""
@@ -762,4 +987,386 @@ class Spectra(RunDiagnostic):
         plt.tight_layout()
         plt.show()
 
+    # ------------------------------------------------------------------
+    # x-global: (x, ky) flux maps
+    #
+    # Absorbed from the former SpectraGlobal. The cache schema stays its own —
+    # per-species groups holding (nx, nky, time) — but the flux names now match
+    # the rest of the package (Gamma/Q/Pi), so the same physics has the same
+    # name whatever the geometry.
+    # ------------------------------------------------------------------
 
+    #: Flux channels, electrostatic then electromagnetic, x-global only.
+    _ES_GLOBAL = ("Q_es", "Gamma_es", "Pi_es")
+    _EM_GLOBAL = ("Q_em", "Gamma_em", "Pi_em")
+
+    _TITLES_GLOBAL = {
+        "Q_es": r"$Q_{\rm es}$", "Gamma_es": r"$\Gamma_{\rm es}$",
+        "Pi_es": r"$\Pi_{\rm es}$",
+        "Q_em": r"$Q_{\rm em}$", "Gamma_em": r"$\Gamma_{\rm em}$",
+        "Pi_em": r"$\Pi_{\rm em}$",
+    }
+    _COLORS_GLOBAL = {"Q_es": "b", "Gamma_es": "r", "Pi_es": "g",
+                      "Q_em": "m", "Gamma_em": "k", "Pi_em": "c"}
+
+    @staticmethod
+    def _migrate_legacy_names(f) -> None:
+        """
+        Rename legacy flux datasets in an open, writable cache.
+
+        Reading translates names on the fly, but appending needs the datasets
+        themselves to carry the current names, or adding a time step to a cache
+        written by an older version raises ``KeyError`` — after it has already
+        extended ``time``. Both schemas are handled: the x-global one nests
+        fluxes inside per-species groups, the flux-tube one is flat.
+        """
+        for name in list(f.keys()):                     # x-global groups
+            grp = f[name]
+            if not isinstance(grp, h5py.Group):
+                continue
+            for old, new in _LEGACY_FLUX_NAMES.items():
+                if old in grp and new not in grp:
+                    grp.move(old, new)
+        for key in list(f.keys()):                      # flat flux-tube keys
+            for old, new in _LEGACY_FLUX_INFIX.items():
+                if old in key:
+                    renamed = key.replace(old, new)
+                    if renamed not in f:
+                        f.move(key, renamed)
+                    break
+
+    @staticmethod
+    def _current_name(key: str) -> str:
+        """Translate one legacy HDF5 key to its current spelling."""
+        if key in _LEGACY_FLUX_NAMES:
+            return _LEGACY_FLUX_NAMES[key]
+        for old, new in _LEGACY_FLUX_INFIX.items():
+            if old in key:
+                return key.replace(old, new)
+        return key
+
+    @staticmethod
+    def _init_h5_global(f, species_names: list, nx: int, nky: int,
+                        has_em: bool, keys, time_dtype=np.float64):
+        """Create all datasets in a newly opened x-global cache file."""
+        f.create_dataset("time", shape=(0,), maxshape=(None,),
+                         dtype=time_dtype, chunks=True)
+        for name in species_names:
+            grp = f.create_group(name)
+            for key in keys:
+                grp.create_dataset(f"{key}_ky", shape=(nx, nky, 0),
+                                   maxshape=(nx, nky, None),
+                                   dtype=np.float64, chunks=True)
+
+    @staticmethod
+    def _append_global(f, species_names: list, species_data: dict,
+                       time: float) -> None:
+        """Append one time step to an already-open x-global cache file."""
+        tds = f["time"]
+        n = tds.shape[0]
+        tds.resize((n + 1,))
+        tds[n] = time
+        for name in species_names:
+            for key, val in species_data[name].items():
+                ds = f[f"{name}/{key}"]
+                ds.resize((ds.shape[0], ds.shape[1], n + 1))
+                ds[:, :, n] = val
+
+    def _compute_global(self, fld_reader, mom_readers, coords, geom, params,
+                        t_start, t_stop, equilibrium_profiles=None) -> None:
+        """
+        Stream field and moment files and append ``(x, ky)`` flux maps to HDF5.
+
+        x is already real space here, so no radial transform is involved: the
+        flux is a per-ky cross-correlation, flux-surface averaged over z.
+        """
+        nx = params["box"]["nx0"]
+        nky = params["box"]["nky0"]
+        n_fields = params["info"]["n_fields"]
+        species = params["species"]
+        species_names = [sp["name"] for sp in species]
+        ky = np.asarray(coords["ky"])
+        has_em = n_fields > 1
+
+        J = geom["Jacobian"]
+        J_norm = J / J.sum(axis=1, keepdims=True)
+        C_xy = geom["metric"]["C_xy"]
+
+        units = params.get("units", {})
+        Tref = units.get("Tref", 1.0)
+        nref = units.get("nref", 1.0)
+        nz = params["box"]["nz0"]
+
+        prefactors = {}
+        if equilibrium_profiles is not None:
+            for sp in species:
+                name = sp["name"]
+                ep = equilibrium_profiles.get(name)
+                if ep is None:
+                    continue
+                T0 = sp["temp"] * Tref
+                n0 = sp["dens"] * nref
+                T_map = (np.asarray(ep["T"]) / T0)[:, np.newaxis, np.newaxis] \
+                    * np.ones((1, 1, nz))
+                n_map = (np.asarray(ep["n"]) / n0)[:, np.newaxis, np.newaxis] \
+                    * np.ones((1, 1, nz))
+                prefactors[name] = {"n_map": n_map, "T_map": T_map}
+
+        self._migrate_cache()
+        idx_fld, idx_mom = self._sync_field_mom_indices(
+            fld_reader, mom_readers, t_start, t_stop, params)
+        if len(idx_fld) == 0 or len(idx_mom) == 0:
+            return
+
+        it_field = fld_reader.stream_selected(idx_fld)
+        it_moms = [r.stream_selected(idx_mom) for r in mom_readers]
+        keys = list(self._ES_GLOBAL) + (list(self._EM_GLOBAL) if has_em else [])
+
+        with h5py.File(self.outfile, "a") as hf:
+            initialised = "time" in hf
+            if initialised and any(n not in hf for n in species_names):
+                raise ValueError(
+                    f"Cache '{self.outfile}' has a time axis but no data group "
+                    f"for every species {species_names} — it was written by an "
+                    "interrupted run or a different configuration. Delete it "
+                    "and recompute.")
+
+            for tm, fields in it_field:
+                all_moments = []
+                for it_m in it_moms:
+                    _, moms = next(it_m)
+                    all_moments.append(moms)
+
+                phi = fields[0]
+                ky3 = ky[np.newaxis, :, np.newaxis]
+                v_E = -1j * ky3 * phi
+                B_par = 1j * ky3 * fields[1] if has_em else None
+
+                sp_data = {}
+                for i_sp, sp in enumerate(species):
+                    name = sp["name"]
+                    n0 = sp["dens"]
+                    T0 = sp["temp"]
+                    mass = sp.get("mass", 1.0)
+                    moments = all_moments[i_sp]
+
+                    pf = prefactors.get(name, {})
+                    n_map = pf.get("n_map", 1.0)
+                    T_map = pf.get("T_map", 1.0)
+
+                    dens = moments[0]
+                    T_par = moments[1]
+                    T_perp = moments[2]
+                    u_par = moments[5]
+
+                    tmp_q = (0.5 * T_par + T_perp) * n_map \
+                        + 1.5 * dens * T_map
+                    result = {
+                        "Gamma_es_ky": n0 * _compute_flux_yspectra(
+                            dens, v_E, C_xy, J_norm),
+                        "Q_es_ky": n0 * T0 * _compute_flux_yspectra(
+                            tmp_q, v_E, C_xy, J_norm),
+                        "Pi_es_ky": n0 * mass * _compute_flux_yspectra(
+                            v_E, u_par * n_map, C_xy, J_norm),
+                    }
+
+                    if B_par is not None:
+                        q_par = moments[3]
+                        q_perp = moments[4]
+                        result.update({
+                            "Gamma_em_ky": n0 * _compute_flux_yspectra(
+                                u_par * n_map, B_par, C_xy, J_norm),
+                            "Q_em_ky": n0 * T0 * _compute_flux_yspectra(
+                                q_par + q_perp, B_par, C_xy, J_norm),
+                            "Pi_em_ky": n0 * T0 * _compute_flux_yspectra(
+                                B_par,
+                                (T_par * n_map + dens * T_map) * n_map,
+                                C_xy, J_norm),
+                        })
+
+                    sp_data[name] = result
+
+                if not initialised:
+                    self._init_h5_global(hf, species_names, nx, nky, has_em,
+                                         keys,
+                                         time_dtype=self._time_dtype(params))
+                    initialised = True
+                self._append_global(hf, species_names, sp_data, tm)
+
+    def _load_global(self, t_start=None, t_stop=None) -> dict:
+        """
+        Load saved ``(x, ky)`` spectra, keyed ``'{species}_{flux}_ky'``.
+
+        Arrays come back shaped ``(n_times, nx, nky)``. Legacy flux names in an
+        older cache are translated here, so it stays readable.
+        """
+        if not os.path.exists(self.outfile):
+            return {}
+        with h5py.File(self.outfile, "r") as f:
+            if "time" not in f:                     # partially written cache
+                return {}
+            time = f["time"][...]
+            if time.size == 0:
+                return {}
+            time, read_idx, unsort = self._select_window(time, t_start, t_stop)
+            result = {"time": time}
+            for name in [k for k in f.keys() if k != "time"]:
+                grp = f[name]
+                for key in grp.keys():
+                    data = grp[key][:, :, read_idx][:, :, unsort]
+                    result[f"{name}_{self._current_name(key)}"] = \
+                        np.transpose(data, (2, 0, 1))
+        return result
+
+    def _load_time_average_global(self, t_start=None, t_stop=None) -> dict:
+        """Time-average the cached ``(x, ky)`` maps; values are ``(nx, nky)``."""
+        data = self._load_global(t_start, t_stop)
+        if not data or "time" not in data:
+            return {}
+        time = data["time"]
+        if len(time) == 0:                          # window selects nothing
+            return {}
+        out = {}
+        for key, arr in data.items():
+            if key == "time":
+                continue
+            out[key] = (arr[0] if len(time) <= 1
+                        else self._time_average(arr, time))
+        return out
+
+    def _radial_window(self, x):
+        """
+        Index slice of the radial range a ky spectrum is averaged over.
+
+        Defaults to trimming ``buffer_frac`` from each end so the Krook buffer
+        regions, where the fluxes are unphysical, stay out of the average — the
+        same rule the GENE-3D path uses.
+        """
+        return g3.radial_slice(x, limits=self.x_avg_lims,
+                               buffer_frac=self.buffer_frac)
+
+    def _expand_reductions(self, raw: dict, xsl) -> dict:
+        """
+        Expand each ``(nx, nky)`` map into the map plus its two reductions.
+
+        ``'ions_Q_es_ky'`` becomes ``'ions_Q_es_xky'`` (x, ky), ``'ions_Q_es_x'``
+        — the flux profile summed over ky — and ``'ions_Q_es_ky'``, the ky
+        spectrum averaged over the retained radial window. Same three products
+        the GENE-3D path builds, so a script need not know which global geometry
+        it has. (Unweighted in x here: the z average already carried the
+        Jacobian, and this cache stores no geometry to weight with.)
+        """
+        out = {}
+        for key, arr in raw.items():
+            arr = np.asarray(arr)
+            base = key[:-3] if key.endswith("_ky") else key
+            if arr.ndim != 2:
+                out[key] = arr
+                continue
+            out[f"{base}_xky"] = arr
+            out[f"{base}_x"] = arr.sum(axis=1)
+            out[f"{base}_ky"] = arr[xsl].mean(axis=0)
+        return out
+
+    def _dataset_global(self, coords, params, species, t_start=None,
+                        t_stop=None):
+        """The x-global spectra as ``(x, ky)`` maps plus their reductions."""
+        import xarray as xr
+        from genetools import _xr
+
+        raw = self._load_time_average_global(t_start, t_stop)
+        if not raw:
+            return xr.Dataset()
+        x = np.asarray(coords.get("x", []))
+        if x.size == 0:
+            x = np.asarray(coords.get("x_o_a", []))
+        xsl = self._radial_window(x)
+        data_vars, used = _xr.stacked_vars(
+            self._expand_reductions(raw, xsl), species, _xr.dims_from_suffix)
+        candidates = {"x": x, "ky": np.asarray(coords.get("ky", []))}
+        ds = _xr.make_dataset(data_vars, candidates, species=used,
+                              params=params)
+        if x.size:
+            ds.attrs["x_avg_range"] = [float(x[xsl][0]), float(x[xsl][-1])]
+        return ds
+
+    def _plot_global(self, coords, params, t_start=None, t_stop=None,
+                     x_avg_lims=None):
+        """
+        Per species: the ky-weighted ``(x, ky)`` map, then the 1-D reductions.
+
+        ky weighting puts equal areas at equal flux contribution on a
+        logarithmic ky axis, since ``int F dky = int ky F d(ln ky)``.
+        """
+        if x_avg_lims is not None:
+            self.x_avg_lims = x_avg_lims
+        ds = self._dataset_global(coords, params, self.run.species,
+                                  t_start, t_stop)
+        if not ds.data_vars:
+            print("No global spectra available to plot.")
+            return []
+
+        x = np.asarray(ds["x"])
+        ky = np.asarray(ds["ky"])
+        bases = [k[:-4] for k in ds.data_vars if k.endswith("_xky")]
+        order = [b for b in self._ES_GLOBAL + self._EM_GLOBAL if b in bases]
+        lo, hi = ds.attrs.get("x_avg_range", (x[0], x[-1]))
+        # ky=0 is a structural zero — the electrostatic fluxes are built from
+        # v_E = -i ky phi, which vanishes there — so it carries no information
+        # and would force a linear region into an otherwise logarithmic axis.
+        kpos = ky > 0
+        ky_p = ky[kpos] if kpos.any() else ky
+
+        figs = []
+        for name in ds["species"].values:
+            fig, axes = plt.subplots(1, len(order),
+                                     figsize=(5 * len(order), 4),
+                                     squeeze=False)
+            fig.suptitle(f"{name} — ky-weighted flux maps")
+            for ax, base in zip(axes[0], order):
+                arr = np.asarray(ds[base + "_xky"].sel(species=name))
+                weighted = (arr[:, kpos] * ky_p[np.newaxis, :] if kpos.any()
+                            else arr * ky[np.newaxis, :])
+                norm, cmap = _flux_norm_and_cmap(weighted)
+                im = ax.pcolormesh(ky_p, x, weighted, shading="auto",
+                                   norm=norm, cmap=cmap)
+                fig.colorbar(im, ax=ax)
+                ax.set_xscale("log")
+                ax.set_xlabel(r"$k_y \rho_{\rm ref}$")
+                ax.set_ylabel(r"$x / a$")
+                ax.set_title(_ky_weighted_label(
+                    self._TITLES_GLOBAL.get(base, base)))
+            fig.tight_layout()
+            figs.append(fig)
+
+            fig, axes = plt.subplots(1, 3, figsize=(16, 4))
+            fig.suptitle(f"{name} — x-avg [{lo:.3f}, {hi:.3f}]")
+            for base in order:
+                spec = np.asarray(ds[base + "_ky"].sel(species=name))
+                weighted = spec * ky
+                colour = self._COLORS_GLOBAL.get(base, "b")
+                label = self._TITLES_GLOBAL.get(base, base)
+                axes[0].plot(ky, weighted, color=colour,
+                             label=_ky_weighted_label(label))
+                axes[1].plot(ky, np.abs(weighted), color=colour,
+                             label=_ky_weighted_label(label))
+                # The radial profile stays unweighted: summed over ky it is the
+                # physical total flux through each flux surface.
+                axes[2].plot(x, np.asarray(ds[base + "_x"].sel(species=name)),
+                             color=colour, label=label)
+            axes[0].set(xlabel=r"$k_y \rho_{\rm ref}$",
+                        ylabel=r"$k_y\,$Flux [GB]", title="linear")
+            axes[1].set(xlabel=r"$k_y \rho_{\rm ref}$",
+                        ylabel=r"$|k_y\,$Flux$|$ [GB]", title="log-log")
+            axes[1].set_xscale("log")
+            axes[1].set_yscale("log")
+            axes[2].set(xlabel=r"$x / a$", ylabel="Flux [GB]",
+                        title=r"$\sum_{k_y}$ — radial profile")
+            for ax in axes:
+                ax.legend(fontsize=8)
+                ax.grid(True, alpha=0.3)
+            fig.tight_layout()
+            figs.append(fig)
+
+        plt.show()
+        return figs

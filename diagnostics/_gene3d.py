@@ -167,6 +167,29 @@ def xz_average(var: np.ndarray, J: np.ndarray, xslice=slice(None)):
     weights = jacobian_yz(J)[xslice]
     return np.average(var[xslice], weights=weights, axis=(0, 2))
 
+def radial_weights(J: np.ndarray) -> np.ndarray:
+    """
+    Per-radius integration weight, ``sum_z J``, for reducing an ``(nx, nky)`` map.
+
+    Averaging an ``(x, ky)`` map over x with these weights reproduces
+    :func:`xz_average` of the unreduced array exactly: a joint average over x and
+    z equals the per-x z-average followed by an x-average weighted by each
+    surface's total ``sum_z J``.
+    """
+    return np.sum(jacobian_yz(J), axis=2)
+
+
+def z_average_ky(var: np.ndarray, J: np.ndarray) -> np.ndarray:
+    """
+    Jacobian-weighted average over z alone, giving an ``(nx, nky)`` map.
+
+    The sibling of :func:`xz_average`, which also collapses x. Keeping x is what
+    makes the radial structure of a ky spectrum visible instead of averaged away.
+    """
+    w = jacobian_yz(J)
+    return np.sum(var * w, axis=2) / np.sum(w, axis=2)
+
+
 def index_window(values, limits, n=None) -> slice:
     """
     Return the index slice of *values* covering *limits*, inclusive.

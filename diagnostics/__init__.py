@@ -30,7 +30,6 @@ from .nrg import NrgReader
 from .contours import Contours
 from .shearingrate import ShearingRate
 from .spectra import Spectra
-from .spectra_global import SpectraGlobal
 from .profiles import Profiles
 from .fluxes2d import Fluxes2D
 from .ballooning import Ballooning
@@ -52,7 +51,6 @@ __all__ = [
     "Contours",
     "ShearingRate",
     "Spectra",
-    "SpectraGlobal",
     "Profiles",
     "Fluxes2D",
     "Ballooning",

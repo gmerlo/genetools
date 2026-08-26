@@ -174,7 +174,7 @@ class TestDiagnosticWiring:
             seen["eq"] = equilibrium_profiles
 
         monkeypatch.setattr(
-            "genetools.diagnostics.spectra_global.SpectraGlobal.compute_and_save",
+            "genetools.diagnostics.spectra.Spectra._compute_global",
             spy)
         monkeypatch.setattr(Run, "field", property(lambda self: None))
         monkeypatch.setattr(Run, "_mom_list", lambda self: [])

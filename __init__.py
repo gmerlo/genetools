@@ -70,7 +70,6 @@ from .diagnostics import (
     Spectra,
     Profiles,
     Fluxes2D,
-    SpectraGlobal,
 )
 
 __version__ = "0.2.0"
@@ -92,7 +91,6 @@ __all__ = [
     "Spectra",
     "Profiles",
     "Fluxes2D",
-    "SpectraGlobal",
     "load_equilibrium_profiles",
     "EquilibriumProfiles",
 ]

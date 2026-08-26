@@ -406,9 +406,55 @@ class TestSpectra3DPath:
 
     def test_dataset_shape_and_variables(self, physical_run):
         ds = Spectra(Run(physical_run.folder), buffer_frac=0.0).dataset()
-        assert dict(ds.sizes) == {"species": 2, "ky": physical_run.ny0}
-        for name in ("Gamma_es_ky", "Gamma_em_ky", "Q_es_ky", "Q_em_ky"):
-            assert name in ds
+        assert dict(ds.sizes) == {"species": 2, "ky": physical_run.ny0,
+                                  "x": physical_run.nx0}
+        for base in ("Gamma_es", "Gamma_em", "Q_es", "Q_em"):
+            assert ds[base + "_xky"].dims == ("species", "x", "ky")
+            assert ds[base + "_x"].dims == ("species", "x")
+            assert ds[base + "_ky"].dims == ("species", "ky")
+
+    def test_reductions_come_from_the_map(self, physical_run):
+        """
+        The map is the primary product; both 1-D views must be reductions of it,
+        not separately accumulated quantities that could drift from it.
+        """
+        run = Run(physical_run.folder)
+        ds = Spectra(run, buffer_frac=0.0).dataset()
+        J = run.geometry[0]["Jacobian"]
+        w = c.radial_weights(J)[:, 0]                 # y-independent
+        for base in ("Gamma_es", "Q_es"):
+            for sp in run.species:
+                m = np.asarray(ds[base + "_xky"].sel(species=sp))
+                assert np.allclose(np.asarray(ds[base + "_x"].sel(species=sp)),
+                                   m.sum(axis=1))
+                expect = (m * w[:, None]).sum(axis=0) / w.sum()
+                assert np.allclose(
+                    np.asarray(ds[base + "_ky"].sel(species=sp)), expect)
+
+    def test_ky_spectrum_matches_the_joint_xz_average(self, physical_run):
+        """
+        Keeping x and reducing afterwards must give exactly what the old
+        one-step x-z average gave, or the consistency check below is comparing
+        against a differently weighted reference.
+        """
+        run = Run(physical_run.folder)
+        diag = Spectra(run, buffer_frac=0.0)
+        raw = diag.compute()
+        J = run.geometry[0]["Jacobian"]
+        for sp, per in raw["spectra"].items():
+            for v, m in per.items():
+                reduced = diag._reduce_x(m, raw["x_weights"], raw["xslice"])
+                # Rebuilding the joint average from the map has to agree with
+                # the helper that does it in one step.
+                direct = (np.asarray(m) * c.radial_weights(J)).sum(axis=0) \
+                    / c.radial_weights(J).sum(axis=0)
+                assert np.allclose(reduced, direct), f"{sp} {v}"
+
+    def test_map_is_not_radially_constant(self, physical_run):
+        """Otherwise keeping the x axis would be pointless and untested."""
+        ds = Spectra(Run(physical_run.folder), buffer_frac=0.0).dataset()
+        m = np.asarray(ds["Q_es_xky"].isel(species=0))
+        assert m.std(axis=0).max() > 0
 
     def test_radial_window_is_recorded(self, physical_run):
         run = Run(physical_run.folder)

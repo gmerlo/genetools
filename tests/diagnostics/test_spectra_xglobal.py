@@ -1,9 +1,9 @@
-"""Tests for genetools.diagnostics.spectra_global._compute_flux_yspectra."""
+"""Tests for the x-global spectra path, now part of `Spectra`."""
 
 import numpy as np
 import pytest
 
-from genetools.diagnostics.spectra_global import _compute_flux_yspectra
+from genetools.diagnostics.spectra import _compute_flux_yspectra
 
 
 # ---------------------------------------------------------------------------
@@ -202,71 +202,186 @@ class TestNumericalValues:
 # Dataset layout: (x, ky) map plus 1-D reductions
 # ---------------------------------------------------------------------------
 
+def _bare(x_avg_lims=None, buffer_frac=0.0):
+    """
+    A Spectra instance with no run attached, for the pure x-global helpers.
+
+    These paths only need the radial-window options, so bypassing __init__ keeps
+    the test off the HDF5 and Run machinery.
+    """
+    from genetools.diagnostics.spectra import Spectra
+    sg = object.__new__(Spectra)
+    sg.x_avg_lims = x_avg_lims
+    sg.buffer_frac = buffer_frac
+    return sg
+
+
 class TestExpandReductions:
 
     def test_map_and_reduction_keys(self):
-        from genetools.diagnostics.spectra_global import SpectraGlobal
-        raw = {"ions_Qes_ky": np.ones((5, 3)), "ions_Ges_ky": np.ones((5, 3))}
-        out = SpectraGlobal._expand_reductions(raw)
+        raw = {"ions_Q_es_ky": np.ones((5, 3)),
+               "ions_Gamma_es_ky": np.ones((5, 3))}
+        out = _bare()._expand_reductions(raw, slice(None))
         assert set(out) == {
-            "ions_Qes_xky", "ions_Qes_x", "ions_Qes_ky",
-            "ions_Ges_xky", "ions_Ges_x", "ions_Ges_ky",
+            "ions_Q_es_xky", "ions_Q_es_x", "ions_Q_es_ky",
+            "ions_Gamma_es_xky", "ions_Gamma_es_x", "ions_Gamma_es_ky",
         }
 
     def test_reduction_shapes_and_values(self):
-        from genetools.diagnostics.spectra_global import SpectraGlobal
         nx, nky = 4, 3
         arr = np.arange(nx * nky, dtype=float).reshape(nx, nky)
-        out = SpectraGlobal._expand_reductions({"ions_Qes_ky": arr})
-        np.testing.assert_allclose(out["ions_Qes_xky"], arr)
+        out = _bare()._expand_reductions({"ions_Q_es_ky": arr}, slice(None))
+        np.testing.assert_allclose(out["ions_Q_es_xky"], arr)
         # radial profile is the ky-sum; ky spectrum is the radial mean
-        np.testing.assert_allclose(out["ions_Qes_x"], arr.sum(axis=1))
-        np.testing.assert_allclose(out["ions_Qes_ky"], arr.mean(axis=0))
-        assert out["ions_Qes_x"].shape == (nx,)
-        assert out["ions_Qes_ky"].shape == (nky,)
+        np.testing.assert_allclose(out["ions_Q_es_x"], arr.sum(axis=1))
+        np.testing.assert_allclose(out["ions_Q_es_ky"], arr.mean(axis=0))
+        assert out["ions_Q_es_x"].shape == (nx,)
+        assert out["ions_Q_es_ky"].shape == (nky,)
+
+    def test_ky_spectrum_honours_the_radial_window(self):
+        """
+        The ky spectrum averages over the retained window only, so the Krook
+        buffer regions stay out of it — the same rule the GENE-3D path uses.
+        """
+        # Quadratic in x, not linear: a linear ramp has the same mean over a
+        # centred sub-window as over the whole axis, which makes the test vacuous.
+        arr = (np.arange(5.0) ** 2)[:, None] * np.ones(4)
+        full = _bare()._expand_reductions({"i_Q_es_ky": arr}, slice(None))
+        inner = _bare()._expand_reductions({"i_Q_es_ky": arr}, slice(1, 4))
+        np.testing.assert_allclose(full["i_Q_es_ky"], arr.mean(axis=0))
+        np.testing.assert_allclose(inner["i_Q_es_ky"], arr[1:4].mean(axis=0))
+        assert not np.allclose(full["i_Q_es_ky"], inner["i_Q_es_ky"])
 
     def test_non_2d_entries_pass_through(self):
-        from genetools.diagnostics.spectra_global import SpectraGlobal
-        out = SpectraGlobal._expand_reductions({"time": np.arange(4.0)})
+        out = _bare()._expand_reductions({"time": np.arange(4.0)}, slice(None))
         np.testing.assert_allclose(out["time"], np.arange(4.0))
 
 
 class TestDatasetLayout:
 
     def _dataset(self):
-        from genetools.diagnostics.spectra_global import SpectraGlobal
         nx, nky = 6, 4
         rng = np.random.default_rng(0)
         maps = {sp: rng.standard_normal((nx, nky)) for sp in ("ions", "elec")}
-        sg = object.__new__(SpectraGlobal)
-        sg.load_time_average = lambda a=None, b=None: {
-            f"{sp}_Qes_ky": m for sp, m in maps.items()}
+        sg = _bare()
+        sg._load_time_average_global = lambda a=None, b=None: {
+            f"{sp}_Q_es_ky": m for sp, m in maps.items()}
         coords = {"x": np.linspace(0.3, 0.7, nx), "ky": 0.05 * np.arange(nky)}
-        ds = sg.dataset(coords, {"units": {}}, ["ions", "elec"])
+        ds = sg._dataset_global(coords, {"units": {}}, ["ions", "elec"])
         return ds, maps
 
     def test_dims_and_coords(self):
         ds, _ = self._dataset()
-        assert ds["Qes_xky"].dims == ("species", "x", "ky")
-        assert ds["Qes_x"].dims == ("species", "x")
-        assert ds["Qes_ky"].dims == ("species", "ky")
+        assert ds["Q_es_xky"].dims == ("species", "x", "ky")
+        assert ds["Q_es_x"].dims == ("species", "x")
+        assert ds["Q_es_ky"].dims == ("species", "ky")
         assert list(ds["species"].values) == ["ions", "elec"]
 
     def test_reductions_consistent_with_map(self):
         ds, _ = self._dataset()
         np.testing.assert_allclose(
-            ds["Qes_x"].values, ds["Qes_xky"].values.sum(axis=2), rtol=1e-12)
+            ds["Q_es_x"].values, ds["Q_es_xky"].values.sum(axis=2), rtol=1e-12)
         np.testing.assert_allclose(
-            ds["Qes_ky"].values, ds["Qes_xky"].values.mean(axis=1), rtol=1e-12)
+            ds["Q_es_ky"].values, ds["Q_es_xky"].values.mean(axis=1),
+            rtol=1e-12)
 
     def test_species_order_preserved(self):
         ds, maps = self._dataset()
         np.testing.assert_allclose(
-            ds["Qes_xky"].sel(species="elec").values, maps["elec"])
+            ds["Q_es_xky"].sel(species="elec").values, maps["elec"])
 
     def test_empty_cache_returns_empty_dataset(self):
-        from genetools.diagnostics.spectra_global import SpectraGlobal
-        sg = object.__new__(SpectraGlobal)
-        sg.load_time_average = lambda a=None, b=None: {}
-        ds = sg.dataset({"x": [], "ky": []}, {}, [])
+        sg = _bare()
+        sg._load_time_average_global = lambda a=None, b=None: {}
+        ds = sg._dataset_global({"x": [], "ky": []}, {}, [])
         assert len(ds.data_vars) == 0
+
+
+# ---------------------------------------------------------------------------
+# Legacy cache names
+# ---------------------------------------------------------------------------
+
+class TestLegacyFluxNames:
+    """
+    Caches written before the geometries agreed on flux names must keep
+    working: translated on read, and renamed in place before anything is
+    appended — an unmigrated append raises KeyError after extending `time`.
+    """
+
+    def test_current_name_translates_both_schemas(self):
+        from genetools.diagnostics.spectra import Spectra
+        assert Spectra._current_name("Qes_ky") == "Q_es_ky"
+        assert Spectra._current_name("Ges_ky") == "Gamma_es_ky"
+        assert Spectra._current_name("Pem_ky") == "Pi_em_ky"
+        assert Spectra._current_name("ions_G_es_kx") == "ions_Gamma_es_kx"
+        assert Spectra._current_name("ions_Q_es_kx") == "ions_Q_es_kx"
+
+    def test_migrates_x_global_groups(self, tmp_path):
+        import h5py
+        from genetools.diagnostics.spectra import Spectra
+        path = tmp_path / "spectra_global.h5"
+        with h5py.File(path, "w") as f:
+            f.create_dataset("time", data=np.arange(3.0), maxshape=(None,))
+            grp = f.create_group("ions")
+            for old in ("Qes_ky", "Ges_ky", "Pes_ky"):
+                grp.create_dataset(old, data=np.ones((4, 3, 3)),
+                                   maxshape=(4, 3, None))
+        with h5py.File(path, "a") as f:
+            Spectra._migrate_legacy_names(f)
+            assert set(f["ions"].keys()) == {"Q_es_ky", "Gamma_es_ky",
+                                             "Pi_es_ky"}
+
+    def test_migrates_flux_tube_keys(self, tmp_path):
+        import h5py
+        from genetools.diagnostics.spectra import Spectra
+        path = tmp_path / "flux_spectra.h5"
+        with h5py.File(path, "w") as f:
+            f.create_dataset("time", data=np.arange(2.0), maxshape=(None,))
+            for old in ("ions_G_es_kx", "ions_G_em_ky", "ions_Q_es_z"):
+                f.create_dataset(old, data=np.ones((2, 3)),
+                                 maxshape=(None, 3))
+        with h5py.File(path, "a") as f:
+            Spectra._migrate_legacy_names(f)
+            assert "ions_Gamma_es_kx" in f and "ions_G_es_kx" not in f
+            assert "ions_Gamma_em_ky" in f
+            assert "ions_Q_es_z" in f          # already current, untouched
+
+    def test_migration_preserves_values_and_is_idempotent(self, tmp_path):
+        import h5py
+        from genetools.diagnostics.spectra import Spectra
+        path = tmp_path / "spectra_global.h5"
+        payload = np.arange(24.0).reshape(4, 3, 2)
+        with h5py.File(path, "w") as f:
+            f.create_dataset("time", data=np.arange(2.0), maxshape=(None,))
+            f.create_group("ions").create_dataset(
+                "Qes_ky", data=payload, maxshape=(4, 3, None))
+        with h5py.File(path, "a") as f:
+            Spectra._migrate_legacy_names(f)
+            Spectra._migrate_legacy_names(f)
+            np.testing.assert_array_equal(f["ions/Q_es_ky"][...], payload)
+            assert list(f["ions"].keys()) == ["Q_es_ky"]
+
+    def test_migrate_cache_runs_even_when_nothing_is_missing(self, tmp_path):
+        """
+        The writers return early when every requested step is already cached, so
+        the migration has to happen before that check — otherwise a legacy cache
+        stays unmigrated until the first append, which is precisely when the
+        rename becomes mandatory.
+        """
+        import h5py
+        from genetools.diagnostics.spectra import Spectra
+        path = tmp_path / "flux_spectra.h5"
+        with h5py.File(path, "w") as f:
+            f.create_dataset("time", data=np.arange(2.0), maxshape=(None,))
+            f.create_dataset("ions_G_es_kx", data=np.ones((2, 3)),
+                             maxshape=(None, 3))
+        sg = _bare()
+        sg.outfile = str(path)
+        sg._migrate_cache()
+        with h5py.File(path) as f:
+            assert "ions_Gamma_es_kx" in f and "ions_G_es_kx" not in f
+
+    def test_migrate_cache_tolerates_a_missing_file(self, tmp_path):
+        sg = _bare()
+        sg.outfile = str(tmp_path / "absent.h5")
+        sg._migrate_cache()          # must not raise
