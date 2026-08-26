@@ -740,19 +740,23 @@ class Profiles(RunDiagnostic):
         ds.attrs["geometry_kind"] = self.geometry_kind
         return ds
 
-    def _plot_3d(self, t, si=False):
+    def _plot_3d(self, t, si=False, maps=False):
         """
         One figure per species: total profile with its equilibrium background.
 
         Species get a figure each rather than sharing panels — their profiles
         differ by the species factors, so overlaying them on one axis compresses
-        whichever is smaller into the baseline.
+        whichever is smaller into the baseline. With *maps* each species also
+        gets its ``(t, x)`` evolution heatmaps, matching the regular-GENE path.
         """
         ds = self._dataset_3d(t)
         units = self.params.get("units", {}) or {}
         x = np.asarray(ds["x"])
+        tag = " [SI]" if si else " [normalised]"
         figs = []
         for name in ds["species"].values:
+            if maps:
+                figs.append(self._fig_3d_map(ds, name, units, si, tag))
             fig, axes = plt.subplots(2, 2, figsize=(10, 7))
             for ax, v in zip(axes.ravel(), _PROFILE_VARS_3D):
                 key = self._si_key(ds, v, si)
@@ -764,12 +768,30 @@ class Profiles(RunDiagnostic):
                     xlabel=r"$x/a$",
                     ylabel=unit_label(units, v, si=si and key.endswith("_SI")),
                     title=v)
-            fig.suptitle(f"{name} — profiles"
-                         + (" [SI]" if si else " [normalised]"))
+            fig.suptitle(f"{name} — profiles" + tag)
             fig.tight_layout()
             figs.append(fig)
         plt.show()
         return figs
+
+    def _fig_3d_map(self, ds, name, units, si, tag):
+        """The ``(t, x)`` evolution of each quantity, for one species."""
+        x = np.asarray(ds["x"])
+        times = np.asarray(ds["time"])
+        fig, axes = plt.subplots(2, 2, figsize=(11, 7.5))
+        for ax, v in zip(axes.ravel(), _PROFILE_VARS_3D):
+            key = self._si_key(ds, v, si)
+            arr = np.asarray(ds[key].sel(species=name))       # (time, x)
+            mesh = ax.pcolormesh(times, x, arr.T, shading="auto")
+            fig.colorbar(mesh, ax=ax,
+                         label=unit_label(units, v,
+                                          si=si and key.endswith("_SI")))
+            ax.set_xlabel(r"$t\;c_{\rm ref}/L_{\rm ref}$")
+            ax.set_ylabel(r"$x/a$")
+            ax.set_title(v)
+        fig.suptitle(f"{name} — profile evolution" + tag)
+        fig.tight_layout()
+        return fig
 
     @staticmethod
     def _si_key(ds, var, si):
@@ -848,7 +870,7 @@ class Profiles(RunDiagnostic):
         list of matplotlib.figure.Figure
         """
         if self.is_3d:
-            return self._plot_3d(t, si=si)
+            return self._plot_3d(t, si=si, maps=maps)
         self.compute(t)
         a, b = self._bounds(t)
         if eq_profs is None:

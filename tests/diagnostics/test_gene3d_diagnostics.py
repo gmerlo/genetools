@@ -240,6 +240,36 @@ class TestProfiles3D:
         assert ds["T"].attrs["units"] == "T_ref"
         assert ds["T_SI"].attrs["units"] == "keV"
 
+    def test_maps_adds_the_evolution_figure(self, run3d, headless):
+        """
+        `maps` was implemented for the regular-GENE path and silently dropped
+        here: `plot` never forwarded it to `_plot_3d`, so it did nothing.
+        """
+        _, run = run3d
+        n_species = len(run.species)
+        plain = g3.Profiles(run).plot()
+        assert len(plain) == n_species
+        with_maps = g3.Profiles(run).plot(maps=True)
+        assert len(with_maps) == 2 * n_species
+        titles = [f._suptitle.get_text() for f in with_maps]
+        assert sum("evolution" in t for t in titles) == n_species
+
+    def test_map_panels_are_two_dimensional(self, run3d, headless):
+        """A line plot under an 'evolution' title would pass a count check."""
+        _, run = run3d
+        figs = g3.Profiles(run).plot(maps=True)
+        evo = next(f for f in figs
+                   if "evolution" in f._suptitle.get_text())
+        panels = [a for a in evo.axes if a.get_title()]
+        assert panels, "no titled panels on the evolution figure"
+        for ax in panels:
+            assert ax.collections, f"{ax.get_title()} is not a colour map"
+
+    def test_maps_honours_si(self, run3d, headless):
+        _, run = run3d
+        figs = g3.Profiles(run).plot(si=True, maps=True)
+        assert all("[SI]" in f._suptitle.get_text() for f in figs)
+
     def test_compare_with_code_reports_per_variable(self, run3d):
         _, run = run3d
         report = g3.Profiles(run).compare_with_code()
