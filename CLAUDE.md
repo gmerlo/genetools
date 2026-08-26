@@ -111,6 +111,7 @@ Diagnostics available for every geometry:
 - **`growthrate.py`** — `GrowthRate`: per-ky γ/ω from the complex amplitude (spectral, optional `omega<ext>` cross-check) or rescaling-aware γ from `max|φ|` (GENE-3D)
 - **`profile_diag.py`** — `ProfileDiag`: `profile_<species>`. **13 columns for GENE, 8 for GENE-3D** — the column set is chosen from the geometry; plus `flux_profiles()`
 - **`ballooning.py`** — `Ballooning`: field-line mode structure (needs a single ky, so it refuses for GENE-3D)
+- **`geometry_plots.py`** — `GeometryPlots`: geometry coefficients, **all geometries**. Dispatches on the *rank* of the arrays, not the geometry kind — the readers use the same keys and only the rank differs (`(nz,)` flux tube, `(nx,nz)` x-global, `(nx,ny,nz)` GENE-3D), so `self.ndim` comes from the Jacobian's shape. It used to require `ndim == 3` and refuse otherwise. `which=` picks views: `overview` (every coefficient in one figure — **the default**, where it used to open one figure per coefficient), `detail` (the per-coefficient cuts/planes, skipped when only a z axis exists), `surface` (Z vs R from the `shape` arrays), `profiles`. **The content is complementary between codes**: a flux tube writes `shape` (gR/gZ/gPhi) and `curv['sloc']`, both of which were previously invisible — `_LABELS` had no `sloc` entry and the shape arrays were never read — while GENE-3D writes `profiles` and an array `area` that a flux tube does not
 
 GENE-3D-only for now (each declares `supported = ("xy_global",)`):
 
@@ -118,7 +119,6 @@ GENE-3D-only for now (each declares `supported = ("xy_global",)`):
 - **`gam.py`** — `Gam`: zonal-flow oscillation; refuses when there is no zonal component above round-off rather than fitting a frequency to noise
 - **`chi.py`** — `ChiGradient`: χ vs. the self-consistent driving gradient; reuses `Fluxes2D` and `Profiles` so all three agree on normalisation
 - **`omega.py`** — `Omega`: frequency view over `GrowthRate`
-- **`geometry_plots.py`** — `GeometryPlots`: 3-D geometry coefficients along cuts/planes
 - **`velocity.py`** — `SrcMom` (Krook source moments), `VspSlice` (velocity space)
 - **`planes.py`** — `Planes`: remap onto geometric (θ, φ) angles + (n, m) analysis
 - **`vis.py`** — `Vis`: VTK export using the `cart_coords` GENE-3D writes

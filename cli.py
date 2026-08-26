@@ -67,7 +67,7 @@ PARAMETRIZED = {
 }
 
 #: Flags that only exist for GENE-3D runs, for a clearer error message.
-GENE3D_ONLY = ("timetraces", "gam", "chi", "omega", "geometry",
+GENE3D_ONLY = ("timetraces", "gam", "chi", "omega",
                "srcmom", "vsp", "planes", "vis3d")
 
 
