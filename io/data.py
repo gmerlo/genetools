@@ -93,6 +93,12 @@ MOM_VARS_3D = ["n", "u_par", "T_par", "T_per", "Gamma_es", "Gamma_em",
 #: ``vsp_label`` from GENE-3D's ``diag_3d.F90``.
 VSP_VARS_3D = ["G_es", "G_em", "Q_ese", "Q_eme", "<f_>"]
 
+#: GENE's velocity-space datasets (`diag_vsp.F90` vsp_label). The same five
+#: quantities and the same `(nz0, nv0, nw0, n_spec)` array as GENE-3D; only the
+#: two electromagnetic heat-flux names differ. Discovered from the file in
+#: practice, so this is the canonical order, not a requirement.
+VSP_VARS = ["G_es", "G_em", "Q_es", "Q_em", "<f_>"]
+
 #: ``srcmom_label_1`` x ``srcmom_label_2`` from GENE-3D's ``diag_3d.F90``.
 #: Six entries — GENE-3D writes no ``f0_term_*`` source moments.
 SRCMOM_VARS_3D = [f"{a}_{b}" for a in ("ck_heat", "ck_part")
@@ -113,7 +119,7 @@ def canonical_vars(file_type: str, is_3d: bool) -> list:
     if file_type == "mom":
         return MOM_VARS_3D if is_3d else MOM_VARS
     if file_type == "vsp":
-        return VSP_VARS_3D
+        return VSP_VARS_3D if is_3d else VSP_VARS
     if file_type == "srcmom":
         return SRCMOM_VARS_3D if is_3d else SRCMOM_VARS
     return []

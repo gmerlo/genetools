@@ -171,7 +171,13 @@ class SrcMom(RunDiagnostic):
 
 class VspSlice(RunDiagnostic):
     """
-    GENE-3D velocity-space output on the ``(z, v_par, mu)`` grid.
+    Velocity-space output on the ``(z, v_par, mu)`` grid.
+
+    Every geometry: GENE and GENE-3D write the same five quantities as the same
+    ``(nz0, nv0, nw0, n_spec)`` array, and `diag_vsp.F90` puts no restriction on
+    the geometry. Only two names differ — GENE's ``Q_es``/``Q_em`` are
+    ``Q_ese``/``Q_eme`` in GENE-3D — and `H5Reader` discovers them from the file,
+    so there is nothing to branch on.
 
     Parameters
     ----------
@@ -182,7 +188,6 @@ class VspSlice(RunDiagnostic):
     """
 
     name = "vsp"
-    supported = ("xy_global",)
 
     def __init__(self, run, z_index=None):
         super().__init__(run)
@@ -190,10 +195,31 @@ class VspSlice(RunDiagnostic):
         self._cache = {}
 
     def _reader(self):
+        """
+        Reader for the velocity-space file.
+
+        HDF5 only. GENE's ``write_std`` form is one unformatted record per
+        snapshot holding the whole five-dimensional array, which is not the
+        layout `BinaryReader` decodes, so such a run is reported rather than
+        misparsed — see :meth:`compute`.
+        """
         from genetools.io.data import H5Reader
         ext = self.run.extensions[0]
         return H5Reader("vsp", self.run._folder, ext + ".h5",
                         self.run.params.get(0))
+
+    def _explain_missing(self, exc):
+        """Raise a message that says which form is present, if any."""
+        folder = pathlib.Path(self.run._folder)
+        ext = self.run.extensions[0]
+        if (folder / f"vsp{ext}").exists():
+            raise FileNotFoundError(
+                f"Velocity space exists only as Fortran-unformatted "
+                f"'vsp{ext}' in {self.run.path}; only the HDF5 form is "
+                "readable. Rerun with write_h5 = T.") from exc
+        raise FileNotFoundError(
+            f"No vsp{ext}.h5 in {self.run.path}. It is written when "
+            "istep_vsp > 0.") from exc
 
     def compute(self, t=None):
         """Read every velocity-space quantity over the requested window."""
@@ -201,8 +227,11 @@ class VspSlice(RunDiagnostic):
         if key in self._cache:
             return self._cache[key]
 
-        reader = self._reader()
-        _, idx = self._indices(reader, t)
+        try:
+            reader = self._reader()
+            _, idx = self._indices(reader, t)
+        except (OSError, KeyError) as exc:
+            self._explain_missing(exc)
 
         labels = list(reader.var_names)
         stacks = {v: [] for v in labels}

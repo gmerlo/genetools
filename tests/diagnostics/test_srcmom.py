@@ -13,7 +13,7 @@ import pytest
 
 from genetools.diagnostics import SrcMom
 from genetools.run import Run
-from tests.xglobal_fixture import (SRCMOM_LABELS, make_xglobal_run,
+from tests.gene_fixture import (SRCMOM_LABELS, make_xglobal_run,
                                    write_srcmom)
 
 

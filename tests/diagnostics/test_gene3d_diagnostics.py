@@ -15,6 +15,7 @@ from genetools.diagnostics import _gene3d as c
 from genetools.diagnostics._base import CachingDiagnostic, RunDiagnostic
 from genetools.run import Run
 from tests.gene3d_fixture import make_gene3d_run
+from tests.gene_fixture import make_fluxtube_run
 
 
 @pytest.fixture
@@ -820,80 +821,13 @@ class TestTracesAndDerived:
 
 class TestAuxiliary:
 
-    @staticmethod
-    def _flux_tube_run(folder):
-        """
-        A flux-tube run with a real geometry file.
-
-        `MINIMAL_PARAMS` has no `&geometry` namelist, so it is only good for
-        checking that a GENE-3D-only diagnostic refuses — loading a geometry
-        from it raises. This writes the synthetic tracer_efit file the io tests
-        use, so the coefficients are genuinely 1-D.
-        """
-        import textwrap
-        folder.mkdir(parents=True, exist_ok=True)
-        nz = 16
-        (folder / "parameters").write_text(textwrap.dedent(f"""\
-            &general
-             x_local = T
-             y_local = T
-            /
-            &box
-             nx0 = 4
-             nky0 = 2
-             nz0 = {nz}
-             lx = 1.0
-             kymin = 0.1
-             nv0 = 4
-             nw0 = 2
-             lv = 3.0
-             lw = 9.0
-            /
-            &geometry
-             magn_geometry = 'tracer_efit'
-             n_pol = 1
-             edge_opt = 0
-            /
-            &species
-             name = 'ions'
-             omt = 6.0
-             omn = 2.0
-             mass = 1.0
-             charge = 1
-             temp = 1.0
-             dens = 1.0
-            /
-            &units
-             Lref = 1.0
-             Tref = 1.0
-             nref = 1.0
-             mref = 2.0
-             Bref = 2.0
-            /
-            """))
-        (folder / "nrg").touch()
-        rng = np.random.default_rng(0)
-        data = rng.uniform(0.5, 1.5, size=(nz, 16))
-        rows = "\n".join("  ".join(f"{v:.8e}" for v in row) for row in data)
-        (folder / "tracer_efit").write_text(
-            "&tracer_efit\n q0=1.4\n shat=0.8\n trpeps=0.18\n"
-            " cxy=0.5\n cy=1.0\n/\n" + rows + "\n")
-        return Run(folder, ext=[""])
-
-    def test_geometry_dataset_has_the_three_dimensional_terms(self, run3d):
-        _, run = run3d
-        ds = g3.GeometryPlots(run).dataset()
-        assert ds["gxx"].dims == ("x", "y", "z")
-        assert ds["K_x"].dims == ("x", "y", "z")
-        assert ds["q"].dims == ("x",)
-
     def test_geometry_works_for_a_flux_tube(self, tmp_path, headless):
         """
         Coefficients are (nz,) for a flux tube, (nx, nz) x-global and
         (nx, ny, nz) for GENE-3D. The diagnostic dispatches on that rank, so it
         is no longer GENE-3D-only — it used to require ndim == 3 and refuse.
         """
-        run = self._flux_tube_run(tmp_path / "ft")
+        run = Run(make_fluxtube_run(tmp_path / "ft"))
         assert run.geometry_kind == "flux_tube"
         gp = run.geometry_plots
         assert gp.ndim == 1
@@ -908,7 +842,7 @@ class TestAuxiliary:
         invisible before: `_LABELS` had no entry for local shear, and the shape
         arrays were never read at all.
         """
-        gp = self._flux_tube_run(tmp_path / "ft").geometry_plots
+        gp = Run(make_fluxtube_run(tmp_path / "ft")).geometry_plots
         assert "sloc" in gp._fields()
         assert set(gp._shape_arrays()) >= {"gR", "gZ"}
         titles = [f._suptitle.get_text() for f in gp.plot(which="surface")]
@@ -917,7 +851,7 @@ class TestAuxiliary:
     def test_detail_is_skipped_when_there_is_only_a_z_axis(self, tmp_path,
                                                            headless):
         """A 1-D coefficient has no cuts to take; the overview is the curve."""
-        gp = self._flux_tube_run(tmp_path / "ft").geometry_plots
+        gp = Run(make_fluxtube_run(tmp_path / "ft")).geometry_plots
         assert len(gp.plot(which="detail")) == 0
 
     def test_geometry_views_are_validated(self, run3d):
@@ -1070,7 +1004,9 @@ class TestFacade:
     # srcmom is not here: it is a *global* diagnostic, not a GENE-3D one, and
     # its flux-tube refusal is covered in test_srcmom.py with the reason GENE
     # itself gives.
-    @pytest.mark.parametrize("name", ["gam", "chi", "omega", "vsp"])
+    # srcmom and vsp are not here: both are written for regular-GENE runs too,
+    # and are covered in test_srcmom.py / test_vsp.py.
+    @pytest.mark.parametrize("name", ["gam", "chi", "omega"])
     def test_gene3d_only_properties_refuse_elsewhere(self, tmp_path, name):
         from tests.conftest import MINIMAL_PARAMS
         (tmp_path / "parameters").write_text(MINIMAL_PARAMS)
