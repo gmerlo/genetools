@@ -316,45 +316,83 @@ class TestAmplitude3D:
 
 
 # ---------------------------------------------------------------------------
-# Slices and contours
+# Contours
 # ---------------------------------------------------------------------------
 
-class TestSlices3D:
+class TestContourReductions3D:
+    """
+    The reduction engine, which used to be a separate ``Slices`` diagnostic.
 
-    def test_every_reduction_is_produced(self, run3d):
+    ``Contours`` draws the ``xy``/``xz`` pair by default; every other projection
+    is reachable through ``reductions``, so nothing the old class offered is out
+    of reach.
+    """
+
+    def test_every_reduction_is_available(self, run3d):
         _, run = run3d
-        ds = g3.Slices(run, quantities=("phi",)).dataset()
+        ds = g3.Contours(run).dataset(reductions="all")
         for red in ("xy", "xz", "yz", "x", "y", "z"):
             assert f"phi_{red}" in ds
 
+    def test_reductions_are_validated(self, run3d):
+        _, run = run3d
+        with pytest.raises(ValueError, match="unknown reduction"):
+            g3.Contours(run).dataset(reductions=("xq",))
+
+    def test_unknown_option_is_named(self, run3d):
+        """A typo must not be swallowed as an unused keyword."""
+        _, run = run3d
+        with pytest.raises(TypeError, match="zlmi"):
+            g3.Contours(run).dataset(zlmi=(0.0, 0.0))
+
+    def test_line_reduction_is_one_dimensional(self, run3d):
+        _, run = run3d
+        ds = g3.Contours(run).dataset(reductions=("x",))
+        assert ds["phi_x"].dims == ("time", "x")
+
     def test_plane_values_are_plain_means(self, run3d):
+        """Not Jacobian-weighted: a cut is a picture of the field on the grid."""
         g, run = run3d
-        ds = g3.Slices(run, quantities=("phi",)).dataset()
+        z = np.asarray(run.coords[0]["z"])
+        ds = g3.Contours(run).dataset(zlim=(z[0], z[-1]))
         expected = g.fields["phi"][0].astype(np.float32).mean(axis=2)
         assert np.allclose(np.asarray(ds["phi_xy"].isel(time=0)), expected,
                            rtol=1e-5)
 
     def test_fourier_view_renames_the_axis(self, run3d):
         _, run = run3d
-        ds = g3.Slices(run, quantities=("phi",), y_fourier=True).dataset()
+        ds = g3.Contours(run).dataset(y_fourier=True)
         assert "ky" in ds["phi_xy"].dims
         assert "y" not in ds["phi_xy"].dims
 
     def test_time_average_drops_the_time_axis(self, run3d):
         _, run = run3d
-        ds = g3.Slices(run, quantities=("phi",), t_avg=True).dataset()
+        ds = g3.Contours(run).dataset(t_avg=True)
         assert "time" not in ds["phi_xy"].dims
 
     def test_moment_quantities_come_from_the_species_file(self, run3d):
         _, run = run3d
-        ds = g3.Slices(run, quantities=("Q_es",), species="electrons").dataset()
+        ds = g3.Contours(run).dataset(quantities=("Q_es",),
+                                      species="electrons")
         assert ds.attrs["species"] == "electrons"
         assert "Q_es_xy" in ds
 
     def test_unknown_quantity_lists_what_is_available(self, run3d):
         _, run = run3d
         with pytest.raises(KeyError, match="phi"):
-            g3.Slices(run, quantities=("nonsense",)).compute()
+            g3.Contours(run).compute(quantities=("nonsense",))
+
+    def test_one_streaming_pass_serves_any_reduction(self, run3d):
+        """
+        ``compute`` builds all six regardless, so asking for more reductions
+        after the first call must not re-read the file.
+        """
+        _, run = run3d
+        diag = g3.Contours(run)
+        diag.dataset()
+        n_cached = len(diag._cache)
+        diag.dataset(reductions="all")
+        assert len(diag._cache) == n_cached
 
     def test_contours_gives_the_xy_and_xz_cuts(self, run3d):
         _, run = run3d
@@ -732,7 +770,7 @@ class TestFacade:
         assert isinstance(getattr(run, name), cls)
 
     @pytest.mark.parametrize("name, cls", [
-        ("slices", g3.Slices), ("timetraces", g3.TimeTraces),
+        ("timetraces", g3.TimeTraces),
         ("planes", g3.Planes), ("vis3d", g3.Vis),
     ])
     def test_callables_resolve_to_the_merged_class(self, run3d, name, cls):
@@ -785,10 +823,15 @@ class TestPlots:
         getattr(run, name).plot()
 
     @pytest.mark.parametrize("name, kw", [
-        ("slices", {"quantities": ("phi",)}),
         ("timetraces", {"quantities": ("phi",)}),
         ("planes", {"quantities": ("phi",), "n_theta": 16, "n_phi": 8}),
     ])
     def test_callable_plots_run(self, run3d, headless, name, kw):
         _, run = run3d
         getattr(run, name)(**kw).plot()
+
+    @pytest.mark.parametrize("reductions", ["all", ("yz",), ("x", "z")])
+    def test_contour_reductions_plot(self, run3d, headless, reductions):
+        """Planes and 1-D lines both draw, whichever mix is asked for."""
+        _, run = run3d
+        run.contours.plot(reductions=reductions)

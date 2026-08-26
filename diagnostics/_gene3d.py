@@ -155,6 +155,38 @@ def xz_average(var: np.ndarray, J: np.ndarray, xslice=slice(None)):
     weights = jacobian_yz(J)[xslice]
     return np.average(var[xslice], weights=weights, axis=(0, 2))
 
+def index_window(values, limits, n=None) -> slice:
+    """
+    Return the index slice of *values* covering *limits*, inclusive.
+
+    The nearest grid point to each bound is used. Equal bounds select that one
+    point rather than widening to two: asking for the plane at ``z = 0`` must not
+    average in a neighbour.
+
+    Parameters
+    ----------
+    values : array
+        Monotonic coordinate grid.
+    limits : (float, float) or None
+        Inclusive bounds in the units of *values*. ``None`` selects everything.
+    n : int, optional
+        Expected length of the axis being sliced. When given and it disagrees
+        with ``len(values)`` the whole axis is returned, so a window in a real
+        coordinate is ignored rather than misapplied to a transformed axis.
+    """
+    if limits is None:
+        return slice(None)
+    arr = np.asarray(values, dtype=float)
+    if n is not None and arr.size != n:
+        return slice(None)
+    lo, hi = float(limits[0]), float(limits[1])
+    i0 = int(np.argmin(np.abs(arr - lo)))
+    i1 = int(np.argmin(np.abs(arr - hi)))
+    if i1 < i0:
+        i0, i1 = i1, i0
+    return slice(i0, i1 + 1)
+
+
 def radial_slice(x_o_a, limits=None, buffer_frac=None) -> slice:
     """
     Return a radial slice from *limits* in ``x/a``, or an inner-region fraction.
@@ -173,13 +205,7 @@ def radial_slice(x_o_a, limits=None, buffer_frac=None) -> slice:
     x = np.asarray(x_o_a, dtype=float)
     n = x.size
     if limits is not None:
-        lo, hi = float(limits[0]), float(limits[1])
-        i0 = int(np.argmin(np.abs(x - lo)))
-        i1 = int(np.argmin(np.abs(x - hi)))
-        if i1 < i0:
-            i0, i1 = i1, i0
-        # Equal bounds select the single nearest point rather than widening.
-        return slice(i0, i1 + 1)
+        return index_window(x, limits)
     if buffer_frac:
         cut = int(n * float(buffer_frac))
         if 2 * cut < n:

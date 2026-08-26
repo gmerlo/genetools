@@ -82,10 +82,6 @@ class Vis(RunDiagnostic):
         return (np.asarray(cart["x"]), np.asarray(cart["y"]),
                 np.asarray(cart["z"]))
 
-    def _sources(self):
-        from genetools.diagnostics.slices import Slices
-        return Slices(self.run, quantities=self.quantities,
-                        species=self.species)._sources()
 
     def compute(self, t=None):
         """Read the requested snapshots, returning them keyed by variable."""
@@ -95,7 +91,8 @@ class Vis(RunDiagnostic):
                if self.xlim else slice(None))
 
         frames, times = {}, None
-        for reader, names in self._sources():
+        for reader, names in self._sources(self.quantities,
+                                        self.species):
             _, idx = self._indices(reader, t)
             slots = {n: reader.index_of(n) for n in names}
             acc = {n: [] for n in names}

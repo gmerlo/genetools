@@ -416,6 +416,31 @@ class RunDiagnostic(CachingDiagnostic):
                 f"in the requested window (per-file ranges: {spans})")
         return np.asarray(common), {id(r): idx for r, idx in zip(readers, index_of)}
 
+    def _sources(self, quantities, species=None):
+        """
+        Map each requested quantity to the reader that holds it.
+
+        Returns ``[(reader, [names...]), ...]`` — grouped per reader so each file
+        is streamed once however many of its variables were asked for. The field
+        file wins a name collision, which is what the field/moment split gives
+        anyway.
+        """
+        fld = self.run.field
+        mom = self.run.mom(species) if species else None
+        out = {}
+        for name in quantities:
+            if name in fld.var_names:
+                out.setdefault(id(fld), (fld, []))[1].append(name)
+            elif mom is not None and name in mom.var_names:
+                out.setdefault(id(mom), (mom, []))[1].append(name)
+            else:
+                available = list(fld.var_names) + (
+                    list(mom.var_names) if mom is not None else [])
+                raise KeyError(
+                    f"unknown quantity {name!r}; available: "
+                    f"{', '.join(available)}")
+        return list(out.values())
+
     @staticmethod
     def _t_average(da):
         """

@@ -19,7 +19,7 @@ Examples
 GENE-3D runs use the same flags, plus a few of their own:
 
     genetools /run3d --fluxes2d --si
-    genetools /run3d --slices --quantities phi n --fourier y
+    genetools /run3d --contours --quantities phi n --fourier y
     genetools /run3d --chi --t 200 800
     genetools /run3d --planes --quantities phi
 
@@ -48,7 +48,6 @@ DIAGNOSTICS = {
     "vexmax": "vexmax",
     "profile_diag": "profile_diag",
     # GENE-3D only
-    "slices": "slices",
     "timetraces": "timetraces",
     "gam": "gam",
     "chi": "chi",
@@ -63,14 +62,13 @@ DIAGNOSTICS = {
 #: Accessors that must be called before use, and the argument they take.
 PARAMETRIZED = {
     "ballooning": "ky",
-    "slices": "quantities",
     "timetraces": "quantities",
     "planes": "quantities",
     "vis3d": "quantities",
 }
 
 #: Flags that only exist for GENE-3D runs, for a clearer error message.
-GENE3D_ONLY = ("slices", "timetraces", "gam", "chi", "omega", "geometry",
+GENE3D_ONLY = ("timetraces", "gam", "chi", "omega", "geometry",
                "srcmom", "vsp", "planes", "vis3d")
 
 
@@ -112,17 +110,21 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Inverse FFT axes (contours); omit for spectral view.")
     p.add_argument("--quantities", nargs="+", default=None,
                    help="Variable names, e.g. phi n Q_es (GENE-3D "
-                        "slices/timetraces/contours/planes/vis3d).")
+                        "contours/timetraces/planes/vis3d).")
     p.add_argument("--xlim", nargs=2, type=float, default=None,
                    metavar=("LO", "HI"),
                    help="Radial window in x/a (GENE-3D).")
     p.add_argument("--fourier", default=None, choices=["x", "y", "xy"],
                    help="View these directions in Fourier space (GENE-3D "
-                        "slices/contours).")
+                        "contours).")
     p.add_argument("--si", action="store_true",
                    help="Plot SI-converted values where available.")
     p.add_argument("--t-avg", action="store_true",
-                   help="Average over the time window (GENE-3D slices).")
+                   help="Average over the time window (GENE-3D contours).")
+    p.add_argument("--reductions", nargs="+", default=None,
+                   metavar="RED",
+                   help="Contour reductions to draw: any of xy xz yz x y z, "
+                        "or all (GENE-3D; default xy xz).")
     return p
 
 
@@ -134,7 +136,7 @@ def _selected_diagnostic(args) -> str:
 
 
 def _construct_kwargs(name: str, args) -> dict:
-    """Arguments for a parametrized accessor, e.g. ``run.slices(...)``."""
+    """Arguments for a parametrized accessor, e.g. ``run.ballooning(...)``."""
     kw = {}
     if name == "ballooning":
         kw["ky"] = args.ky
@@ -145,12 +147,6 @@ def _construct_kwargs(name: str, args) -> dict:
         kw["species"] = args.species[0]
     if args.xlim:
         kw["xlim"] = tuple(args.xlim)
-    if name == "slices":
-        if args.fourier:
-            kw["x_fourier"] = "x" in args.fourier
-            kw["y_fourier"] = "y" in args.fourier
-        if args.t_avg:
-            kw["t_avg"] = True
     return kw
 
 
@@ -167,6 +163,14 @@ def _plot_kwargs(name: str, args, is_3d: bool) -> dict:
             if args.fourier:
                 kw["x_fourier"] = "x" in args.fourier
                 kw["y_fourier"] = "y" in args.fourier
+            if args.xlim:
+                kw["xlim"] = tuple(args.xlim)
+            if args.t_avg:
+                kw["t_avg"] = True
+            if args.reductions:
+                kw["reductions"] = (
+                    "all" if args.reductions == ["all"]
+                    else tuple(args.reductions))
         else:
             kw["field"] = args.field
             kw["ifft"] = args.ifft

@@ -49,32 +49,24 @@ class TimeTraces(RunDiagnostic):
 
     # ------------------------------------------------------------------
 
-    def _sources(self):
-        from genetools.diagnostics.slices import Slices
-        probe = Slices(self.run, quantities=self.quantities,
-                         species=self.species)
-        return probe._sources()
-
     def compute(self, t=None):
         """Stream the requested variables and accumulate both trace kinds."""
         key = tuple(t) if isinstance(t, (tuple, list)) else t
         if key in self._cache:
             return self._cache[key]
 
-        from genetools.diagnostics.slices import _index_window
-
         run = self.run
         J = run.geometry[0]["Jacobian"]
         J_yz = g3.jacobian_yz(J)
         coord = run.coords[0]
         nx, ny, nz = J.shape
-        xsl = (g3.radial_slice(coord["x_o_a"], limits=self.xlim)
-               if self.xlim else slice(None))
-        ysl = _index_window(coord["y"], self.ylim, ny)
-        zsl = _index_window(coord["z"], self.zlim, nz)
+        xsl = g3.index_window(coord["x_o_a"], self.xlim, nx)
+        ysl = g3.index_window(coord["y"], self.ylim, ny)
+        zsl = g3.index_window(coord["z"], self.zlim, nz)
 
         traces, ky_traces, times = {}, {}, None
-        for reader, names in self._sources():
+        for reader, names in self._sources(self.quantities,
+                                        self.species):
             _, idx = self._indices(reader, t)
             slots = {n: reader.index_of(n) for n in names}
             acc = {n: [] for n in names}

@@ -38,7 +38,7 @@ rather than merely plausible.
 ## Architecture
 
 ### High-level layer (the recommended entry point)
-- **`run.py`** — `Run` facade: `Run(path, ext=None)` auto-wires `set_runs` → `Params` → `Geometry`/`Coordinates` and lazily builds multi-segment readers. Every diagnostic is a lazy attribute (`run.nrg`, `run.spectra`, `run.profiles`, `run.fluxes2d`, `run.shearing`, `run.contours`, `run.growthrate`, `run.amplitude`, `run.zonal`, `run.profile_diag`, `run.gam`, `run.chi`, `run.omega`, `run.geometry_plots`, `run.srcmom`, `run.vsp`) or a callable where it needs arguments (`run.ballooning(ky=...)`, `run.slices(...)`, `run.timetraces(...)`, `run.planes(...)`, `run.vis3d(...)`). Each accessor just constructs the one class for that diagnostic — the class handles the geometry, so `run.spectra.plot()` means the same thing whatever the run is. `run.geometry_kind` / `run.is_3d` report which geometry. Validates grid consistency across continuation segments (warns on mismatch; assumes same grid). Every diagnostic offers `.data` (xarray), `.plot(t=(start,stop))`, `.save()`.
+- **`run.py`** — `Run` facade: `Run(path, ext=None)` auto-wires `set_runs` → `Params` → `Geometry`/`Coordinates` and lazily builds multi-segment readers. Every diagnostic is a lazy attribute (`run.nrg`, `run.spectra`, `run.profiles`, `run.fluxes2d`, `run.shearing`, `run.contours`, `run.growthrate`, `run.amplitude`, `run.zonal`, `run.profile_diag`, `run.gam`, `run.chi`, `run.omega`, `run.geometry_plots`, `run.srcmom`, `run.vsp`) or a callable where it needs arguments (`run.ballooning(ky=...)`, `run.timetraces(...)`, `run.planes(...)`, `run.vis3d(...)`). Each accessor just constructs the one class for that diagnostic — the class handles the geometry, so `run.spectra.plot()` means the same thing whatever the run is. `run.geometry_kind` / `run.is_3d` report which geometry. Validates grid consistency across continuation segments (warns on mismatch; assumes same grid). Every diagnostic offers `.data` (xarray), `.plot(t=(start,stop))`, `.save()`.
 
   The one exception is `run.nrg`, which still goes through a thin `_BoundNrg` wrapper: `NrgReader` is a folder-based ASCII reader with no geometry branching, so it was left as-is.
 - **`_xr.py`** — small explicit helpers for building labelled `xarray.Dataset`s (`stacked_vars` for species-dim stacking, `attach_coords` for length-matched coord attachment, `make_dataset`, `unit_attrs`, `split_species`). Each diagnostic owns its xarray construction: `NrgReader.dataset(params)` and `Spectra`/`SpectraGlobal`/`Profiles`/`Fluxes2D`/`ShearingRate.dataset(coords, params, species, …)` build their Datasets with explicit dims. The compute stays numpy; xarray is the return layer.
@@ -76,7 +76,8 @@ rather than re-implementing it in a diagnostic:
   field snapshot with moments from another time.
   `RunDiagnostic`: the Run-native surface every diagnostic inherits — `run`,
   `params`/`coord`/`geom`/`geometry_kind`/`is_3d` shortcuts, `_window`/`_bounds`/
-  `_key`/`_indices`, `_common_indices`, `_require`, `_t_average`, and
+  `_key`/`_indices`, `_common_indices`, `_sources` (which reader holds a
+  named variable), `_require`, `_t_average`, and
   `.data`/`.save()`. **When a diagnostic reads more than one file per time step
   (all species' moments, say), use `_common_indices`, not `_indices` per file.**
   GENE-3D writes `mom_<species>` one species at a time, so a running or
@@ -91,14 +92,15 @@ rather than re-implementing it in a diagnostic:
 - **`_gene3d.py`** — GENE-3D-specific physics only: `flux_geomfac`,
   `exb_velocity_ky`, `flutter_velocity_ky`, `check_flux_consistency`,
   `to_ky`/`to_kx`, `flux_surface_average`, `xz_average`, `jacobian_yz`,
-  `radial_slice`.
+  `index_window` (the one coordinate-window helper; `radial_slice` wraps it and
+  adds the `buffer_frac` trim).
 
 Diagnostics available for every geometry:
 
 - **`nrg.py`** — `NrgReader`: energy/flux time traces (reads `nrg` directly)
 - **`spectra.py`** — `Spectra`: flux spectra. Flux tube = kx/ky/z spectra with Hermitian ky weighting; x-global delegates to `spectra_global.SpectraGlobal` (its HDF5 cache schema differs enough to keep separate, but `Spectra` owns the facade); GENE-3D rebuilds ky spectra from φ and the moments and cross-checks them against the fluxes the code wrote itself (`.consistency`)
 - **`spectra_global.py`** — `SpectraGlobal`: the x-global `(x, ky)` implementation behind `Spectra`
-- **`contours.py`** — `Contours`: 2-D slices; spectral paths stream/draw/discard (usable on field files larger than memory), GENE-3D reuses `slices.Slices`. Defaults to two cuts — `xy` at the grid point nearest `z=0` and `xz` at `y=0`, both with `x` horizontal — **not** a z-average, which smears the outboard and inboard sides of a global run together. `zlim`/`ylim` override and are not sticky between calls
+- **`contours.py`** — `Contours`: **every** projection of a snapshot — the three planes (`xy`, `xz`, `yz`) and the three 1-D lines (`x`, `y`, `z`), picked with `reductions=` (default `("xy", "xz")`, `"all"` for the lot). This absorbed the former `slices.py`. Spectral paths stream/draw/discard (usable on field files larger than memory) and are plot-only, which is why they have no `.dataset()`. **Every dropped coordinate is cut at the grid point nearest zero, not averaged** — so `xy` is the plane at `z=0` and `xz` at `y=0` — because a bare z-average smears the outboard and inboard sides of a global run together; pass `xlim`/`ylim`/`zlim` to average over a range instead. Options are per-call and never sticky: selection happens in `compute`/`dataset`/`plot`, not in `__init__`
 - **`shearingrate.py`** — `ShearingRate`: zonal potential, v_ExB, ω_ExB. GENE-3D uses `C_xy` only — the `1/sqrt(g^xx)` of `flux_geomfac` belongs to a flux, not a flow
 - **`profiles.py`** — `Profiles`: flux-surface-averaged radial profiles; GENE-3D builds the total profile as `temp*(temp_prof + rhostar*minor_r*<T>_FS)` — in **T_ref** units, matching GENE-3D's own `profile_<species>`, which writes `spec%temp*(...)`. Two factors to get right: omitting `rhostar*minor_r` overstates the perturbation by `1/rhostar`, and normalising to the *species* temperature instead of `T_ref` leaves the dataset and its SI conversion a factor `temp` off. `compare_with_code()` checks both — but only on a run where some species has `temp != 1`
 - **`fluxes2d.py`** — `Fluxes2D`: x-resolved fluxes. Spectral paths reconstruct from φ; GENE-3D reads its own `Gamma_*`/`Q_*` from the moment file, and the integration area follows `norm_flux_projection`. `plot()` draws three figures — gyro-Bohm profiles, SI profiles, and the `(x, t)` map. Each profile panel shows the total (solid) with its ES (dashed) and EM (dotted) parts, colour per species; `components=False` for totals alone. **Time-average with `_t_average` (trapezoidal), never `.mean("time")`**: GENE's dt is adaptive and output is every `istep_mom` *steps*, so output times are unevenly spaced and a plain mean is biased by tens of percent
@@ -110,7 +112,6 @@ Diagnostics available for every geometry:
 
 GENE-3D-only for now (each declares `supported = ("xy_global",)`):
 
-- **`slices.py`** — `Slices`: every 1-D/2-D reduction, optionally in Fourier space
 - **`timetraces.py`** — `TimeTraces`: volume-averaged and ky-resolved traces
 - **`gam.py`** — `Gam`: zonal-flow oscillation; refuses when there is no zonal component above round-off rather than fitting a frequency to noise
 - **`chi.py`** — `ChiGradient`: χ vs. the self-consistent driving gradient; reuses `Fluxes2D` and `Profiles` so all three agree on normalisation

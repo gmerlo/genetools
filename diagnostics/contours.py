@@ -3,39 +3,77 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 """
-contours.py — Streaming 2D slice plotter for GENE field and moment data.
+contours.py — 2-D cuts and 1-D line profiles of GENE field and moment data.
 
-Design for large arrays (up to 1536 x 700 x 128)
---------------------------------------------------
-1.  Slice before IFFT — extract z-slice (XY) or ky-slice (XZ) from the
-    3D array before any transform.  All IFFTs operate on 2D arrays.
-2.  irfft instead of mirror+ifft — avoids the Hermitian mirror allocation
-    and returns a real array directly.
-3.  No unnecessary copies — mode filters applied to 2D slice copy only.
-4.  float32 downcast before IFFT — halves memory, sufficient for plotting.
-5.  stream_selected_with_seg — buffers at most one result at a time.
+One class covers every geometry and every projection of a snapshot: the three
+2-D planes (``xy``, ``xz``, ``yz``) and the three 1-D lines (``x``, ``y``,
+``z``). Which ones you get is the ``reductions`` argument; the default is the
+two cuts almost always wanted, ``xy`` and ``xz``.
 
-Axis selection
+Cut, not average
+----------------
+Every coordinate a reduction drops is held at the grid point nearest zero unless
+you pass ``xlim``/``ylim``/``zlim``, in which case it is averaged over that
+range. So ``xy`` defaults to the plane at ``z = 0`` (the outboard midplane on a
+standard grid) and ``xz`` to the plane at ``y = 0``. A bare average over the
+whole of ``z`` would smear the outboard and inboard sides of a global run
+together, which is why it is not the default. ``zlim=(z[0], z[-1])`` asks for it
+explicitly.
+
+Averages are plain means, not Jacobian-weighted: a cut is a picture of the field
+on the grid, and weighting it by the volume element would show the metric as
+much as the turbulence. The flux and profile diagnostics, which do need the
+volume element, weight explicitly.
+
+Geometry paths
 --------------
-When coords is provided axes show physical units:
+GENE-3D is real space in x and y, so a reduction is a slice-and-mean of the
+stored array and either horizontal direction can be viewed in Fourier space
+instead (``x_fourier``, ``y_fourier``).
+
+The spectral geometries are plot-only and stream: slice the 3-D array *before*
+any transform, so every IFFT runs on a 2-D array; use ``irfft`` rather than a
+Hermitian mirror; downcast to float32 first; and buffer one snapshot at a time.
+That is what makes them usable on field files larger than memory (up to
+1536 x 700 x 128), and it is also why they have no ``.dataset()`` — the frames
+are drawn and discarded. Axes show physical units when coordinates are
+available:
+
   x-axis XY: x  if IFFT along x (or global),  kx otherwise
   y-axis XY: y  if IFFT along y,               ky otherwise
   y-axis XZ: same rule as XY x-axis
   x-axis XZ: z always
 
-iy always indexes the stored ky dimension (before y-transform).
+``iy`` always indexes the stored ky dimension, before any y-transform.
 """
+
+from collections import namedtuple
 
 import numpy as np
 import matplotlib.pyplot as plt
 
+from genetools._xr import make_dataset, unit_attrs
 from genetools.diagnostics._base import RunDiagnostic
+from genetools.diagnostics import _gene3d as c
 
-#: Axis labels shared with the slice diagnostic.
+#: 2-D planes -> the array axis averaged (or cut) away.
+_PLANES = {"xy": 2, "xz": 1, "yz": 0}
+#: 1-D lines -> the two array axes averaged (or cut) away.
+_LINES = {"x": (1, 2), "y": (0, 2), "z": (0, 1)}
+#: Every reduction, planes first.
+_ALL = tuple(_PLANES) + tuple(_LINES)
+#: The two cuts drawn unless asked otherwise.
+_DEFAULT_REDUCTIONS = ("xy", "xz")
+
 _AXIS_LABELS = {
     "x": r"$x/a$", "y": r"$y/\rho_{\rm ref}$", "z": r"$z/\pi$",
     "kx": r"$k_x \rho_{\rm ref}$", "ky": r"$k_y \rho_{\rm ref}$",
 }
+
+#: The reduction options, frozen so it can key the snapshot cache.
+_Selection = namedtuple(
+    "_Selection",
+    "quantities species x_fourier y_fourier square xlim ylim zlim t_avg")
 
 
 def _ifft_x_2d(f2d, nx):
@@ -50,14 +88,11 @@ def _irfft_y_2d(f2d, ny_full):
 
 class Contours(RunDiagnostic):
     """
-    Streaming 2-D slice plotter for GENE field and moment data.
+    2-D cuts and 1-D line profiles of GENE field and moment data.
 
-    For the spectral geometries this streams the ``(x, y)`` and ``(x, z)``
-    slices, inverse-transforming whichever perpendicular directions are
-    spectral. GENE-3D is already real space in both, so its contour is the
-    z-averaged ``xy`` plane and comes from
-    :class:`~genetools.diagnostics.slices.Slices`, which owns the reduction
-    machinery — this class just selects the ``xy`` product of it.
+    Selection happens at call time, not construction, so ``run.contours`` can
+    stay a plain attribute: every option below is a keyword to :meth:`compute`,
+    :meth:`dataset` or :meth:`plot`, and each call is independent of the last.
 
     Parameters
     ----------
@@ -65,6 +100,30 @@ class Contours(RunDiagnostic):
         ``None`` gives a detached instance exposing only the pure helpers.
     cmap : str, optional
         Matplotlib colormap (default 'bwr').
+
+    Call options (GENE-3D)
+    ----------------------
+    quantities : sequence of str
+        Variable names from the field or moment file. Default ``('phi',)``.
+    species : str
+        Species whose moment file supplies any moment quantities. Defaults to
+        the first species.
+    reductions : sequence of str or 'all'
+        Any of ``xy``, ``xz``, ``yz``, ``x``, ``y``, ``z``. Default
+        ``('xy', 'xz')``.
+    x_fourier, y_fourier : bool
+        View that direction in Fourier space (``|FFT|``).
+    square : bool
+        Reduce ``|f|^2`` rather than ``f``.
+    xlim, ylim, zlim : (float, float)
+        Average the dropped coordinate over this range instead of cutting at
+        zero. ``xlim`` is in ``x/a``, ``ylim`` in ``y/rho_ref``, ``zlim`` in
+        ``z``.
+    t_avg : bool
+        Average over time instead of keeping the time axis.
+    n_max : int
+        :meth:`plot` only — at most this many times are drawn, evenly spaced
+        through the window, so a long run does not open hundreds of axes.
     """
 
     name = "contours"
@@ -72,23 +131,18 @@ class Contours(RunDiagnostic):
     def __init__(self, run=None, cmap="bwr"):
         super().__init__(run)
         self.cmap = cmap
-        self._slices = None
-        self._slice_kw = {}
 
     # ------------------------------------------------------------------
-    # GENE-3D: delegate the reduction, keep the xy product
+    # Option handling
     # ------------------------------------------------------------------
-
-    #: Planes drawn, in order, and the coordinate each one holds fixed.
-    _PLANES = (("xy", "z"), ("xz", "y"))
 
     @staticmethod
     def _at(values, target=0.0):
         """
         Return equal bounds on the grid point of *values* nearest *target*.
 
-        Equal bounds make :func:`~genetools.diagnostics.slices._index_window`
-        pick exactly that index, so the plane is a slice and not an average.
+        Equal bounds make :func:`~genetools.diagnostics._gene3d.index_window`
+        pick exactly that index, so the reduction is a cut and not an average.
         """
         arr = np.asarray(values, dtype=float)
         if arr.size == 0:
@@ -96,60 +150,196 @@ class Contours(RunDiagnostic):
         v = float(arr[int(np.argmin(np.abs(arr - target)))])
         return (v, v)
 
-    def _reducer(self, kw):
+    def _select(self, kw):
         """
-        Return a :class:`~genetools.diagnostics.slices.Slices` for *kw*.
+        Build the frozen selection for *kw*, filling in the cut-at-zero defaults.
 
-        The defaults are the two cuts almost always wanted: ``xy`` at the
-        parallel position nearest ``z = 0`` (the outboard midplane on a standard
-        grid) and ``xz`` at ``y = 0``. A bare reduction averages over the whole
-        of ``z`` instead, which smears the outboard and inboard sides of a global
-        run together. Pass ``zlim``/``ylim`` to average over a range, or to cut
-        elsewhere.
-
-        Rebuilt only when the selection changes, so repeated plots of the same
-        thing reuse the streamed data.
+        Built from the defaults and *this* call's arguments only. Carrying the
+        previous call's arguments forward would make an earlier ``zlim`` leak
+        into a later plot that never asked for it.
         """
-        from genetools.diagnostics.slices import Slices
-        # Built from the defaults and *this* call's arguments only. Carrying the
-        # previous call's arguments forward would make an earlier `zlim` leak
-        # into a later plot that never asked for it — the cached reducer below
-        # is the only thing that persists.
-        merged = {"quantities": ("phi",)}
-        merged.update(kw)
-        merged.setdefault("zlim", self._at(self.coord["z"]))
-        merged.setdefault("ylim", self._at(self.coord["y"]))
-        if self._slices is None or merged != self._slice_kw:
-            self._slice_kw = merged
-            self._slices = Slices(self.run, **merged)
-        return self._slices
+        unknown = set(kw) - set(_Selection._fields)
+        if unknown:
+            raise TypeError(
+                f"unknown contour option(s) {sorted(unknown)}; "
+                f"expected any of {list(_Selection._fields)}")
+        coord = self.coord
+        return _Selection(
+            quantities=tuple(kw.get("quantities", ("phi",))),
+            species=kw.get("species") or (self.run.species[0]
+                                          if self.run.species else None),
+            x_fourier=bool(kw.get("x_fourier", False)),
+            y_fourier=bool(kw.get("y_fourier", False)),
+            square=bool(kw.get("square", False)),
+            xlim=kw.get("xlim"),
+            ylim=(kw["ylim"] if "ylim" in kw
+                  else self._at(coord["y"])),
+            zlim=(kw["zlim"] if "zlim" in kw
+                  else self._at(coord["z"])),
+            t_avg=bool(kw.get("t_avg", False)),
+        )
+
+    @staticmethod
+    def _reductions(value):
+        """Normalise the ``reductions`` argument to a validated tuple."""
+        if value is None:
+            return ()
+        if isinstance(value, str):
+            if value == "all":
+                return _ALL
+            value = (value,)
+        out = tuple(value)
+        bad = [r for r in out if r not in _ALL]
+        if bad:
+            raise ValueError(
+                f"unknown reduction(s) {bad}; expected any of {list(_ALL)}")
+        return out
+
+    def _split_kw(self, kw):
+        """Split the call keywords into ``(reductions, selection)``."""
+        kw = dict(kw)
+        reductions = self._reductions(
+            kw.pop("reductions", _DEFAULT_REDUCTIONS))
+        return reductions, self._select(kw)
+
+    @staticmethod
+    def _x_axis(sel):
+        return "kx" if sel.x_fourier else "x"
+
+    @staticmethod
+    def _y_axis(sel):
+        return "ky" if sel.y_fourier else "y"
+
+    # ------------------------------------------------------------------
+    # GENE-3D: the reduction engine
+    # ------------------------------------------------------------------
+
+    def _windows(self, sel, coord, shape):
+        """Index slices for the three coordinates, from the requested limits."""
+        nx, ny, nz = shape
+        return (c.index_window(coord["x_o_a"], sel.xlim, nx),
+                c.index_window(coord["y"], sel.ylim, ny),
+                c.index_window(coord["z"], sel.zlim, nz))
+
+    def _transform(self, sel, var):
+        """Apply the requested Fourier views, then ``|.|`` or ``|.|^2``."""
+        out = var
+        if sel.x_fourier:
+            out = np.fft.fftshift(np.abs(c.to_kx(out)), axes=0)
+        if sel.y_fourier:
+            out = np.fft.fftshift(np.abs(c.to_ky(out)), axes=1)
+        if sel.square:
+            out = np.abs(out) ** 2
+        return out
 
     def compute(self, t=None, **kw):
-        """GENE-3D only: stream and reduce, returning the raw reductions."""
+        """
+        GENE-3D only: stream the requested variables and build every reduction.
+
+        All six reductions are built — they are cheap means over an array already
+        in memory — so ``reductions`` only selects what :meth:`dataset` returns
+        and one streaming pass serves any choice of them.
+        """
         self._require("xy_global")
-        return self._reducer(kw).compute(t)
+        _, sel = self._split_kw(kw)
+        key = (self._key(t), sel)
+        if key in self._cache:
+            return self._cache[key]
+
+        coord = self.coord
+        acc, times = {}, None
+        for reader, names in self._sources(sel.quantities, sel.species):
+            _, idx = self._indices(reader, t)
+            slots = {n: reader.index_of(n) for n in names}
+            got = []
+            for time, arrays in reader.stream_selected(idx):
+                got.append(time)
+                for n in names:
+                    var = self._transform(sel, arrays[slots[n]])
+                    xsl, ysl, zsl = self._windows(sel, coord, var.shape)
+                    store = acc.setdefault(n, {})
+                    for plane, axis in _PLANES.items():
+                        sub = _apply(var, xsl, ysl, zsl, keep=plane)
+                        store.setdefault(plane, []).append(sub.mean(axis=axis))
+                    for line, axes in _LINES.items():
+                        sub = _apply(var, xsl, ysl, zsl, keep=line)
+                        store.setdefault(line, []).append(sub.mean(axis=axes))
+            if times is None:
+                times = np.asarray(got)
+
+        reduced = {}
+        for name, store in acc.items():
+            reduced[name] = {}
+            for red, stack in store.items():
+                arr = np.asarray(stack)
+                reduced[name][red] = (self._time_average(arr, times)
+                                      if sel.t_avg else arr)
+
+        result = {"reduced": reduced, "times": times, "coord": coord,
+                  "selection": sel}
+        self._cache[key] = result
+        return result
+
+    def _axis_values(self, sel, coord):
+        """Coordinate values for each named axis, honouring the Fourier views."""
+        return {
+            "x": (np.fft.fftshift(np.asarray(coord["kx"])) if sel.x_fourier
+                  else np.asarray(coord["x_o_a"])),
+            "y": (np.fft.fftshift(np.asarray(coord["ky"])) if sel.y_fourier
+                  else np.asarray(coord["y"])),
+            "z": np.asarray(coord["z"]),
+        }
 
     def dataset(self, t=None, **kw):
         """
-        GENE-3D only: the ``xy`` and ``xz`` cuts as an :class:`xarray.Dataset`.
+        GENE-3D only: the requested reductions as an :class:`xarray.Dataset`.
 
         The spectral paths are plot-only — they stream, draw and discard, which
         is what makes them usable on runs whose field file does not fit in
         memory.
         """
         self._require("xy_global")
-        ds = self._reducer(kw).dataset(t)
-        keep = [n for n in ds.data_vars
-                if any(n.endswith("_" + p) for p, _ in self._PLANES)]
-        return ds[keep]
+        reductions, sel = self._split_kw(kw)
+        raw = self.compute(t, **kw)
+        coord = raw["coord"]
+        axis_vals = self._axis_values(sel, coord)
+        rename = {"x": self._x_axis(sel), "y": self._y_axis(sel), "z": "z"}
+
+        data_vars, candidates = {}, {}
+        for name, store in raw["reduced"].items():
+            for red in reductions:
+                if red not in store:
+                    continue
+                dims = tuple(rename[ch] for ch in red)
+                if not sel.t_avg:
+                    dims = ("time",) + dims
+                data_vars[f"{name}_{red}"] = (dims, np.asarray(store[red]))
+        for ch, axis_name in rename.items():
+            candidates[axis_name] = axis_vals[ch]
+        if not sel.t_avg:
+            candidates["time"] = raw["times"]
+
+        params = self.params
+        ds = make_dataset(data_vars, candidates, params=params)
+        ds.attrs.update(unit_attrs(params))
+        ds.attrs["geometry_kind"] = self.geometry_kind
+        ds.attrs["x_fourier"] = int(sel.x_fourier)
+        ds.attrs["y_fourier"] = int(sel.y_fourier)
+        ds.attrs["squared"] = int(sel.square)
+        if sel.species:
+            ds.attrs["species"] = sel.species
+        return ds
+
+    # ------------------------------------------------------------------
+    # Plot
+    # ------------------------------------------------------------------
 
     def plot(self, t=None, **kw):
         """
-        Plot the 2-D contours.
+        Plot the requested reductions.
 
-        GENE-3D takes ``quantities``, ``species``, ``x_fourier``, ``y_fourier``,
-        ``square``, ``zlim`` and ``n_max``; the spectral geometries take the
-        arguments of :meth:`plot_timeseries_2d`.
+        GENE-3D takes the call options listed in the class docstring; the
+        spectral geometries take the arguments of :meth:`plot_timeseries_2d`.
         """
         if self.is_3d:
             return self._plot_3d(t, **kw)
@@ -163,67 +353,96 @@ class Contours(RunDiagnostic):
             reader, a, b, params_list=self.params, coords=self.coord,
             species=species, **kw)
 
-    def _plot_3d(self, t, n_max=4, **kw):
+    def _plot_3d(self, t=None, n_max=4, **kw):
         """
-        Plot the ``xy`` and ``xz`` cuts, one column per output time.
+        Plot the requested reductions, one row each and one column per time.
 
-        ``x`` runs horizontally in both, so the two rows share a radial axis and
-        read together. At most *n_max* times are drawn, evenly spaced through the
-        window, so a long run does not open hundreds of axes.
+        ``x`` runs horizontally in every reduction that has it, so the rows share
+        a radial axis and read together.
         """
+        reductions, sel = self._split_kw(kw)
         ds = self.dataset(t, **kw)
-        quantities = sorted({n.rsplit("_", 1)[0] for n in ds.data_vars})
+        quantities = [q for q in sel.quantities
+                      if any(f"{q}_{r}" in ds for r in reductions)]
         if not quantities:
-            raise ValueError("No slice available to plot.")
+            raise ValueError("No reduction available to plot.")
 
-        held_of = dict(self._PLANES)
-        fixed = self._fixed_values()
+        fixed = self._fixed_values(sel)
         figs = []
         for name in quantities:
-            planes = [p for p, _ in self._PLANES if f"{name}_{p}" in ds]
-            frames, n_total = self._pick_times(ds[f"{name}_{planes[0]}"], n_max)
+            reds = [r for r in reductions if f"{name}_{r}" in ds]
+            frames, n_total = self._pick_times(ds[f"{name}_{reds[0]}"], n_max)
             if n_total > len(frames):
                 print(f"contours: showing {len(frames)} of {n_total} times.")
 
-            fig, axes = plt.subplots(len(planes), len(frames),
+            fig, axes = plt.subplots(len(reds), len(frames),
                                      figsize=(4.4 * len(frames),
-                                              3.5 * len(planes)),
+                                              3.5 * len(reds)),
                                      squeeze=False)
-            for row, plane in enumerate(planes):
-                da = ds[f"{name}_{plane}"]
-                # One symmetric colour scale per plane, so the time panels are
-                # comparable instead of each being self-normalised.
+            for row, red in enumerate(reds):
+                da = ds[f"{name}_{red}"]
+                # One symmetric scale per row, so the time panels are comparable
+                # instead of each being self-normalised.
                 vmax = float(np.max(np.abs(np.asarray(da)))) or 1.0
                 for col, (time, index) in enumerate(frames):
                     ax = axes[row][col]
                     frame = da if index is None else da.isel(time=index)
-                    dims = frame.dims
-                    # dims[0] is the radial axis: put it horizontal.
-                    h, v = np.asarray(ds[dims[0]]), np.asarray(ds[dims[1]])
-                    mesh = ax.pcolormesh(h, v, np.asarray(frame).T,
-                                         shading="nearest", cmap=self.cmap,
-                                         vmin=-vmax, vmax=vmax)
-                    ax.set_xlabel(_AXIS_LABELS.get(dims[0], dims[0]))
-                    ax.set_ylabel(_AXIS_LABELS.get(dims[1], dims[1]))
-                    bits = [plane]
-                    held = fixed.get(held_of[plane])
-                    if held is not None:
-                        bits.append(f"{held_of[plane]}={held:.3g}")
-                    if time is not None:
-                        bits.append(f"t={time:.4g}")
-                    ax.set_title("  ".join(bits), fontsize=9)
-                    fig.colorbar(mesh, ax=ax)
-            fig.suptitle(name)
+                    if len(red) == 2:
+                        self._draw_plane(fig, ax, ds, frame, vmax)
+                    else:
+                        self._draw_line(ax, ds, frame, vmax)
+                    ax.set_title(self._panel_title(red, fixed, time),
+                                 fontsize=9)
+            fig.suptitle(self._title(name, sel))
             fig.tight_layout()
             figs.append(fig)
         plt.show()
         return figs
 
-    def _fixed_values(self):
-        """The coordinate values the cuts hold fixed, for the panel titles."""
+    def _draw_plane(self, fig, ax, ds, frame, vmax):
+        """pcolormesh of a 2-D reduction, with the radial axis horizontal."""
+        dims = frame.dims
+        # dims[0] is the radial axis: put it horizontal.
+        h, v = np.asarray(ds[dims[0]]), np.asarray(ds[dims[1]])
+        mesh = ax.pcolormesh(h, v, np.asarray(frame).T, shading="nearest",
+                             cmap=self.cmap, vmin=-vmax, vmax=vmax)
+        ax.set_xlabel(_AXIS_LABELS.get(dims[0], dims[0]))
+        ax.set_ylabel(_AXIS_LABELS.get(dims[1], dims[1]))
+        fig.colorbar(mesh, ax=ax)
+
+    @staticmethod
+    def _draw_line(ax, ds, frame, vmax):
+        """Line plot of a 1-D reduction, on the scale shared across the row."""
+        dim = frame.dims[0]
+        ax.plot(np.asarray(ds[dim]), np.asarray(frame))
+        ax.set_xlabel(_AXIS_LABELS.get(dim, dim))
+        ax.set_ylim(-vmax, vmax)
+        ax.grid(True, alpha=0.3)
+
+    def _title(self, name, sel):
+        """Figure title: the quantity, its species and whether it is squared."""
+        moment = name not in self.run.field.var_names
+        base = f"{name}" + (f" ({sel.species})" if sel.species and moment
+                            else "")
+        return f"|{base}|²" if sel.square else base
+
+    @staticmethod
+    def _panel_title(red, fixed, time):
+        """Panel title: the reduction, any coordinate it holds fixed, the time."""
+        bits = [red]
+        for held in "xyz":
+            if held not in red and held in fixed:
+                bits.append(f"{held}={fixed[held]:.3g}")
+        if time is not None:
+            bits.append(f"t={time:.4g}")
+        return "  ".join(bits)
+
+    @staticmethod
+    def _fixed_values(sel):
+        """The coordinates this selection cuts at, for the panel titles."""
         out = {}
-        for _, held in self._PLANES:
-            limits = self._slice_kw.get(f"{held}lim")
+        for held in "xyz":
+            limits = getattr(sel, f"{held}lim")
             if limits and limits[0] == limits[1]:
                 out[held] = float(limits[0])
         return out
@@ -237,6 +456,10 @@ class Contours(RunDiagnostic):
         picks = np.unique(np.linspace(0, n_total - 1,
                                       min(n_max, n_total)).astype(int))
         return [(float(da["time"].values[i]), int(i)) for i in picks], n_total
+
+    # ------------------------------------------------------------------
+    # Spectral geometries: streaming plot-only path
+    # ------------------------------------------------------------------
 
     def select_indices(self, reader, t_start, t_stop, max_loads):
         """Return downsampled iteration indices within the time window."""
@@ -505,3 +728,15 @@ class Contours(RunDiagnostic):
             fig_xz.tight_layout()
 
         plt.show()
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _apply(var, xsl, ysl, zsl, keep):
+    """Apply the index windows, leaving the axes named in *keep* unrestricted."""
+    sx = slice(None) if "x" in keep else xsl
+    sy = slice(None) if "y" in keep else ysl
+    sz = slice(None) if "z" in keep else zsl
+    return var[sx, sy, sz]

@@ -363,7 +363,12 @@ class Run:
 
     @cached_property
     def contours(self):
-        """2-D field/moment slices; options are passed to ``.plot()``."""
+        """
+        2-D cuts and 1-D line profiles; options are passed to ``.plot()``.
+
+        Every reduction of a snapshot lives here: pass ``reductions="all"`` for
+        the three planes and three lines, or name the ones you want.
+        """
         from .diagnostics.contours import Contours
         return Contours(self)
 
@@ -408,11 +413,6 @@ class Run:
     # These have no spectral counterpart, so they raise rather than silently
     # doing something different for a flux-tube or x-global run.
     # ------------------------------------------------------------------
-
-    def slices(self, **kw):
-        """Every 1-D and 2-D reduction of a GENE-3D snapshot."""
-        from .diagnostics.slices import Slices
-        return Slices(self, **kw)
 
     def timetraces(self, **kw):
         """Volume-averaged and ky-resolved time traces (GENE-3D)."""

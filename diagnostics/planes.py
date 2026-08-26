@@ -95,10 +95,6 @@ class Planes(RunDiagnostic):
 
     # ------------------------------------------------------------------
 
-    def _sources(self):
-        from genetools.diagnostics.slices import Slices
-        return Slices(self.run, quantities=self.quantities,
-                        species=self.species)._sources()
 
     def compute(self, t=None):
         """Stream the requested variables and remap each onto the angle grid."""
@@ -131,7 +127,8 @@ class Planes(RunDiagnostic):
         theta, phi = self.theta, self.phi
 
         planes, times = {}, None
-        for reader, names in self._sources():
+        for reader, names in self._sources(self.quantities,
+                                        self.species):
             _, idx = self._indices(reader, t)
             slots = {n: reader.index_of(n) for n in names}
             acc = {n: [] for n in names}

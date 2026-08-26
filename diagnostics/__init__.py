@@ -38,7 +38,6 @@ from .growthrate import GrowthRate
 from .amplitude import AmplitudeSpectra
 from .zonal import Zonal
 from .profile_diag import ProfileDiag
-from .slices import Slices
 from .timetraces import TimeTraces
 from .gam import Gam
 from .chi import ChiGradient
@@ -63,7 +62,6 @@ __all__ = [
     "Zonal",
     "ProfileDiag",
     # GENE-3D only (for now)
-    "Slices",
     "TimeTraces",
     "Gam",
     "ChiGradient",
