@@ -814,6 +814,14 @@ class Fluxes2D(RunDiagnostic):
             data_vars[base + "_integrated"] = (
                 ("species", "time", "x"),
                 total * area[np.newaxis, np.newaxis, :])
+        # Volume averages, comparable with `nrg`. Every flux gets one, including
+        # the ES/EM parts separately, since nrg reports those separately too.
+        J = self.geom["Jacobian"]
+        for v in list(present) + [b + "_total" for b in ("Gamma", "Q")
+                                  if b + "_total" in data_vars]:
+            data_vars[v + "_volume"] = (
+                ("species", "time"),
+                g3.volume_average(np.asarray(data_vars[v][1]), J))
 
         ds = make_dataset(data_vars,
                           {"x": self.coord.get("x_o_a"), "time": raw["times"]},
@@ -863,6 +871,68 @@ class Fluxes2D(RunDiagnostic):
         units = self.params.get("units", {}) or {}
         return any(float(units.get(k, 1.0)) != 1.0
                    for k in ("Lref", "Bref", "Tref", "nref", "mref"))
+
+    def volume_average(self, t=None, prefactor=True):
+        """
+        GENE-3D only: the volume-averaged fluxes, for comparison with ``nrg``.
+
+        The reduction is the Jacobian-weighted mean over all of x, y and z that
+        ``nrg`` reports. It is built in two steps — the ``(y, z)`` average this
+        diagnostic already does per surface, then an x-average weighted by
+        ``sum_{y,z} J`` — which is exact, not an approximation. A plain mean over
+        x is *not* this, and neither is a ``dVdx``-weighted one: ``dVdx`` carries
+        a radially varying ``C_y`` factor.
+
+        Parameters
+        ----------
+        t : (float, float), optional
+            Time window; a negative bound means "unbounded".
+        prefactor : bool
+            Whether to include the species factor this diagnostic applies to the
+            mom-file values — ``dens`` for the particle fluxes, ``dens*temp`` for
+            the heat fluxes. ``False`` reduces the mom-file arrays as they are.
+            The two differ by exactly that factor, so comparing both against a
+            run's own ``nrg`` is what settles which normalisation ``nrg`` uses.
+
+        Returns
+        -------
+        xarray.Dataset
+            Dims ``(species, time)``, one variable per flux, plus the ES+EM
+            totals.
+        """
+        self._require("xy_global")
+        import xarray as xr
+
+        raw = self.compute(t)
+        J = self.geom["Jacobian"]
+        names = [n for n in self.run.species if n in raw["species"]]
+        present = [v for v in self._FLUXES_3D
+                   if all(v in raw["species"][n] for n in names)]
+
+        data_vars, per_species = {}, {}
+        for v in present:
+            stack = []
+            for n in names:
+                arr = np.asarray(raw["species"][n][v])
+                if not prefactor:
+                    # compute() has already applied it; divide it back out so
+                    # this reports the mom-file values unmodified.
+                    arr = arr / self._prefactor_3d(self._FLUXES_3D[v][0], n)
+                stack.append(g3.volume_average(arr, J))
+            data_vars[v] = (("species", "time"), np.stack(stack, axis=0))
+            per_species[v] = data_vars[v][1]
+        for base in ("Gamma", "Q"):
+            parts = [v for v in present if v.startswith(base + "_")]
+            if parts:
+                data_vars[base + "_total"] = (
+                    ("species", "time"),
+                    sum(per_species[v] for v in parts))
+
+        ds = xr.Dataset(data_vars,
+                        coords={"species": names, "time": raw["times"]})
+        ds.attrs["prefactor_applied"] = int(bool(prefactor))
+        ds.attrs["reduction"] = "sum_xyz f J / sum_xyz J  (nrg convention)"
+        return ds
 
     def _plot_3d(self, t, si=None, x_avg_lims=None, buffer_frac=0.1,
                  show_map=True, show_traces=None, components=True, **kw):

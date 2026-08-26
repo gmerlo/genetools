@@ -167,6 +167,46 @@ def xz_average(var: np.ndarray, J: np.ndarray, xslice=slice(None)):
     weights = jacobian_yz(J)[xslice]
     return np.average(var[xslice], weights=weights, axis=(0, 2))
 
+def volume_weights(J: np.ndarray) -> np.ndarray:
+    """
+    Per-radius weight ``sum_{y,z} J``, for reducing a flux-surface profile.
+
+    This is the weight that makes a radial average agree with what GENE-3D puts
+    in ``nrg``. It is **not** ``dVdx``: ``geometry.F90`` builds
+    ``dVdx = (2 pi)^2 C_y(x) n_pol avg_jaco_yz(x)``, so ``dVdx`` carries a
+    ``C_y(x)`` that varies radially and the ``nrg`` average does not.
+    """
+    return np.asarray(J, dtype=float).sum(axis=(1, 2))
+
+
+def volume_average(profile: np.ndarray, J: np.ndarray) -> np.ndarray:
+    """
+    Reduce a flux-surface profile to the volume average ``nrg`` reports.
+
+    GENE-3D's ``sum_3d_real`` (``diag_3d.F90``) computes
+
+        fnorm = 1/(nx0*ny0*nz0*avg_jaco)      avg_jaco = sum_xyz J /(nx0 ny0 nz0)
+        var   = fnorm * sum_{x,y,z} f J       =  sum f J / sum J
+
+    — a plain Jacobian-weighted mean over all three directions. Since
+    :func:`flux_surface_average` already did the ``(y, z)`` half with the same
+    weights, finishing it needs only the ``sum_{y,z} J`` weight per surface, and
+    the composition is exact rather than approximate.
+
+    A plain ``mean`` over x is *not* this: it drops the weight entirely, and on
+    a real geometry the Jacobian varies enough radially for that to matter.
+
+    Parameters
+    ----------
+    profile : array
+        Flux-surface-averaged quantity, radius last.
+    J : array
+        The ``(nx, ny, nz)`` Jacobian.
+    """
+    return np.average(np.asarray(profile, dtype=float),
+                      weights=volume_weights(J), axis=-1)
+
+
 def radial_weights(J: np.ndarray) -> np.ndarray:
     """
     Per-radius integration weight, ``sum_z J``, for reducing an ``(nx, nky)`` map.

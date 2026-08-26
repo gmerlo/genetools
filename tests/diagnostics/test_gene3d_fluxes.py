@@ -560,3 +560,103 @@ class TestSpectra3DPath:
         monkeypatch.setattr(plt, "show", lambda *a, **k: None)
         Spectra(Run(physical_run.folder), buffer_frac=0.0).plot()
         plt.close("all")
+
+
+# ---------------------------------------------------------------------------
+# Volume average vs nrg
+# ---------------------------------------------------------------------------
+
+class TestVolumeAverage:
+    """
+    The x-reduction that turns a flux-surface profile into the single number
+    `nrg` reports. Only the maths is tested here: the fixture has no nrg derived
+    from the fields, so a comparison against it would be circular.
+    """
+
+    def test_composition_is_exact(self):
+        """
+        Reducing (y, z) then x with `sum_{y,z} J` weights equals the full 3-D
+        Jacobian-weighted mean, so the two-step route is exact.
+        """
+        rng = np.random.default_rng(0)
+        J = 0.5 + rng.uniform(size=(9, 6, 5))
+        f = rng.normal(size=(9, 6, 5))
+        composed = c.volume_average(c.flux_surface_average(f, J), J)
+        assert composed == pytest.approx(np.average(f, weights=J), rel=1e-12)
+
+    def test_plain_x_mean_differs(self):
+        """`.mean("x")` drops the weight; on a varying Jacobian that matters."""
+        rng = np.random.default_rng(1)
+        J = 0.5 + rng.uniform(size=(40, 6, 5)) ** 3
+        f = rng.normal(size=(40, 6, 5))
+        profile = c.flux_surface_average(f, J)
+        assert profile.mean() != pytest.approx(
+            c.volume_average(profile, J), rel=1e-9)
+
+    def test_dataset_carries_volume_averages(self, physical_run):
+        ds = Fluxes2D(Run(physical_run.folder)).dataset()
+        for base in ("Gamma_es", "Gamma_em", "Q_es", "Q_em",
+                     "Gamma_total", "Q_total"):
+            key = base + "_volume"
+            assert key in ds, key
+            assert ds[key].dims == ("species", "time")
+
+    def test_volume_average_matches_a_direct_3d_mean(self, physical_run):
+        """
+        Against a 3-D Jacobian mean of the array on disk, including whatever
+        prefactor `_prefactor_3d` applies — so this pins the reduction, not the
+        normalisation.
+        """
+        run = Run(physical_run.folder)
+        ds = Fluxes2D(run).dataset()
+        J = run.geometry[0]["Jacobian"]
+        diag = Fluxes2D(run)
+        for name in run.species:
+            reader = run.mom(name)
+            arrays = next(iter(reader.stream_selected([0])))[1]
+            raw = np.average(arrays[reader.index_of("Q_es")], weights=J)
+            direct = raw * diag._prefactor_3d("Q_es", name)
+            mine = float(ds["Q_es_volume"].sel(species=name).isel(time=0))
+            assert mine == pytest.approx(direct, rel=1e-10)
+
+    def test_prefactor_false_is_the_raw_mom_file_reduction(self, physical_run):
+        """
+        With the species factor off, the result must be exactly a 3-D
+        Jacobian-weighted mean of the array on disk — nothing else applied.
+        """
+        run = Run(physical_run.folder)
+        J = run.geometry[0]["Jacobian"]
+        ds = Fluxes2D(run).volume_average(prefactor=False)
+        for name in run.species:
+            reader = run.mom(name)
+            arrays = next(iter(reader.stream_selected([0])))[1]
+            direct = np.average(arrays[reader.index_of("Q_es")], weights=J)
+            mine = float(ds["Q_es"].sel(species=name).isel(time=0))
+            assert mine == pytest.approx(direct, rel=1e-10)
+
+    def test_prefactor_is_the_only_difference(self, tmp_path):
+        """Species factors non-unity, so the ratio is a real check."""
+        g = make_gene3d_run(tmp_path / "run", nx0=8, nz0=8, n_times=2,
+                            physical=True, temps=[2.0, 0.5], denss=[3.0, 1.5])
+        run = Run(g.folder)
+        diag = Fluxes2D(run)
+        on = diag.volume_average(prefactor=True)
+        off = diag.volume_average(prefactor=False)
+        for name in run.species:
+            spec = next(s for s in run.params.get(0)["species"]
+                        if s["name"] == name)
+            got = (float(on["Q_es"].sel(species=name).isel(time=0))
+                   / float(off["Q_es"].sel(species=name).isel(time=0)))
+            assert got == pytest.approx(spec["dens"] * spec["temp"], rel=1e-10)
+
+    def test_totals_are_es_plus_em(self, physical_run):
+        ds = Fluxes2D(Run(physical_run.folder)).volume_average()
+        np.testing.assert_allclose(
+            ds["Q_total"].values, ds["Q_es"].values + ds["Q_em"].values,
+            rtol=1e-12)
+
+    def test_refuses_for_a_flux_tube(self, tmp_path):
+        from tests.gene_fixture import make_fluxtube_run
+        run = Run(make_fluxtube_run(tmp_path / "ft"))
+        with pytest.raises(NotImplementedError):
+            Fluxes2D(run).volume_average()
