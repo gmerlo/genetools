@@ -1067,8 +1067,10 @@ class TestFacade:
         with pytest.raises(NotImplementedError, match="real-space in y"):
             run.ballooning(ky=0.1)
 
-    @pytest.mark.parametrize("name", ["gam", "chi", "omega",
-                                      "srcmom", "vsp"])
+    # srcmom is not here: it is a *global* diagnostic, not a GENE-3D one, and
+    # its flux-tube refusal is covered in test_srcmom.py with the reason GENE
+    # itself gives.
+    @pytest.mark.parametrize("name", ["gam", "chi", "omega", "vsp"])
     def test_gene3d_only_properties_refuse_elsewhere(self, tmp_path, name):
         from tests.conftest import MINIMAL_PARAMS
         (tmp_path / "parameters").write_text(MINIMAL_PARAMS)

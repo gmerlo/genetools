@@ -23,6 +23,8 @@ Two optional outputs that share nothing but their obscurity:
 
 from __future__ import annotations
 
+import pathlib
+
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -40,17 +42,43 @@ class SrcMom(RunDiagnostic):
     """
 
     name = "srcmom"
-    supported = ("xy_global",)
+    #: Both global geometries. Not a GENE-3D diagnostic: GENE writes source
+    #: moments for a global run too. It refuses for a flux tube because *GENE*
+    #: refuses — `diag_df.F90` forces `istep_srcmom = 0` when `xy_local`, with
+    #: "istep_srcmom > 0 not possible in local simulations", so the file cannot
+    #: exist. (It also disables them for a linear ky>0 run.)
+    supported = ("x_global", "xy_global")
 
     def __init__(self, run):
         super().__init__(run)
 
     def _reader(self, species):
+        """
+        Reader for one species' source-moment file.
+
+        Only the HDF5 form is readable. GENE writes `srcmom_<species><ext>`
+        Fortran-unformatted under `write_std` and the `.h5` twin under
+        `write_h5`; the unformatted layout is its own (a time record then one
+        record of `(nx0, 3)` reals per source term) and not what `BinaryReader`
+        decodes, so a run with only that file is reported rather than
+        misparsed.
+        """
         ext = self.run.extensions[0]
         params = self.run.params.get(0)
         from genetools.io.data import H5Reader
         return H5Reader("srcmom", self.run._folder, ext + ".h5", params,
                         species=species)
+
+    def _binary_only(self):
+        """Species whose source moments exist only in unformatted form."""
+        folder = pathlib.Path(self.run._folder)
+        ext = self.run.extensions[0]
+        out = []
+        for name in self.run.species:
+            if (folder / f"srcmom_{name}{ext}").exists() and not \
+                    (folder / f"srcmom_{name}{ext}.h5").exists():
+                out.append(name)
+        return out
 
     def compute(self, t=None):
         """Read the source moments for every species."""
@@ -81,9 +109,17 @@ class SrcMom(RunDiagnostic):
                 times = np.asarray(got)
 
         if not per:
+            binary = self._binary_only()
+            if binary:
+                raise FileNotFoundError(
+                    f"Source moments for {', '.join(binary)} exist only as "
+                    f"Fortran-unformatted 'srcmom_<species>{self.run.extensions[0]}' "
+                    "in {0}; only the HDF5 form is readable. Rerun with "
+                    "write_h5 = T.".format(self.run.path))
             raise FileNotFoundError(
-                f"No srcmom files found in {self.run.path}. GENE-3D writes "
-                "them when istep_srcmom > 0.")
+                f"No srcmom files found in {self.run.path}. They are written "
+                "when istep_srcmom > 0, which GENE allows only for global, "
+                "nonlinear runs.")
 
         result = {"species": per, "times": times, "labels": labels,
                   "missing": missing}

@@ -49,7 +49,7 @@ class Vis(RunDiagnostic):
         regions are rarely wanted.
     """
 
-    name = "vis"
+    name = "vis3d"
     supported = ("xy_global",)
 
     def __init__(self, run, quantities=("phi",), species=None, xlim=None):

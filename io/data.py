@@ -98,6 +98,13 @@ VSP_VARS_3D = ["G_es", "G_em", "Q_ese", "Q_eme", "<f_>"]
 SRCMOM_VARS_3D = [f"{a}_{b}" for a in ("ck_heat", "ck_part")
                   for b in ("M00", "M10", "M22")]
 
+#: GENE's own source moments (`diag_df.F90` src_label x mom_label). Nine, not
+#: six: regular GENE adds the `f0_term` source that GENE-3D does not write.
+#: Both are discovered from the file in practice; these are the canonical
+#: orders for the binary path, which has no names of its own.
+SRCMOM_VARS = [f"{a}_{b}" for a in ("ck_heat", "ck_part", "f0_term")
+               for b in ("M00", "M10", "M22")]
+
 
 def canonical_vars(file_type: str, is_3d: bool) -> list:
     """Return the canonical variable order for *file_type*."""
@@ -108,7 +115,7 @@ def canonical_vars(file_type: str, is_3d: bool) -> list:
     if file_type == "vsp":
         return VSP_VARS_3D
     if file_type == "srcmom":
-        return SRCMOM_VARS_3D
+        return SRCMOM_VARS_3D if is_3d else SRCMOM_VARS
     return []
 
 

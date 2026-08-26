@@ -66,9 +66,27 @@ PARAMETRIZED = {
     "vis3d": "quantities",
 }
 
-#: Flags that only exist for GENE-3D runs, for a clearer error message.
-GENE3D_ONLY = ("timetraces", "gam", "chi", "omega",
-               "srcmom", "vsp", "planes", "vis3d")
+#: Geometry kinds each diagnostic class supports, read from the class itself
+#: rather than listed here. A hand-maintained list goes stale the moment a
+#: diagnostic is generalised — which is exactly what happened to `--geometry`.
+def _unsupported_reason(name: str, run) -> str:
+    """Return why *name* cannot run on *run*, or ``""`` when it can."""
+    from . import diagnostics as _d
+    # A flag matches a class either by its `name` or by the Run accessor it
+    # resolves to — `--vis3d` reaches `Vis`, whose own name is "vis".
+    wanted = {name, DIAGNOSTICS.get(name, name)}
+    cls = None
+    for attr in dir(_d):
+        obj = getattr(_d, attr)
+        if isinstance(obj, type) and getattr(obj, "name", None) in wanted:
+            cls = obj
+            break
+    supported = getattr(cls, "supported", None) if cls else None
+    if not supported or run.geometry_kind in supported:
+        return ""
+    kinds = " or ".join(supported)
+    return (f"--{name.replace('_', '-')} needs {kinds}; "
+            f"this run is {run.geometry_kind}.")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -203,10 +221,9 @@ def main(argv=None) -> int:
         path = args.runpath or args.path
         run = Run(path, ext=args.ext)
 
-        if name in GENE3D_ONLY and not run.is_3d:
-            print(f"genetools: --{name.replace('_', '-')} is a GENE-3D "
-                  f"diagnostic; this run is {run.geometry_kind}.",
-                  file=sys.stderr)
+        reason = _unsupported_reason(name, run)
+        if reason:
+            print(f"genetools: {reason}", file=sys.stderr)
             return 2
 
         accessor = DIAGNOSTICS[name]

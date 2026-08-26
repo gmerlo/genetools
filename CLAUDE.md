@@ -28,6 +28,13 @@ Note: tests are under `tests/` (matching `testpaths = ["tests"]` in `pyproject.t
 pytest tests/ -k gene3d -v     # GENE-3D only
 ```
 
+`tests/xglobal_fixture.py` builds synthetic **x-global** runs (`make_xglobal_run` plus per-file
+helpers such as `write_srcmom`). No x-global run with output exists in the repo, so that column of
+the diagnostics matrix was verified by reading code until this existed — and two `shearingrate` bugs
+(the ExB sign and the whole-array Jacobian normalisation) had been hidden precisely because the
+x-global *unit* fixtures used a uniform Jacobian and `C_xy = 1`. Extend it rather than adding more
+unit-level stand-ins.
+
 GENE-3D has no reference output in the repo; `tests/gene3d_fixture.py` builds
 synthetic run directories reproducing what `gene3d-dev/src` writes (futils axis
 order and precision, snapshot groups, the deliberately wrong `n_moms`).
@@ -112,6 +119,7 @@ Diagnostics available for every geometry:
 - **`profile_diag.py`** — `ProfileDiag`: `profile_<species>`. **13 columns for GENE, 8 for GENE-3D** — the column set is chosen from the geometry; plus `flux_profiles()`
 - **`ballooning.py`** — `Ballooning`: field-line mode structure (needs a single ky, so it refuses for GENE-3D)
 - **`geometry_plots.py`** — `GeometryPlots`: geometry coefficients, **all geometries**. Dispatches on the *rank* of the arrays, not the geometry kind — the readers use the same keys and only the rank differs (`(nz,)` flux tube, `(nx,nz)` x-global, `(nx,ny,nz)` GENE-3D), so `self.ndim` comes from the Jacobian's shape. It used to require `ndim == 3` and refuse otherwise. `which=` picks views: `overview` (every coefficient in one figure — **the default**, where it used to open one figure per coefficient), `detail` (the per-coefficient cuts/planes, skipped when only a z axis exists), `surface` (Z vs R from the `shape` arrays), `profiles`. **The content is complementary between codes**: a flux tube writes `shape` (gR/gZ/gPhi) and `curv['sloc']`, both of which were previously invisible — `_LABELS` had no `sloc` entry and the shape arrays were never read — while GENE-3D writes `profiles` and an array `area` that a flux tube does not
+- **`velocity.py`** — `SrcMom`: Krook source moments as radial profiles. **Both global geometries**, not GENE-3D-only: GENE writes them for a global run too. It refuses for a flux tube because *GENE* refuses — `diag_df.F90` forces `istep_srcmom = 0` when `xy_local` ("not possible in local simulations"), and also for a linear ky>0 run, so the file cannot exist. GENE writes **nine** datasets (`src_label` x `mom_label`, including `f0_term`) where GENE-3D writes six; `H5Reader` discovers them from the file so no branch is needed. Only the HDF5 form is readable — the `write_std` unformatted layout (a time record then one `(nx0, 3)` record per source term) is not what `BinaryReader` decodes, so such a run is reported, not misparsed
 
 GENE-3D-only for now (each declares `supported = ("xy_global",)`):
 
@@ -119,7 +127,7 @@ GENE-3D-only for now (each declares `supported = ("xy_global",)`):
 - **`gam.py`** — `Gam`: zonal-flow oscillation; refuses when there is no zonal component above round-off rather than fitting a frequency to noise
 - **`chi.py`** — `ChiGradient`: χ vs. the self-consistent driving gradient; reuses `Fluxes2D` and `Profiles` so all three agree on normalisation
 - **`omega.py`** — `Omega`: frequency view over `GrowthRate`
-- **`velocity.py`** — `SrcMom` (Krook source moments), `VspSlice` (velocity space)
+- **`velocity.py`** — `VspSlice`: velocity space (GENE-3D only for now)
 - **`planes.py`** — `Planes`: remap onto geometric (θ, φ) angles + (n, m) analysis
 - **`vis.py`** — `Vis`: VTK export using the `cart_coords` GENE-3D writes
 
