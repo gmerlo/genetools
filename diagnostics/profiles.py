@@ -52,10 +52,83 @@ import numpy as np
 import matplotlib.pyplot as plt
 import h5py
 
-from genetools.compat import trapz as _trapz
 from genetools.diagnostics._base import (CachingDiagnostic,
                                         RunDiagnostic)
 from genetools.diagnostics import _gene3d as g3
+
+
+# ---------------------------------------------------------------------------
+# Units
+# ---------------------------------------------------------------------------
+#
+# Two vocabularies, deliberately separate: the plain-text string that goes into
+# a dataset's ``units`` attribute (machine-readable metadata, and what a reader
+# of the HDF5 sees), and the LaTeX string that goes on a plot axis.
+
+#: SI conversion: ``var -> (units key, exponent, attr label, axis label)``.
+#: The value is multiplied by ``units[key] ** exponent``. A quantity missing
+#: here has no SI form and stays normalised whatever ``si`` says — which is what
+#: made ``plot(si=True)`` redraw half its panels unchanged.
+_SI_SPEC = {
+    "T":   ("Tref", 1, "keV", "keV"),
+    "n":   ("nref", 1, "1e19 m^-3", r"$10^{19}\,\mathrm{m}^{-3}$"),
+    "u":   ("cref", 1, "m s^-1", r"$\mathrm{m\,s}^{-1}$"),
+    "omt": ("Lref", -1, "m^-1", r"$\mathrm{m}^{-1}$"),
+    "omn": ("Lref", -1, "m^-1", r"$\mathrm{m}^{-1}$"),
+    "omu": ("Lref", -1, "m^-1", r"$\mathrm{m}^{-1}$"),
+}
+
+#: Normalised ``units`` attribute per quantity.
+_NORM_UNITS = {
+    "T": "T_ref", "n": "n_ref", "u": "c_ref",
+    "omt": "L_ref/L_T", "omn": "L_ref/L_n", "omu": "L_ref/L_u",
+}
+
+#: Normalised axis label per quantity.
+_NORM_LABEL = {
+    "T": r"$T/T_{\rm ref}$",
+    "n": r"$n/n_{\rm ref}$",
+    "u": r"$u_\parallel/c_{\rm ref}$",
+    "omt": r"$L_{\rm ref}/L_T$",
+    "omn": r"$L_{\rm ref}/L_n$",
+    "omu": r"$L_{\rm ref}/L_u$",
+}
+
+
+#: Panels drawn for GENE-3D, which has no parallel-velocity moment profile.
+_PROFILE_VARS_3D = ("T", "n", "omt", "omn")
+#: Panels drawn for the spectral geometries, which also carry u_parallel.
+_PROFILE_VARS_SPECTRAL = ("T", "n", "u", "omt", "omn", "omu")
+
+
+def si_factor(units: dict, var: str):
+    """
+    Return ``(factor, attr_label, axis_label)`` converting *var* to SI.
+
+    ``None`` means there is no SI form for this quantity, so the caller keeps it
+    normalised and labels it as such rather than presenting a normalised number
+    under an SI heading.
+    """
+    spec = _SI_SPEC.get(var)
+    if spec is None:
+        return None
+    key, power, attr, axis = spec
+    ref = (units or {}).get(key)
+    if ref in (None, 0):
+        return None
+    return float(ref) ** power, attr, axis
+
+
+def unit_attr(units: dict, var: str, si: bool) -> str:
+    """Dataset ``units`` attribute for *var*, in SI when asked and available."""
+    conv = si_factor(units, var) if si else None
+    return conv[1] if conv else _NORM_UNITS.get(var, var)
+
+
+def unit_label(units: dict, var: str, si: bool) -> str:
+    """Plot axis label for *var*, in SI when asked and available."""
+    conv = si_factor(units, var) if si else None
+    return conv[2] if conv else _NORM_LABEL.get(var, var)
 
 
 # ---------------------------------------------------------------------------
@@ -625,6 +698,14 @@ class Profiles(RunDiagnostic):
                 stacks["omt"].append(_log_gradient(T_tot, x_o_a) / minor_r)
                 stacks["omn"].append(_log_gradient(n_tot, x_o_a) / minor_r)
             out[name] = {v: np.asarray(stacks[v]) for v in stacks}
+            # The equilibrium background, kept alongside the total so the plot
+            # can overlay the two without rebuilding it.
+            out[name].update({
+                "T_back": T0,
+                "n_back": n0,
+                "omt_back": _log_gradient(T0, x_o_a) / minor_r,
+                "omn_back": _log_gradient(n0, x_o_a) / minor_r,
+            })
         return {"species": out, "times": times, "x_o_a": x_o_a}
 
     def _dataset_3d(self, t):
@@ -634,44 +715,84 @@ class Profiles(RunDiagnostic):
         units = params.get("units", {}) or {}
         names = [n for n in self.run.species if n in raw["species"]]
         variables = ("T", "n", "omt", "omn")
+        data_vars = {v: (("species", "time", "x"),
+                         np.stack([raw["species"][n][v] for n in names], axis=0))
+                     for v in variables}
+        # The background has no time axis — it is the equilibrium the
+        # perturbation sits on top of.
+        data_vars.update({
+            f"{v}_back": (("species", "x"),
+                          np.stack([raw["species"][n][f"{v}_back"]
+                                    for n in names], axis=0))
+            for v in variables})
         ds = make_dataset(
-            {v: (("species", "time", "x"),
-                 np.stack([raw["species"][n][v] for n in names], axis=0))
-             for v in variables},
-            {"x": raw["x_o_a"], "time": raw["times"]},
+            data_vars, {"x": raw["x_o_a"], "time": raw["times"]},
             species=names, params=params)
-        labels = {"T": "T_ref", "n": "n_ref",
-                  "omt": "L_ref/L_T", "omn": "L_ref/L_n"}
-        si_ref = {"T": ("Tref", "keV"), "n": ("nref", "1e19 m^-3")}
         for v in variables:
-            ds[v].attrs["units"] = labels[v]
-            if v in si_ref:
-                key, unit = si_ref[v]
-                ref = units.get(key)
-                if ref is not None:
-                    ds[v + "_SI"] = ds[v] * float(ref)
-                    ds[v + "_SI"].attrs["units"] = unit
+            for name in (v, f"{v}_back"):
+                ds[name].attrs["units"] = unit_attr(units, v, si=False)
+                conv = si_factor(units, v)
+                if conv is not None:
+                    factor, attr, _ = conv
+                    ds[name + "_SI"] = ds[name] * factor
+                    ds[name + "_SI"].attrs["units"] = attr
         ds.attrs.update(unit_attrs(params))
         ds.attrs["geometry_kind"] = self.geometry_kind
         return ds
 
     def _plot_3d(self, t, si=False):
+        """
+        One figure per species: total profile with its equilibrium background.
+
+        Species get a figure each rather than sharing panels — their profiles
+        differ by the species factors, so overlaying them on one axis compresses
+        whichever is smaller into the baseline.
+        """
         ds = self._dataset_3d(t)
+        units = self.params.get("units", {}) or {}
         x = np.asarray(ds["x"])
-        fig, axes = plt.subplots(2, 2, figsize=(10, 7))
-        for ax, v in zip(axes.ravel(), ("T", "n", "omt", "omn")):
-            key = f"{v}_SI" if (si and f"{v}_SI" in ds) else v
-            for name in ds["species"].values:
-                ax.plot(x, np.asarray(self._t_average(ds[key].sel(species=name))),
-                        label=str(name))
-            ax.set_xlabel(r"$x/a$")
-            ax.set_ylabel(ds[key].attrs.get("units", ""))
-            ax.set_title(v)
-            ax.grid(True, alpha=0.3)
-            ax.legend(fontsize=8)
-        fig.tight_layout()
+        figs = []
+        for name in ds["species"].values:
+            fig, axes = plt.subplots(2, 2, figsize=(10, 7))
+            for ax, v in zip(axes.ravel(), _PROFILE_VARS_3D):
+                key = self._si_key(ds, v, si)
+                back_key = self._si_key(ds, f"{v}_back", si)
+                total = self._t_average(ds[key].sel(species=name))
+                self._draw_profile(
+                    ax, x, np.asarray(total),
+                    np.asarray(ds[back_key].sel(species=name)),
+                    xlabel=r"$x/a$",
+                    ylabel=unit_label(units, v, si=si and key.endswith("_SI")),
+                    title=v)
+            fig.suptitle(f"{name} — profiles"
+                         + (" [SI]" if si else " [normalised]"))
+            fig.tight_layout()
+            figs.append(fig)
         plt.show()
-        return fig
+        return figs
+
+    @staticmethod
+    def _si_key(ds, var, si):
+        """
+        The dataset key for *var*, preferring its SI twin when asked for.
+
+        Falls back to the normalised variable when no twin exists, and the
+        caller labels the axis from what came back — never an SI heading over a
+        normalised number.
+        """
+        return f"{var}_SI" if (si and f"{var}_SI" in ds) else var
+
+    @staticmethod
+    def _draw_profile(ax, x, total, background, xlabel, ylabel, title):
+        """One panel: the total profile with its background beneath it."""
+        ax.plot(x, total, "-", color="C0", lw=1.8, label="total")
+        if background is not None:
+            ax.plot(x, background, "--", color="C3", lw=1.2, label="background")
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
+        ax.set_title(title)
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=8)
 
     def compare_with_code(self, t=None, species=None):
         """
@@ -701,8 +822,31 @@ class Profiles(RunDiagnostic):
 
     # ------------------------------------------------------------------
 
-    def plot(self, t=None, si=False, eq_profs=None, **kw):
-        """Plot the radial profiles over the window *t*."""
+    def plot(self, t=None, si=False, maps=False, eq_profs=None, **kw):
+        """
+        Plot the radial profiles over the window *t*.
+
+        One figure per species: the time-averaged total profile of each quantity
+        with its equilibrium background overlaid.
+
+        Parameters
+        ----------
+        t : (float, float), optional
+            Time window.
+        si : bool
+            Convert to SI where a conversion exists. Quantities without one stay
+            normalised and are labelled as such.
+        maps : bool
+            Also draw the ``(t, x)`` evolution heatmaps, one extra figure per
+            species. Off by default — the profiles are the usual view, and the
+            heatmaps double the figure count.
+        eq_profs : dict, optional
+            Equilibrium profiles; taken from the run when omitted.
+
+        Returns
+        -------
+        list of matplotlib.figure.Figure
+        """
         if self.is_3d:
             return self._plot_3d(t, si=si)
         self.compute(t)
@@ -710,17 +854,19 @@ class Profiles(RunDiagnostic):
         if eq_profs is None:
             eq_profs = self.run.eq_profiles
         return self._plot_spectral(self.coord, self.params, a, b,
-                                   equilibrium_profiles=eq_profs, **kw)
+                                   equilibrium_profiles=eq_profs,
+                                   si=si, maps=maps, **kw)
 
     def _plot_spectral(self, coords: dict, params: dict,
              t_start: float = None, t_stop: float = None,
-             equilibrium_profiles: dict = None) -> None:
+             equilibrium_profiles: dict = None,
+             si: bool = False, maps: bool = False) -> list:
         """
         Plot profile diagnostics from the saved HDF5 file.
 
-        Produces per-species:
-        1. (t, x) heatmaps of T, n, u, omt, omn, omu
-        2. Time-averaged radial profiles with background overlay
+        One figure per species holding the time-averaged profiles with their
+        equilibrium background overlaid, plus — only when *maps* is set — a
+        second figure per species of the ``(t, x)`` evolution.
 
         Parameters
         ----------
@@ -732,11 +878,16 @@ class Profiles(RunDiagnostic):
             Time window for averaging/plotting.
         equilibrium_profiles : dict, optional
             Required for global runs. See :meth:`build_background`.
+        si : bool
+            Convert to SI where a conversion exists.
+        maps : bool
+            Also draw the ``(t, x)`` evolution heatmaps.
         """
         data = self.load(t_start, t_stop)
         if not data or "time" not in data or len(data["time"]) == 0:
             print("No profile data available to plot.")
-            return
+            return []
+        figs = []
 
         times = data["time"]
         x_local = params["general"].get("x_local", True)
@@ -790,81 +941,59 @@ class Profiles(RunDiagnostic):
                 omn[i_t, :] = self._compute_gradient(total_n[i_t, :], dx_n, x_local)
                 omu[i_t, :] = self._compute_gradient(total_u[i_t, :], dx_n, x_local)
 
-            # ── Fig 1: (t, x) heatmaps ───────────────────────────────────
-            if nt > 1:
-                fig, axes = plt.subplots(2, 3, figsize=(15, 8))
-                fig.suptitle(f"{name} — profile evolution")
+            totals = dict(zip(_PROFILE_VARS_SPECTRAL,
+                               (total_T, total_n, total_u, omt, omn, omu)))
+            backs = {"T": bg["T_back"], "n": bg["n_back"], "u": bg["u_back"],
+                     "omt": bg["omt_back"], "omn": bg["omn_back"],
+                     "omu": np.zeros_like(bg["omt_back"])}
+            # Apply the SI conversion once, to the total and its background
+            # together, so a panel never mixes the two normalisations.
+            scale = {}
+            for v in _PROFILE_VARS_SPECTRAL:
+                conv = si_factor(units, v) if si else None
+                if conv is not None:
+                    totals[v] = totals[v] * conv[0]
+                    backs[v] = backs[v] * conv[0]
+                scale[v] = conv is not None
 
-                for ax, arr, label in zip(
-                    axes.flat,
-                    [total_T, total_n, total_u, omt, omn, omu],
-                    [f"T {name}", f"n {name}", f"$u_\\parallel$ {name}",
-                     f"$L_{{ref}}/L_T$ {name}", f"$L_{{ref}}/L_n$ {name}",
-                     f"$L_{{ref}}/L_u$ {name}"],
-                ):
-                    im = ax.pcolormesh(times, x, arr.T, shading="auto")
-                    fig.colorbar(im, ax=ax)
+            # ── (t, x) heatmaps, only when asked for ─────────────────────
+            if maps and nt > 1:
+                fig, axes = plt.subplots(2, 3, figsize=(15, 8))
+                fig.suptitle(f"{name} — profile evolution"
+                             + (" [SI]" if si else " [normalised]"))
+                for ax, v in zip(axes.flat, _PROFILE_VARS_SPECTRAL):
+                    im = ax.pcolormesh(times, x, totals[v].T, shading="auto")
+                    fig.colorbar(im, ax=ax,
+                                 label=unit_label(units, v, si=si and scale[v]))
                     ax.set_xlabel(t_label)
                     ax.set_ylabel(x_label)
-                    ax.set_title(label)
-
+                    ax.set_title(v)
                 plt.tight_layout()
-                plt.show()
+                figs.append(fig)
 
-            # ── Fig 2: time-averaged profiles ─────────────────────────────
+            # ── Time-averaged profiles with the background overlaid ───────
             if nt > 1:
-                dt = times[-1] - times[0]
-                T_avg = _trapz(total_T, x=times, axis=0) / dt
-                n_avg = _trapz(total_n, x=times, axis=0) / dt
-                u_avg = _trapz(total_u, x=times, axis=0) / dt
-                omt_avg = _trapz(omt, x=times, axis=0) / dt
-                omn_avg = _trapz(omn, x=times, axis=0) / dt
-                omu_avg = _trapz(omu, x=times, axis=0) / dt
+                # Trapezoidal: GENE's dt is adaptive, so a plain mean over an
+                # unevenly spaced time axis is biased.
+                avg = {v: self._time_average(totals[v], times)
+                       for v in _PROFILE_VARS_SPECTRAL}
                 title_str = f"average [{times[0]:.3f} - {times[-1]:.3f}]"
             else:
-                T_avg = total_T[0]
-                n_avg = total_n[0]
-                u_avg = total_u[0]
-                omt_avg = omt[0]
-                omn_avg = omn[0]
-                omu_avg = omu[0]
+                avg = {v: totals[v][0] for v in _PROFILE_VARS_SPECTRAL}
                 title_str = f"t = {times[0]:.3f}"
 
             fig, axes = plt.subplots(2, 3, figsize=(15, 8))
-            fig.suptitle(f"{name} — {title_str}")
-
-            # Top row: T, n, u
-            for ax, avg, back, ylabel in zip(
-                axes[0],
-                [T_avg, n_avg, u_avg],
-                [bg["T_back"], bg["n_back"], bg["u_back"]],
-                [f"T {name}", f"n {name}", f"$u_\\parallel$ {name}"],
-            ):
-                ax.plot(x, avg, "-b", label="total")
-                ax.plot(x, back, "--r", label="background")
-                ax.set_xlabel(x_label)
-                ax.set_ylabel(ylabel)
-                ax.legend()
-                ax.grid(True)
-
-            # Bottom row: omt, omn, omu
-            for ax, avg, back, ylabel in zip(
-                axes[1],
-                [omt_avg, omn_avg, omu_avg],
-                [bg["omt_back"], bg["omn_back"],
-                 np.zeros_like(bg["omt_back"])],
-                [f"$L_{{ref}}/L_T$ {name}", f"$L_{{ref}}/L_n$ {name}",
-                 f"$L_{{ref}}/L_u$ {name}"],
-            ):
-                ax.plot(x, avg, "-b", label="total")
-                ax.plot(x, back, "--r", label="background")
-                ax.set_xlabel(x_label)
-                ax.set_ylabel(ylabel)
-                ax.legend()
-                ax.grid(True)
-
+            fig.suptitle(f"{name} — {title_str}"
+                         + (" [SI]" if si else " [normalised]"))
+            for ax, v in zip(axes.flat, _PROFILE_VARS_SPECTRAL):
+                self._draw_profile(
+                    ax, x, avg[v], backs[v], xlabel=x_label,
+                    ylabel=unit_label(units, v, si=si and scale[v]), title=v)
             plt.tight_layout()
-            plt.show()
+            figs.append(fig)
+
+        plt.show()
+        return figs
 
 
 def _log_gradient(profile, x_o_a):
