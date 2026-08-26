@@ -660,3 +660,73 @@ class TestVolumeAverage:
         run = Run(make_fluxtube_run(tmp_path / "ft"))
         with pytest.raises(NotImplementedError):
             Fluxes2D(run).volume_average()
+
+
+class TestSpeciesPrefactor:
+    """
+    The prefactor must match `nrg` for *any* dens/temp, not just when they
+    happen to be 1.
+
+    `diag_3d.F90` applies it after `sum_3d_real` and symmetrically across ES and
+    EM — `var(5:6) *= dens`, `var(7:8) *= dens*temp` (lines 698-701) — while the
+    mom file is written earlier (line 547) with no species factor at all. So the
+    diagnostic has to supply exactly that factor, to both parts of each flux.
+
+    The reference GUI (`diag_fluxesgene3d.py:88-97`) scales only the ES terms,
+    which is what this pins against.
+    """
+
+    #: Deliberately none of these is 1, and dens != temp, so a swapped or
+    #: dropped factor cannot pass.
+    TEMPS = [2.0, 0.5]
+    DENSS = [3.0, 7.0]
+
+    @pytest.fixture
+    def scaled_run(self, tmp_path):
+        g = make_gene3d_run(tmp_path / "run", nx0=8, nz0=8, n_times=2,
+                            physical=True, temps=self.TEMPS,
+                            denss=self.DENSS)
+        return g, Run(g.folder)
+
+    def test_prefactor_values_come_from_the_namelist(self, scaled_run):
+        _, run = scaled_run
+        diag = Fluxes2D(run)
+        for name in run.species:
+            spec = next(s for s in run.params.get(0)["species"]
+                        if s["name"] == name)
+            dens, temp = spec["dens"], spec["temp"]
+            assert diag._prefactor_3d("dens", name) == pytest.approx(dens)
+            assert diag._prefactor_3d("dens_temp", name) == pytest.approx(
+                dens * temp)
+
+    @pytest.mark.parametrize("es, em, kind", [
+        ("Gamma_es", "Gamma_em", "dens"),
+        ("Q_es", "Q_em", "dens_temp"),
+    ])
+    def test_em_is_scaled_exactly_like_es(self, scaled_run, es, em, kind):
+        """
+        The one place genetools and the reference GUI disagree. If the EM factor
+        were dropped, this ratio would come out as dens (or dens*temp).
+        """
+        _, run = scaled_run
+        diag = Fluxes2D(run)
+        assert (diag._FLUXES_3D[es][0] == diag._FLUXES_3D[em][0] == kind)
+        ds_on = diag.volume_average(prefactor=True)
+        ds_off = diag.volume_average(prefactor=False)
+        for name in run.species:
+            expect = diag._prefactor_3d(kind, name)
+            for flux in (es, em):
+                got = (float(ds_on[flux].sel(species=name).isel(time=0))
+                       / float(ds_off[flux].sel(species=name).isel(time=0)))
+                assert got == pytest.approx(expect, rel=1e-10), f"{name} {flux}"
+
+    def test_a_dropped_em_factor_would_be_detected(self, scaled_run):
+        """
+        Guards the guard: with these dens/temp the ES and EM factors are far
+        from 1, so omitting one is a large error rather than a rounding one.
+        """
+        _, run = scaled_run
+        diag = Fluxes2D(run)
+        for name in run.species:
+            assert abs(diag._prefactor_3d("dens", name) - 1.0) > 0.5
+            assert abs(diag._prefactor_3d("dens_temp", name) - 1.0) > 0.5
