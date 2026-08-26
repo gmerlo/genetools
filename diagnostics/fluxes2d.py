@@ -865,7 +865,7 @@ class Fluxes2D(RunDiagnostic):
                    for k in ("Lref", "Bref", "Tref", "nref", "mref"))
 
     def _plot_3d(self, t, si=None, x_avg_lims=None, buffer_frac=0.1,
-                 show_map=True, show_traces=None, **kw):
+                 show_map=True, show_traces=None, components=True, **kw):
         """
         Time-averaged radial flux profiles, and the ``(x, t)`` map.
 
@@ -873,6 +873,9 @@ class Fluxes2D(RunDiagnostic):
         reference units, an SI figure alongside it (flux density in W/m^2 or
         1e19 m^-2 s^-1, and the area-integrated total in W or 1e19 s^-1).
         ``si=False`` gives gyro-Bohm only, ``si=True`` SI only.
+
+        Each panel shows the total and its electrostatic and electromagnetic
+        parts; pass ``components=False`` for totals alone.
 
         Returns the list of figures drawn.
         """
@@ -896,45 +899,78 @@ class Fluxes2D(RunDiagnostic):
 
         figs = []
         if show_gb:
-            figs.append(self._plot_3d_profiles(ds, x, sl, bases, si=False))
+            figs.append(self._plot_3d_profiles(ds, x, sl, bases, si=False,
+                                               components=components))
         if show_si:
-            figs.append(self._plot_3d_profiles(ds, x, sl, bases, si=True))
+            figs.append(self._plot_3d_profiles(ds, x, sl, bases, si=True,
+                                               components=components))
         if show_map:
             figs.append(self._plot_3d_map(ds, x, bases, si=show_si and not show_gb))
         plt.show()
         return figs
 
-    def _plot_3d_profiles(self, ds, x, sl, bases, si: bool):
-        """One row per flux: the density profile and the area-integrated total."""
+    #: Component -> line style. Colour distinguishes species, style the
+    #: electrostatic/electromagnetic split, so both read off one legend.
+    _COMPONENT_STYLE = (("total", "-", 1.8), ("es", "--", 1.2), ("em", ":", 1.2))
+
+    def _plot_3d_profiles(self, ds, x, sl, bases, si: bool, components=True):
+        """
+        One row per flux: the density profile and the area-integrated total.
+
+        Each panel shows the total (solid) and, unless *components* is false, the
+        electrostatic (dashed) and electromagnetic (dotted) parts. Colour is the
+        species, line style the component. The quoted mean is over the radial
+        window marked by the dashed verticals, and only for the total — that is
+        the number usually reported.
+        """
         fig, axes = plt.subplots(len(bases), 2,
-                                 figsize=(11, 3.6 * len(bases)), squeeze=False)
+                                 figsize=(12, 3.8 * len(bases)), squeeze=False)
+        colours = plt.rcParams["axes.prop_cycle"].by_key().get("color", ["C0"])
+
         for row, base in enumerate(bases):
             symbol = r"\Gamma" if base == "Gamma" else "Q"
-            for suffix, ax in ((f"{base}_total", axes[row][0]),
-                               (f"{base}_integrated", axes[row][1])):
-                key = f"{suffix}_SI" if si else suffix
-                if key not in ds:
-                    raise KeyError(
-                        f"{key} is not in the dataset. An SI figure must not "
-                        "quietly fall back to gyro-Bohm values under an SI "
-                        "axis label; check that &units carries real reference "
-                        "quantities.")
-                da = self._t_average(ds[key])
-                for name in ds["species"].values:
-                    trace = np.asarray(da.sel(species=name))
-                    ax.plot(x, trace,
-                            label=f"{name} (mean {trace[sl].mean():.3g})")
+            for col, kind in enumerate(("total", "integrated")):
+                ax = axes[row][col]
+                for si_name, colour in zip(ds["species"].values, colours):
+                    for comp, style, lw in self._COMPONENT_STYLE:
+                        if comp != "total" and not components:
+                            continue
+                        stem = (f"{base}_{kind}" if comp == "total"
+                                else f"{base}_{comp}")
+                        # The components have no area-integrated companion; scale
+                        # them by the same area rather than omitting them.
+                        key = f"{stem}_SI" if si else stem
+                        if key not in ds:
+                            if comp == "total":
+                                raise KeyError(
+                                    f"{key} is not in the dataset. An SI figure "
+                                    "must not quietly fall back to gyro-Bohm "
+                                    "values under an SI axis label; check that "
+                                    "&units carries real reference quantities.")
+                            continue
+                        da = self._t_average(ds[key].sel(species=si_name))
+                        trace = np.asarray(da)
+                        if comp != "total" and kind == "integrated":
+                            trace = trace * np.asarray(ds["Area"])
+                        label = (f"{si_name} (mean {trace[sl].mean():.3g})"
+                                 if comp == "total" else f"{si_name} {comp.upper()}")
+                        ax.plot(x, trace, ls=style, lw=lw, color=colour,
+                                label=label)
+                ax.axhline(0.0, lw=0.6, color="grey")
                 ax.set_xlabel(r"$x/a$")
-                ax.set_ylabel(ds[key].attrs.get("units", ""))
+                unit_key = (f"{base}_{kind}_SI" if si else f"{base}_{kind}")
+                ax.set_ylabel(ds[unit_key].attrs.get("units", ""))
                 ax.grid(True, alpha=0.3)
-                ax.legend(fontsize=8)
+                ax.legend(fontsize=7, ncol=1)
                 # Mark the window the quoted means are taken over.
                 ax.axvline(x[sl][0], ls="--", lw=0.8, color="k")
                 ax.axvline(x[sl][-1], ls="--", lw=0.8, color="k")
             axes[row][0].set_title(rf"$\langle {symbol} \rangle_{{FS,t}}$")
             axes[row][1].set_title(
                 rf"$\langle {symbol} \rangle_{{FS,t}} \times A$")
-        fig.suptitle("Radial flux profiles " + ("[SI]" if si else "[gyro-Bohm]"))
+        fig.suptitle("Radial flux profiles " + ("[SI]" if si else "[gyro-Bohm]")
+                     + ("  (solid total, dashed ES, dotted EM)" if components
+                        else ""))
         fig.tight_layout()
         return fig
 

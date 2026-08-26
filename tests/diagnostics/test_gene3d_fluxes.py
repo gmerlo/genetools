@@ -326,21 +326,68 @@ class TestFluxProfiles3D:
         import matplotlib.pyplot as plt
         monkeypatch.setattr(plt, "show", lambda *a, **k: None)
         figs = Fluxes2D(Run(noisy_run.folder)).plot()
+        # startswith, so appending a legend hint to a title is not a failure.
         titles = [f._suptitle.get_text() for f in figs]
-        assert titles == ["Radial flux profiles [gyro-Bohm]",
-                          "Radial flux profiles [SI]", "Flux evolution"]
+        assert len(titles) == 3
+        assert titles[0].startswith("Radial flux profiles [gyro-Bohm]")
+        assert titles[1].startswith("Radial flux profiles [SI]")
+        assert titles[2].startswith("Flux evolution")
         plt.close("all")
 
     @pytest.mark.parametrize("si, expected", [
-        (False, ["Radial flux profiles [gyro-Bohm]"]),
-        (True, ["Radial flux profiles [SI]"]),
+        (False, "Radial flux profiles [gyro-Bohm]"),
+        (True, "Radial flux profiles [SI]"),
     ])
     def test_si_override(self, noisy_run, monkeypatch, si, expected):
         import matplotlib.pyplot as plt
         monkeypatch.setattr(plt, "show", lambda *a, **k: None)
         figs = Fluxes2D(Run(noisy_run.folder)).plot(si=si, show_map=False)
-        assert [f._suptitle.get_text() for f in figs] == expected
+        assert len(figs) == 1
+        assert figs[0]._suptitle.get_text().startswith(expected)
         plt.close("all")
+
+    def test_profiles_show_total_and_both_components(self, noisy_run, monkeypatch):
+        """
+        Colour is the species, line style the component, so both read off one
+        legend: solid total, dashed ES, dotted EM.
+        """
+        import matplotlib.pyplot as plt
+        monkeypatch.setattr(plt, "show", lambda *a, **k: None)
+        figs = Fluxes2D(Run(noisy_run.folder)).plot(si=False, show_map=False)
+        ax = next(a for a in figs[0].axes
+                  if a.get_title().startswith(r"$\langle Q"))
+        styles = {l.get_label(): (l.get_linestyle(), l.get_color())
+                  for l in ax.get_lines() if not l.get_label().startswith("_")}
+        for sp in noisy_run.species:
+            total = next(k for k in styles if k.startswith(sp) and "mean" in k)
+            assert styles[total][0] == "-"
+            assert styles[f"{sp} ES"][0] == "--"
+            assert styles[f"{sp} EM"][0] == ":"
+            # One colour per species across all three components.
+            assert (styles[total][1] == styles[f"{sp} ES"][1]
+                    == styles[f"{sp} EM"][1])
+        plt.close("all")
+
+    def test_components_can_be_switched_off(self, noisy_run, monkeypatch):
+        import matplotlib.pyplot as plt
+        monkeypatch.setattr(plt, "show", lambda *a, **k: None)
+        figs = Fluxes2D(Run(noisy_run.folder)).plot(
+            si=False, show_map=False, components=False)
+        ax = next(a for a in figs[0].axes
+                  if a.get_title().startswith(r"$\langle Q"))
+        labels = [l.get_label() for l in ax.get_lines()
+                  if not l.get_label().startswith("_")]
+        assert all("ES" not in n and "EM" not in n for n in labels)
+        assert len(labels) == len(noisy_run.species)
+        plt.close("all")
+
+    def test_components_sum_to_the_total(self, noisy_run):
+        ds = Fluxes2D(Run(noisy_run.folder)).dataset()
+        for base in ("Q", "Gamma"):
+            es = np.asarray(ds[f"{base}_es"].isel(species=0, time=0))
+            em = np.asarray(ds[f"{base}_em"].isel(species=0, time=0))
+            tot = np.asarray(ds[f"{base}_total"].isel(species=0, time=0))
+            assert np.allclose(es + em, tot)
 
     def test_map_covers_every_flux_and_species(self, noisy_run, monkeypatch):
         import matplotlib.pyplot as plt
