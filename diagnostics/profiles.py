@@ -746,36 +746,95 @@ class Profiles(RunDiagnostic):
 
         Species get a figure each rather than sharing panels — their profiles
         differ by the species factors, so overlaying them on one axis compresses
-        whichever is smaller into the baseline. With *maps* each species also
-        gets its ``(t, x)`` evolution heatmaps, matching the regular-GENE path.
+        whichever is smaller into the baseline.
+
+        *t* is the **averaging window only**. The dataset is always built over
+        every output time in every segment, so the ``(t, x)`` maps show the whole
+        run and the window is drawn on them; only the profile panels are
+        restricted to it.
         """
-        ds = self._dataset_3d(t)
+        ds = self._dataset_3d(None)                 # always the full run
+        a, b = self._window(t)
         units = self.params.get("units", {}) or {}
         x = np.asarray(ds["x"])
         tag = " [SI]" if si else " [normalised]"
         figs = []
         for name in ds["species"].values:
             if maps:
-                figs.append(self._fig_3d_map(ds, name, units, si, tag))
+                figs.append(self._fig_3d_map(ds, name, units, si, tag, a, b))
             fig, axes = plt.subplots(2, 2, figsize=(10, 7))
             for ax, v in zip(axes.ravel(), _PROFILE_VARS_3D):
                 key = self._si_key(ds, v, si)
                 back_key = self._si_key(ds, f"{v}_back", si)
-                total = self._t_average(ds[key].sel(species=name))
+                total = self._t_average(
+                    self._select_time(ds[key].sel(species=name), a, b))
                 self._draw_profile(
                     ax, x, np.asarray(total),
                     np.asarray(ds[back_key].sel(species=name)),
                     xlabel=r"$x/a$",
                     ylabel=unit_label(units, v, si=si and key.endswith("_SI")),
                     title=v)
-            fig.suptitle(f"{name} — profiles" + tag)
+            fig.suptitle(f"{name} — profiles" + tag
+                         + self._window_tag(ds, a, b))
             fig.tight_layout()
             figs.append(fig)
         plt.show()
         return figs
 
-    def _fig_3d_map(self, ds, name, units, si, tag):
-        """The ``(t, x)`` evolution of each quantity, for one species."""
+    @staticmethod
+    def _time_mask(times, a, b):
+        """
+        Boolean mask of *times* inside the averaging window.
+
+        Refuses an empty window rather than letting the average come back NaN,
+        which reads as a physics problem instead of a window that missed.
+        """
+        times = np.asarray(times, dtype=float)
+        keep = np.ones(times.size, dtype=bool)
+        if a is not None:
+            keep &= times >= a
+        if b is not None:
+            keep &= times <= b
+        if not keep.any():
+            raise ValueError(
+                f"averaging window ({a}, {b}) contains no output time; "
+                f"available: {times.min():.4g}..{times.max():.4g}")
+        return keep
+
+    @staticmethod
+    def _select_time(da, a, b):
+        """
+        Restrict a DataArray to the averaging window, refusing an empty one.
+
+        Slicing to nothing would make the average silently NaN, which looks like
+        a physics problem rather than a window that missed the data.
+        """
+        if a is None and b is None:
+            return da
+        out = da.sel(time=slice(a, b))
+        if out.sizes.get("time", 0) == 0:
+            times = np.asarray(da["time"])
+            raise ValueError(
+                f"averaging window ({a}, {b}) contains no output time; "
+                f"available: {times.min():.4g}..{times.max():.4g}")
+        return out
+
+    @staticmethod
+    def _window_tag(ds, a, b):
+        """Suffix naming the averaging window, for a figure title."""
+        times = np.asarray(ds["time"])
+        lo = times.min() if a is None else a
+        hi = times.max() if b is None else b
+        return f"  avg [{lo:.4g}, {hi:.4g}]"
+
+    def _fig_3d_map(self, ds, name, units, si, tag, a=None, b=None):
+        """
+        The ``(t, x)`` evolution of each quantity, for one species.
+
+        Always the full time axis — every output time in every segment — with
+        the averaging window marked, so what the profile panels averaged over is
+        visible against the whole run.
+        """
         x = np.asarray(ds["x"])
         times = np.asarray(ds["time"])
         fig, axes = plt.subplots(2, 2, figsize=(11, 7.5))
@@ -786,10 +845,15 @@ class Profiles(RunDiagnostic):
             fig.colorbar(mesh, ax=ax,
                          label=unit_label(units, v,
                                           si=si and key.endswith("_SI")))
+            for edge in (a, b):
+                if edge is not None:
+                    ax.axvline(edge, color="k", ls="--", lw=0.9)
             ax.set_xlabel(r"$t\;c_{\rm ref}/L_{\rm ref}$")
             ax.set_ylabel(r"$x/a$")
             ax.set_title(v)
-        fig.suptitle(f"{name} — profile evolution" + tag)
+        fig.suptitle(f"{name} — profile evolution" + tag
+                     + f"  ({times.size} times, "
+                       f"{times.min():.4g}..{times.max():.4g})")
         fig.tight_layout()
         return fig
 
@@ -871,18 +935,19 @@ class Profiles(RunDiagnostic):
         """
         if self.is_3d:
             return self._plot_3d(t, si=si, maps=maps)
-        self.compute(t)
-        a, b = self._bounds(t)
+        # Compute over the whole run, not the window: the map always shows every
+        # output time in every segment, and *t* restricts only the average.
+        self.compute(None)
         if eq_profs is None:
             eq_profs = self.run.eq_profiles
-        return self._plot_spectral(self.coord, self.params, a, b,
+        return self._plot_spectral(self.coord, self.params,
                                    equilibrium_profiles=eq_profs,
-                                   si=si, maps=maps, **kw)
+                                   si=si, maps=maps, avg_window=t, **kw)
 
     def _plot_spectral(self, coords: dict, params: dict,
-             t_start: float = None, t_stop: float = None,
              equilibrium_profiles: dict = None,
-             si: bool = False, maps: bool = False) -> list:
+             si: bool = False, maps: bool = False,
+             avg_window=None) -> list:
         """
         Plot profile diagnostics from the saved HDF5 file.
 
@@ -896,16 +961,19 @@ class Profiles(RunDiagnostic):
             Coordinate dictionary.
         params : dict
             Parameter dictionary.
-        t_start, t_stop : float, optional
-            Time window for averaging/plotting.
         equilibrium_profiles : dict, optional
             Required for global runs. See :meth:`build_background`.
         si : bool
             Convert to SI where a conversion exists.
         maps : bool
-            Also draw the ``(t, x)`` evolution heatmaps.
+            Also draw the ``(t, x)`` evolution heatmaps, over the whole run.
+        avg_window : (float, float), optional
+            Restrict the time average to this window. Everything cached is
+            loaded and mapped regardless; a negative bound means "unbounded",
+            so ``(500, -1)`` averages from t=500 to the end.
         """
-        data = self.load(t_start, t_stop)
+        win_a, win_b = self._window(avg_window)
+        data = self.load()                  # everything cached, all segments
         if not data or "time" not in data or len(data["time"]) == 0:
             print("No profile data available to plot.")
             return []
@@ -978,15 +1046,23 @@ class Profiles(RunDiagnostic):
                     backs[v] = backs[v] * conv[0]
                 scale[v] = conv is not None
 
-            # ── (t, x) heatmaps, only when asked for ─────────────────────
+            # ── (t, x) heatmaps: always the whole run ────────────────────
+            # Never restricted to the averaging window — the point of the map is
+            # to show where in the run the average was taken from, so the window
+            # is drawn on it instead.
             if maps and nt > 1:
                 fig, axes = plt.subplots(2, 3, figsize=(15, 8))
                 fig.suptitle(f"{name} — profile evolution"
-                             + (" [SI]" if si else " [normalised]"))
+                             + (" [SI]" if si else " [normalised]")
+                             + f"  ({nt} times, "
+                               f"{times[0]:.4g}..{times[-1]:.4g})")
                 for ax, v in zip(axes.flat, _PROFILE_VARS_SPECTRAL):
                     im = ax.pcolormesh(times, x, totals[v].T, shading="auto")
                     fig.colorbar(im, ax=ax,
                                  label=unit_label(units, v, si=si and scale[v]))
+                    for edge in (win_a, win_b):
+                        if edge is not None:
+                            ax.axvline(edge, color="k", ls="--", lw=0.9)
                     ax.set_xlabel(t_label)
                     ax.set_ylabel(x_label)
                     ax.set_title(v)
@@ -994,15 +1070,17 @@ class Profiles(RunDiagnostic):
                 figs.append(fig)
 
             # ── Time-averaged profiles with the background overlaid ───────
-            if nt > 1:
+            keep = self._time_mask(times, win_a, win_b)
+            t_avg = times[keep]
+            if t_avg.size > 1:
                 # Trapezoidal: GENE's dt is adaptive, so a plain mean over an
                 # unevenly spaced time axis is biased.
-                avg = {v: self._time_average(totals[v], times)
+                avg = {v: self._time_average(totals[v][keep], t_avg)
                        for v in _PROFILE_VARS_SPECTRAL}
-                title_str = f"average [{times[0]:.3f} - {times[-1]:.3f}]"
+                title_str = f"average [{t_avg[0]:.4g} - {t_avg[-1]:.4g}]"
             else:
-                avg = {v: totals[v][0] for v in _PROFILE_VARS_SPECTRAL}
-                title_str = f"t = {times[0]:.3f}"
+                avg = {v: totals[v][keep][0] for v in _PROFILE_VARS_SPECTRAL}
+                title_str = f"t = {t_avg[0]:.4g}"
 
             fig, axes = plt.subplots(2, 3, figsize=(15, 8))
             fig.suptitle(f"{name} — {title_str}"

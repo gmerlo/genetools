@@ -439,3 +439,39 @@ class TestExbConventions:
         result = compute_exb(phi, _make_global_params(nx, nky, nz),
                              geom, _make_global_coord(nx))
         np.testing.assert_allclose(result["phi_zonal"], profile, rtol=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# The -1 time-bound sentinel (shared by every diagnostic)
+# ---------------------------------------------------------------------------
+
+class TestNegativeTimeBound:
+    """
+    A negative bound means "unbounded on that side": `t=(500, -1)` is "from 500
+    to the end". GENE times start at zero and increase, so a negative bound
+    could never select anything and is free to carry that meaning.
+    """
+
+    @pytest.mark.parametrize("t, expected", [
+        (None, (None, None)),
+        ((500, 2000), (500.0, 2000.0)),
+        ((500, -1), (500.0, None)),
+        ((-1, 2000), (None, 2000.0)),
+        ((-1, -1), (None, None)),
+        (500, (500.0, None)),
+        (-1, (None, None)),
+    ])
+    def test_window(self, t, expected):
+        from genetools.diagnostics._base import RunDiagnostic
+        assert RunDiagnostic._window(t) == expected
+
+    def test_bounds_open_out_to_the_streaming_limits(self):
+        from genetools.diagnostics._base import RunDiagnostic
+        lo, hi = RunDiagnostic._bounds((500, -1))
+        assert lo == 500.0
+        assert hi > 1e29
+
+    def test_zero_is_a_real_bound_not_a_sentinel(self):
+        """t=0 is the first output time of a run, not 'unbounded'."""
+        from genetools.diagnostics._base import RunDiagnostic
+        assert RunDiagnostic._window((0, 10)) == (0.0, 10.0)

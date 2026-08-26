@@ -303,14 +303,26 @@ class RunDiagnostic(CachingDiagnostic):
 
     @staticmethod
     def _window(t):
-        """Normalise *t* to ``(start, stop)``, either of which may be ``None``."""
+        """
+        Normalise *t* to ``(start, stop)``, either of which may be ``None``.
+
+        A negative bound means "unbounded on that side", so ``t=(500, -1)``
+        reads as "from t=500 to the end of the run". GENE times start at zero and
+        increase, so a negative bound could never select anything and is free to
+        carry that meaning.
+        """
+        def one(v):
+            if v is None:
+                return None
+            v = float(v)
+            return None if v < 0 else v
+
         if t is None:
             return None, None
         if isinstance(t, (tuple, list)):
             a, b = t
-            return (None if a is None else float(a),
-                    None if b is None else float(b))
-        return float(t), None
+            return one(a), one(b)
+        return one(t), None
 
     @classmethod
     def _bounds(cls, t):

@@ -265,6 +265,66 @@ class TestProfiles3D:
         for ax in panels:
             assert ax.collections, f"{ax.get_title()} is not a colour map"
 
+    def test_map_spans_the_whole_run_whatever_the_window(self, run3d, headless):
+        """
+        The map is not restricted to the averaging window: its job is to show
+        where in the run the average came from.
+        """
+        _, run = run3d
+        full = np.asarray(g3.Profiles(run).data["time"])
+        mid = float(full[len(full) // 2])
+
+        def map_span(t):
+            figs = g3.Profiles(run).plot(t=t, maps=True)
+            evo = next(f for f in figs
+                       if "evolution" in f._suptitle.get_text())
+            return evo._suptitle.get_text()
+
+        assert f"{full.size} times" in map_span(None)
+        assert f"{full.size} times" in map_span((mid, -1))
+        assert f"{full.size} times" in map_span((full[0], mid))
+
+    def test_window_restricts_only_the_average(self, run3d, headless):
+        _, run = run3d
+        full = np.asarray(g3.Profiles(run).data["time"])
+        mid = float(full[len(full) // 2])
+        figs = g3.Profiles(run).plot(t=(mid, -1), maps=True)
+        prof = next(f for f in figs if " — profiles" in f._suptitle.get_text())
+        assert f"avg [{mid:.4g}" in prof._suptitle.get_text()
+
+    def test_minus_one_means_to_the_end(self, run3d, headless):
+        """`-1` as a bound reads as 'unbounded on that side'."""
+        _, run = run3d
+        full = np.asarray(g3.Profiles(run).data["time"])
+        a = float(full[1])
+        with_sentinel = g3.Profiles(run).plot(t=(a, -1))[0]
+        explicit = g3.Profiles(run).plot(t=(a, float(full[-1])))[0]
+        assert (with_sentinel._suptitle.get_text()
+                == explicit._suptitle.get_text())
+
+    def test_averaged_values_differ_between_windows(self, tmp_path, headless):
+        """
+        Otherwise the window plumbing could be inert and every test above
+        vacuous. Needs a run whose profile actually evolves: on the `physical`
+        fixture the perturbation is far below the background, so the total is
+        the same to within tolerance whatever window is used.
+        """
+        g = make_gene3d_run(tmp_path / "run", nx0=8, nz0=8, n_times=8)
+        run = Run(g.folder)
+        full = np.asarray(g3.Profiles(run).data["time"])
+        mid = float(full[len(full) // 2])
+        early = g3.Profiles(run).plot(t=(full[0], mid))[0]
+        late = g3.Profiles(run).plot(t=(mid, -1))[0]
+        y_early = early.axes[0].get_lines()[0].get_ydata()
+        y_late = late.axes[0].get_lines()[0].get_ydata()
+        assert not np.allclose(y_early, y_late), \
+            "the averaging window changed nothing"
+
+    def test_empty_window_is_refused(self, run3d):
+        _, run = run3d
+        with pytest.raises(ValueError, match="contains no output time"):
+            g3.Profiles(run).plot(t=(1e6, 2e6))
+
     def test_maps_honours_si(self, run3d, headless):
         _, run = run3d
         figs = g3.Profiles(run).plot(si=True, maps=True)
