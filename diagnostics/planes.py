@@ -69,7 +69,7 @@ class Planes(RunDiagnostic):
     def __init__(self, run, quantities=("phi",), species=None,
                  n_theta=128, n_phi=64, rms=False, x_avg=False,
                  xlim=None, t_avg=True):
-        self.run = run
+        super().__init__(run)
         self.quantities = tuple(quantities)
         self.species = species or (run.species[0] if run.species else None)
         self.n_theta = int(n_theta)

@@ -41,7 +41,7 @@ class TimeTraces(RunDiagnostic):
 
     def __init__(self, run, quantities=("phi",), species=None,
                  xlim=None, ylim=None, zlim=None):
-        self.run = run
+        super().__init__(run)
         self.quantities = tuple(quantities)
         self.species = species or (run.species[0] if run.species else None)
         self.xlim, self.ylim, self.zlim = xlim, ylim, zlim

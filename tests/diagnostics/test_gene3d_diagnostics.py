@@ -109,6 +109,37 @@ class TestCommon:
                     offenders.append(f"{path.name}:{n}")
         assert not offenders, f"plain time means found: {offenders}"
 
+    def test_every_diagnostic_calls_the_base_constructor(self):
+        """
+        ``RunDiagnostic.__init__`` is what enforces ``supported``. A subclass
+        that assigns ``self.run`` itself instead of calling ``super().__init__``
+        silently loses the geometry guard, so a GENE-3D-only diagnostic runs on
+        a flux tube and dies somewhere deep instead of refusing.
+        """
+        import ast, pathlib
+        root = pathlib.Path(__file__).resolve().parents[2] / "diagnostics"
+        offenders = []
+        for path in sorted(root.glob("*.py")):
+            tree = ast.parse(path.read_text())
+            for cls in [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]:
+                bases = {b.id for b in cls.bases if isinstance(b, ast.Name)}
+                if "RunDiagnostic" not in bases:
+                    continue
+                init = next((f for f in cls.body
+                             if isinstance(f, ast.FunctionDef)
+                             and f.name == "__init__"), None)
+                if init is None:          # inherited, so the guard runs
+                    continue
+                calls_super = any(
+                    isinstance(n, ast.Call)
+                    and isinstance(n.func, ast.Attribute)
+                    and n.func.attr == "__init__"
+                    for n in ast.walk(init))
+                if not calls_super:
+                    offenders.append(f"{path.name}:{cls.name}")
+        assert not offenders, (
+            f"__init__ bypasses the base constructor: {offenders}")
+
     def test_zero_length_window_returns_the_first_sample(self):
         """
         A zero-duration window has no interval to integrate over. The shared

@@ -53,7 +53,7 @@ class Vis(RunDiagnostic):
     supported = ("xy_global",)
 
     def __init__(self, run, quantities=("phi",), species=None, xlim=None):
-        self.run = run
+        super().__init__(run)
         self.quantities = tuple(quantities)
         self.species = species or (run.species[0] if run.species else None)
         self.xlim = xlim
