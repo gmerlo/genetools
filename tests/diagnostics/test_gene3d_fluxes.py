@@ -464,12 +464,25 @@ class TestSpectra3DPath:
         assert lo == pytest.approx(x[1])
         assert hi == pytest.approx(x[-2])
 
-    def test_default_window_trims_the_buffers(self, tmp_path):
-        """Needs enough radial points that a 10% trim is a whole cell."""
+    def test_default_keeps_every_radial_point(self, tmp_path):
+        """
+        Nothing is trimmed or averaged away unless asked: the (x, ky) map is the
+        primary output, so the default window is the whole domain.
+        """
         g = make_gene3d_run(tmp_path / "run", nx0=20, n_times=2, physical=True)
         run = Run(g.folder)
         x = np.asarray(run.coords[0]["x_o_a"])
         ds = Spectra(run).dataset()
+        assert ds.attrs["x_avg_range"] == [pytest.approx(x[0]),
+                                           pytest.approx(x[-1])]
+        assert ds.sizes["x"] == 20
+
+    def test_buffer_frac_still_trims_when_asked(self, tmp_path):
+        """Needs enough radial points that a 10% trim is a whole cell."""
+        g = make_gene3d_run(tmp_path / "run", nx0=20, n_times=2, physical=True)
+        run = Run(g.folder)
+        x = np.asarray(run.coords[0]["x_o_a"])
+        ds = Spectra(run, buffer_frac=0.1).dataset()
         lo, hi = ds.attrs["x_avg_range"]
         assert lo == pytest.approx(x[2])
         assert hi == pytest.approx(x[-3])
@@ -481,6 +494,43 @@ class TestSpectra3DPath:
         ds = Spectra(run).dataset()
         assert ds.attrs["x_avg_range"] == [pytest.approx(x[0]),
                                            pytest.approx(x[-1])]
+
+    def test_default_plot_is_the_two_dimensional_map(self):
+        """
+        `plot()` leads with the (x, ky) maps rather than an x-averaged spectrum.
+        """
+        from genetools.diagnostics.spectra import Spectra as S
+        assert S._views(None) == ("map",)
+        assert S._views("all") == ("map", "ky", "profile")
+        assert S._views("profile") == ("profile",)
+        assert S._views(("map", "ky")) == ("map", "ky")
+
+    def test_unknown_view_is_rejected(self):
+        from genetools.diagnostics.spectra import Spectra as S
+        with pytest.raises(ValueError, match="unknown spectra view"):
+            S._views("nonsense")
+
+    def test_plot_draws_only_the_requested_views(self, physical_run,
+                                                 monkeypatch):
+        import matplotlib.pyplot as plt
+        monkeypatch.setattr(plt, "show", lambda *a, **k: None)
+        run = Run(physical_run.folder)
+        diag = Spectra(run)
+        assert len(diag.plot()) == 1                        # the map
+        assert len(diag.plot(which="all")) == 3
+        assert len(diag.plot(which=("ky", "profile"))) == 2
+
+    def test_default_plot_panels_are_colour_maps(self, physical_run,
+                                                 monkeypatch):
+        """A 1-D panel would satisfy a figure count; check it is really 2-D."""
+        import matplotlib.pyplot as plt
+        monkeypatch.setattr(plt, "show", lambda *a, **k: None)
+        run = Run(physical_run.folder)
+        fig = Spectra(run).plot()[0]
+        panels = [a for a in fig.axes if a.get_title()]
+        assert panels
+        for ax in panels:
+            assert ax.collections, f"{ax.get_title()} is not a colour map"
 
     def test_mismatched_field_and_moment_times_are_paired_by_value(
             self, tmp_path):

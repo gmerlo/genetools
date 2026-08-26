@@ -139,7 +139,7 @@ class Spectra(RunDiagnostic):
     }
 
     def __init__(self, run=None, outfile: str = None, folder: str = None,
-                 x_avg_lims=None, buffer_frac=0.1):
+                 x_avg_lims=None, buffer_frac=0.0):
         """
         Parameters
         ----------
@@ -147,11 +147,14 @@ class Spectra(RunDiagnostic):
         outfile, folder : str, optional
             Override the HDF5 cache location; normally derived from the run.
         x_avg_lims : (float, float), optional
-            GENE-3D only: radial averaging range in ``x/a``. Defaults to
-            trimming *buffer_frac* from each end, keeping the Krook buffer
-            regions out of the spectrum.
+            Global geometries: radial range the ``*_ky`` reduction averages
+            over, in ``x/a``. Defaults to the **whole domain** — the ``(x, ky)``
+            map is the primary output and nothing is averaged away unless asked.
         buffer_frac : float
-            GENE-3D only; fraction trimmed from each radial end.
+            Fraction trimmed from each radial end when *x_avg_lims* is not
+            given. Zero by default; set it (0.1 is the usual choice) to keep the
+            Krook buffer regions, where the fluxes are unphysical, out of the
+            radial average.
         """
         self.x_avg_lims = x_avg_lims
         self.buffer_frac = buffer_frac
@@ -749,24 +752,46 @@ class Spectra(RunDiagnostic):
             ds.attrs["consistency_" + label.replace("/", "_")] = float(ratio)
         return ds
 
-    def _plot_3d(self, t):
+    def _plot_3d(self, t, which=None):
         """
-        Three figures: the ``(x, ky)`` maps, the ky spectra, the flux profiles.
+        The ``(x, ky)`` maps by default; ``which`` adds or swaps the 1-D views.
 
         Mirrors the x-global layout, so the two global geometries are read the
         same way.
         """
+        views = self._views(which)
         ds = self._dataset_3d(t)
         bases = [k[:-4] for k in ds.data_vars if k.endswith("_xky")]
         if not bases:
             raise ValueError("No flux spectra available to plot.")
         lo, hi = ds.attrs["x_avg_range"]
         window = rf"$x/a \in [{lo:.2f}, {hi:.2f}]$"
-        figs = [self._fig_3d_maps(ds, bases),
-                self._fig_3d_ky(ds, bases, window),
-                self._fig_3d_profiles(ds, bases)]
+        builders = {"map": lambda: self._fig_3d_maps(ds, bases),
+                    "ky": lambda: self._fig_3d_ky(ds, bases, window),
+                    "profile": lambda: self._fig_3d_profiles(ds, bases)}
+        figs = [builders[v]() for v in views]
         plt.show()
         return figs
+
+    #: Views `plot` can draw for the global geometries.
+    _VIEWS = ("map", "ky", "profile")
+    #: Drawn when `which` is not given: the 2-D map, nothing averaged away.
+    _DEFAULT_VIEW = ("map",)
+
+    @classmethod
+    def _views(cls, which):
+        """Normalise the ``which`` argument to a validated tuple of views."""
+        if which is None:
+            return cls._DEFAULT_VIEW
+        if which == "all":
+            return cls._VIEWS
+        views = (which,) if isinstance(which, str) else tuple(which)
+        bad = [v for v in views if v not in cls._VIEWS]
+        if bad:
+            raise ValueError(
+                f"unknown spectra view(s) {bad}; expected any of "
+                f"{list(cls._VIEWS)} or 'all'")
+        return views
 
     @staticmethod
     def _positive_ky(ds):
@@ -843,15 +868,41 @@ class Spectra(RunDiagnostic):
 
     # ------------------------------------------------------------------
 
-    def plot(self, t=None, x_avg_lims=None, **kw):
-        """Plot the flux spectra over the window *t*."""
+    def plot(self, t=None, which=None, x_avg_lims=None, **kw):
+        """
+        Plot the flux spectra over the window *t*.
+
+        Parameters
+        ----------
+        t : (float, float), optional
+            Time window.
+        which : str or sequence of str, optional
+            Global geometries only — which views to draw:
+
+            - ``'map'``     — the ``(x, ky)`` colour maps (**default**)
+            - ``'ky'``      — the radially averaged ky spectra
+            - ``'profile'`` — the ky-summed flux profile against x
+            - ``'all'``     — all three
+
+            A flux tube has no ``(x, ky)`` map, since x is spectral there;
+            passing *which* on one raises rather than quietly ignoring it.
+        x_avg_lims : (float, float), optional
+            Radial range for the ``ky`` view.
+        """
+        if which is not None and not self.is_3d \
+                and self.geometry_kind != "x_global":
+            raise ValueError(
+                f"'which' applies to the global geometries; this run is "
+                f"{self.geometry_kind}, whose spectra are kx/ky/z and have no "
+                "(x, ky) map — x is spectral.")
         if self.is_3d:
-            return self._plot_3d(t)
+            return self._plot_3d(t, which=which)
         lo, hi = self._bounds(t)
         r = self.run
         if self.geometry_kind == "x_global":
             self.compute(t)
             return self._plot_global(self.coord, self.params, lo, hi,
+                                     which=which,
                                      x_avg_lims=x_avg_lims, **kw)
         return self._plot_local(r.field, [r.mom(n) for n in r.species],
                                 r.coords, r.geometry, r.params, lo, hi, **kw)
@@ -1291,13 +1342,14 @@ class Spectra(RunDiagnostic):
         return ds
 
     def _plot_global(self, coords, params, t_start=None, t_stop=None,
-                     x_avg_lims=None):
+                     which=None, x_avg_lims=None):
         """
-        Per species: the ky-weighted ``(x, ky)`` map, then the 1-D reductions.
+        The ``(x, ky)`` map by default; ``which`` selects the 1-D views too.
 
         ky weighting puts equal areas at equal flux contribution on a
         logarithmic ky axis, since ``int F dky = int ky F d(ln ky)``.
         """
+        views = self._views(which)
         if x_avg_lims is not None:
             self.x_avg_lims = x_avg_lims
         ds = self._dataset_global(coords, params, self.run.species,
@@ -1307,66 +1359,95 @@ class Spectra(RunDiagnostic):
             return []
 
         x = np.asarray(ds["x"])
-        ky = np.asarray(ds["ky"])
         bases = [k[:-4] for k in ds.data_vars if k.endswith("_xky")]
         order = [b for b in self._ES_GLOBAL + self._EM_GLOBAL if b in bases]
         lo, hi = ds.attrs.get("x_avg_range", (x[0], x[-1]))
-        # ky=0 is a structural zero — the electrostatic fluxes are built from
-        # v_E = -i ky phi, which vanishes there — so it carries no information
-        # and would force a linear region into an otherwise logarithmic axis.
-        kpos = ky > 0
-        ky_p = ky[kpos] if kpos.any() else ky
 
         figs = []
         for name in ds["species"].values:
-            fig, axes = plt.subplots(1, len(order),
-                                     figsize=(5 * len(order), 4),
-                                     squeeze=False)
-            fig.suptitle(f"{name} — ky-weighted flux maps")
-            for ax, base in zip(axes[0], order):
-                arr = np.asarray(ds[base + "_xky"].sel(species=name))
-                weighted = (arr[:, kpos] * ky_p[np.newaxis, :] if kpos.any()
-                            else arr * ky[np.newaxis, :])
-                norm, cmap = _flux_norm_and_cmap(weighted)
-                im = ax.pcolormesh(ky_p, x, weighted, shading="auto",
-                                   norm=norm, cmap=cmap)
-                fig.colorbar(im, ax=ax)
-                ax.set_xscale("log")
-                ax.set_xlabel(r"$k_y \rho_{\rm ref}$")
-                ax.set_ylabel(r"$x / a$")
-                ax.set_title(_ky_weighted_label(
-                    self._TITLES_GLOBAL.get(base, base)))
-            fig.tight_layout()
-            figs.append(fig)
-
-            fig, axes = plt.subplots(1, 3, figsize=(16, 4))
-            fig.suptitle(f"{name} — x-avg [{lo:.3f}, {hi:.3f}]")
-            for base in order:
-                spec = np.asarray(ds[base + "_ky"].sel(species=name))
-                weighted = spec * ky
-                colour = self._COLORS_GLOBAL.get(base, "b")
-                label = self._TITLES_GLOBAL.get(base, base)
-                axes[0].plot(ky, weighted, color=colour,
-                             label=_ky_weighted_label(label))
-                axes[1].plot(ky, np.abs(weighted), color=colour,
-                             label=_ky_weighted_label(label))
-                # The radial profile stays unweighted: summed over ky it is the
-                # physical total flux through each flux surface.
-                axes[2].plot(x, np.asarray(ds[base + "_x"].sel(species=name)),
-                             color=colour, label=label)
-            axes[0].set(xlabel=r"$k_y \rho_{\rm ref}$",
-                        ylabel=r"$k_y\,$Flux [GB]", title="linear")
-            axes[1].set(xlabel=r"$k_y \rho_{\rm ref}$",
-                        ylabel=r"$|k_y\,$Flux$|$ [GB]", title="log-log")
-            axes[1].set_xscale("log")
-            axes[1].set_yscale("log")
-            axes[2].set(xlabel=r"$x / a$", ylabel="Flux [GB]",
-                        title=r"$\sum_{k_y}$ — radial profile")
-            for ax in axes:
-                ax.legend(fontsize=8)
-                ax.grid(True, alpha=0.3)
-            fig.tight_layout()
-            figs.append(fig)
-
+            if "map" in views:
+                figs.append(self._fig_global_map(ds, name, order))
+            lines = [v for v in ("ky", "profile") if v in views]
+            if lines:
+                figs.append(self._fig_global_lines(ds, name, order, lines,
+                                                   lo, hi))
         plt.show()
         return figs
+
+    @staticmethod
+    def _drop_ky_zero(ky):
+        """
+        Return ``(ky_positive, mask)``, dropping the ky=0 column.
+
+        It is a structural zero — the electrostatic fluxes are built from
+        ``v_E = -i ky phi``, which vanishes there — so it carries no information
+        and would force a linear region into an otherwise logarithmic axis.
+        """
+        mask = ky > 0
+        return (ky[mask] if mask.any() else ky), mask
+
+    def _fig_global_map(self, ds, name, order):
+        """The ky-weighted ``(x, ky)`` map, one panel per flux."""
+        x = np.asarray(ds["x"])
+        ky = np.asarray(ds["ky"])
+        ky_p, kpos = self._drop_ky_zero(ky)
+        fig, axes = plt.subplots(1, len(order), figsize=(5 * len(order), 4),
+                                 squeeze=False)
+        fig.suptitle(f"{name} — ky-weighted flux maps")
+        for ax, base in zip(axes[0], order):
+            arr = np.asarray(ds[base + "_xky"].sel(species=name))
+            weighted = (arr[:, kpos] * ky_p[np.newaxis, :] if kpos.any()
+                        else arr * ky[np.newaxis, :])
+            norm, cmap = _flux_norm_and_cmap(weighted)
+            im = ax.pcolormesh(ky_p, x, weighted, shading="auto",
+                               norm=norm, cmap=cmap)
+            fig.colorbar(im, ax=ax)
+            ax.set_xscale("log")
+            ax.set_xlabel(r"$k_y \rho_{\rm ref}$")
+            ax.set_ylabel(r"$x / a$")
+            ax.set_title(_ky_weighted_label(
+                self._TITLES_GLOBAL.get(base, base)))
+        fig.tight_layout()
+        return fig
+
+    def _fig_global_lines(self, ds, name, order, lines, lo, hi):
+        """The 1-D reductions: ky spectra and/or the radial flux profile."""
+        x = np.asarray(ds["x"])
+        ky = np.asarray(ds["ky"])
+        # 'ky' contributes two panels (linear and log-log), 'profile' one.
+        panels = (["ky_lin", "ky_log"] if "ky" in lines else []) \
+            + (["profile"] if "profile" in lines else [])
+        fig, axes = plt.subplots(1, len(panels), figsize=(5.3 * len(panels), 4),
+                                 squeeze=False)
+        by = dict(zip(panels, axes[0]))
+        fig.suptitle(f"{name} — x-avg [{lo:.3f}, {hi:.3f}]")
+        for base in order:
+            colour = self._COLORS_GLOBAL.get(base, "b")
+            label = self._TITLES_GLOBAL.get(base, base)
+            if "ky" in lines:
+                weighted = np.asarray(ds[base + "_ky"].sel(species=name)) * ky
+                by["ky_lin"].plot(ky, weighted, color=colour,
+                                  label=_ky_weighted_label(label))
+                by["ky_log"].plot(ky, np.abs(weighted), color=colour,
+                                  label=_ky_weighted_label(label))
+            if "profile" in lines:
+                # Unweighted: summed over ky this is the physical total flux
+                # through each flux surface.
+                by["profile"].plot(
+                    x, np.asarray(ds[base + "_x"].sel(species=name)),
+                    color=colour, label=label)
+        if "ky" in lines:
+            by["ky_lin"].set(xlabel=r"$k_y \rho_{\rm ref}$",
+                             ylabel=r"$k_y\,$Flux [GB]", title="linear")
+            by["ky_log"].set(xlabel=r"$k_y \rho_{\rm ref}$",
+                             ylabel=r"$|k_y\,$Flux$|$ [GB]", title="log-log")
+            by["ky_log"].set_xscale("log")
+            by["ky_log"].set_yscale("log")
+        if "profile" in lines:
+            by["profile"].set(xlabel=r"$x / a$", ylabel="Flux [GB]",
+                              title=r"$\sum_{k_y}$ — radial profile")
+        for ax in axes[0]:
+            ax.legend(fontsize=8)
+            ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        return fig

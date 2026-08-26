@@ -916,6 +916,10 @@ class TestFacade:
         # geometry is reported and the GENE-3D-only paths refuse.
         assert isinstance(run.spectra, g3.Spectra)
         assert run.spectra.geometry_kind == "flux_tube"
+        # A flux tube has no (x, ky) map — x is spectral — so `which` must be
+        # refused, not quietly ignored the way `maps` once was.
+        with pytest.raises(ValueError, match="no.*x, ky.*map|global geometries"):
+            run.spectra.plot(which="map")
         assert not run.fluxes2d.is_3d
 
 
