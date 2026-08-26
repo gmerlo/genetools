@@ -392,10 +392,6 @@ class Run:
         from .diagnostics.amplitude import AmplitudeSpectra
         return AmplitudeSpectra(self)
 
-    @cached_property
-    def zonal(self):
-        from .diagnostics.zonal import Zonal
-        return Zonal(self)
 
     @cached_property
     def vexmax(self):

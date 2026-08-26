@@ -9,10 +9,15 @@ Computes the zonal (ky=0) component of the electrostatic potential and
 derives from it:
 
     - phi_zonal    : flux-surface-averaged zonal potential (real space)
-    - E_r          : radial electric field
-    - v_ExB        : ExB velocity in the radial direction
-    - omega_ExB    : ExB shearing rate  ω_ExB = -∂²φ_zonal/∂x² / C_xy
-    - shearing_rms : rms shearing rate  √⟨ω_ExB²⟩_x  (local geometry only)
+    - e_r          : radial electric field
+    - v_exb        : ExB velocity in the radial direction
+    - omega_exb    : ExB shearing rate  ω_ExB = -∂²φ_zonal/∂x² / C_xy
+    - shearing_rms : rms shearing rate  √⟨ω_ExB²⟩_x
+
+Every geometry returns the same variable names, so ``run.shearing.data`` means
+the same thing whatever the run is. The GENE-3D path additionally gives
+``omega_exb_rms_x`` / ``omega_exb_rms_t``, and the spectral local path the zonal
+kx spectrum ``phi_zonal_kx_abs``.
 
 Supports both **local** (x_local=True, spectral in x) and **global**
 (x_local=False, real-space radial grid) geometry, following the same
@@ -46,13 +51,11 @@ Example
 >>> sr.plot()
 """
 
-import os
 import warnings
 import numpy as np
 import matplotlib.pyplot as plt
 import h5py
 
-from genetools.compat import trapz as _trapz
 from genetools.diagnostics._base import (CachingDiagnostic,
                                         RunDiagnostic)
 from genetools.diagnostics import _gene3d as g3
@@ -117,15 +120,16 @@ def compute_exb(phi: np.ndarray, params: dict, geom: dict, coord: dict) -> dict:
     dict with keys:
         ``phi_zonal_fsavg`` : flux-surface-averaged zonal phi in kx space
                               (local geometry) or None (global geometry)
-        ``phi_zonal_x``     : zonal phi in real space, shape ``(nx,)``
-        ``E_r``             : radial electric field, shape ``(nx,)``
-        ``v_ExB``           : ExB velocity, shape ``(nx,)``
-        ``omega_ExB``       : ExB shearing rate, shape ``(nx,)``
-        ``shearing_rms``    : rms shearing rate (scalar), local only
+        ``phi_zonal``       : zonal phi in real space, shape ``(nx,)``
+        ``e_r``             : radial electric field, shape ``(nx,)``
+        ``v_exb``           : ExB velocity, shape ``(nx,)``
+        ``omega_exb``       : ExB shearing rate, shape ``(nx,)``
+        ``shearing_rms``    : rms shearing rate (scalar); NaN for global
+                              geometry when the geometry file carries no
+                              q-profile
     """
     x_local = params["general"].get("x_local", True)
     nx  = params["box"]["nx0"]
-    nz  = params["box"]["nz0"]
     J   = geom["Jacobian"]                          # shape (nz,)
     J_norm = J / J.sum()
 
@@ -144,28 +148,28 @@ def compute_exb(phi: np.ndarray, params: dict, geom: dict, coord: dict) -> dict:
         # Note: phi[:,0,:] is already ky=0 so real part is physically meaningful
 
         # Real-space zonal potential via inverse FFT (GENE normalisation: multiply by nx)
-        phi_zonal_x = nx * np.real(np.fft.ifft(phi_zonal_fsavg))
+        phi_zonal = nx * np.real(np.fft.ifft(phi_zonal_fsavg))
 
         # Radial electric field: E_r = -∂phi/∂x → multiply by -i*kx in Fourier
-        E_r = nx * np.real(np.fft.ifft(-1j * kx * phi_zonal_fsavg))
+        e_r = nx * np.real(np.fft.ifft(-1j * kx * phi_zonal_fsavg))
 
         # ExB velocity: v_ExB = -E_r / C_xy
         C_xy = geom["metric"]["C_xy"]
-        v_ExB = -E_r / C_xy
+        v_exb = -e_r / C_xy
 
         # ExB shearing rate: ω_ExB = -∂²phi/∂x² / C_xy
         #                           = -IFFT(kx² * phi_zonal_fsavg) * nx / C_xy
-        omega_ExB = -nx * np.real(np.fft.ifft(kx**2 * phi_zonal_fsavg)) / C_xy
+        omega_exb = -nx * np.real(np.fft.ifft(kx**2 * phi_zonal_fsavg)) / C_xy
 
         # RMS shearing rate (scalar diagnostic)
-        shearing_rms = float(np.sqrt(np.mean(omega_ExB**2)))
+        shearing_rms = float(np.sqrt(np.mean(omega_exb**2)))
 
         return dict(
             phi_zonal_fsavg = phi_zonal_fsavg,
-            phi_zonal_x     = phi_zonal_x,
-            E_r             = E_r,
-            v_ExB           = v_ExB,
-            omega_ExB       = omega_ExB,
+            phi_zonal       = phi_zonal,
+            e_r             = e_r,
+            v_exb           = v_exb,
+            omega_exb       = omega_exb,
             shearing_rms    = shearing_rms,
         )
 
@@ -179,39 +183,76 @@ def compute_exb(phi: np.ndarray, params: dict, geom: dict, coord: dict) -> dict:
 
         # Flux-surface average of zonal phi: weighted sum over z
         # phi_zonal_kx has shape (nx, nz); J has shape (nz,)
-        phi_zonal_x = (phi_zonal_kx.real * J_norm).sum(axis=1)
+        phi_zonal = (phi_zonal_kx.real * J_norm).sum(axis=1)
 
         # Radial electric field: E_r = -∂phi_zonal/∂x
-        E_r = -_central_diff(phi_zonal_x) / dx
+        e_r = -_central_diff(phi_zonal) / dx
 
         # ExB velocity (global: no C_xy factor, already in correct units)
-        v_ExB = E_r.copy()
+        v_exb = e_r.copy()
 
         # ExB shearing rate (global) needs the safety-factor profile:
         #   ω_ExB = (x/q) * ∂/∂x (q * E_r / x) / dx
         # The q-profile is absent if the geometry file carries no q array, so
         # degrade gracefully to NaN rather than crashing — the zonal potential
-        # and E_r (used by the Zonal diagnostic) remain valid.
+        # and E_r remain valid.
         q = (geom.get("profiles") or {}).get("q")
         if q is None:
             warnings.warn(
                 "Global shearing rate: geometry has no q-profile; "
-                "omega_ExB and shearing_rms set to NaN.")
-            omega_ExB = np.full_like(E_r, np.nan)
+                "omega_exb and shearing_rms set to NaN.")
+            omega_exb = np.full_like(e_r, np.nan)
             shearing_rms = float("nan")
         else:
             q = np.asarray(q)
-            omega_ExB = (x / q) * _central_diff(q * E_r / x) / dx
-            shearing_rms = float(np.sqrt(np.mean(omega_ExB**2)))
+            omega_exb = (x / q) * _central_diff(q * e_r / x) / dx
+            shearing_rms = float(np.sqrt(np.mean(omega_exb**2)))
 
         return dict(
             phi_zonal_fsavg = None,         # not defined for global geometry
-            phi_zonal_x     = phi_zonal_x,
-            E_r             = E_r,
-            v_ExB           = v_ExB,
-            omega_ExB       = omega_ExB,
+            phi_zonal       = phi_zonal,
+            e_r             = e_r,
+            v_exb           = v_exb,
+            omega_exb       = omega_exb,
             shearing_rms    = shearing_rms,
         )
+
+
+# ---------------------------------------------------------------------------
+# Persisted variable names
+# ---------------------------------------------------------------------------
+
+#: Radial fields written once per output time, shape ``(nx,)`` each.
+_RADIAL_VARS = ("phi_zonal", "e_r", "v_exb", "omega_exb")
+#: Scalars written once per output time.
+_SCALAR_VARS = ("shearing_rms",)
+#: The zonal kx spectrum. Local geometry only — x is real space otherwise.
+_KX_VAR = "phi_zonal_kx_abs"
+
+#: Radial quantities that get an x-t map and a time-averaged profile, in order.
+_PANEL_VARS = (
+    ("phi_zonal", r"$\langle\phi\rangle_{\rm zonal}$"),
+    ("e_r", r"$E_r$"),
+    ("omega_exb", r"$\omega_{E\times B}$"),
+)
+
+#: Figure groups :meth:`ShearingRate.plot` can draw.
+_PLOT_GROUPS = ("maps", "profiles", "summary", "zonal")
+#: Drawn by ``which='all'``. ``'zonal'`` is a focused view, not part of the set.
+_DEFAULT_GROUPS = ("maps", "profiles", "summary")
+
+_T_LABEL = r"$t\;c_{\rm ref}/L_{\rm ref}$"
+
+#: Names used before the two geometry paths were made to agree on them.
+#: :meth:`ShearingRate.load` accepts either spelling, so a ``shearing_rate.h5``
+#: written by an older version stays readable instead of reading as empty.
+_LEGACY_NAMES = {
+    "phi_zonal_x": "phi_zonal",
+    "E_r": "e_r",
+    "v_ExB": "v_exb",
+    "omega_ExB": "omega_exb",
+    "abs_phi_zonal_kx": _KX_VAR,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -266,24 +307,34 @@ class ShearingRate(RunDiagnostic):
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _migrate_legacy_names(f) -> None:
+        """
+        Rename any legacy datasets in an open, writable cache file.
+
+        :meth:`load` translates the old spellings on read, but appending needs
+        the datasets themselves to carry the current names — otherwise adding a
+        time step to a cache written by an older version raises ``KeyError``.
+        The move is a metadata operation; the cached data is preserved.
+        """
+        for old, new in _LEGACY_NAMES.items():
+            if old in f and new not in f:
+                f.move(old, new)
+
+    @staticmethod
     def _init_h5(f, result: dict, time: float, nx: int, x_local: bool,
                  time_dtype=np.float64) -> None:
         """Create all datasets in a newly opened HDF5 file handle."""
-        f.create_dataset("time",        data=np.array([time], dtype=time_dtype),
+        f.create_dataset("time", data=np.array([time], dtype=time_dtype),
                          maxshape=(None,), chunks=(1,))
-        f.create_dataset("phi_zonal_x", data=result["phi_zonal_x"][np.newaxis, :],
-                         maxshape=(None, nx), chunks=(1, nx))
-        f.create_dataset("E_r",         data=result["E_r"][np.newaxis, :],
-                         maxshape=(None, nx), chunks=(1, nx))
-        f.create_dataset("v_ExB",       data=result["v_ExB"][np.newaxis, :],
-                         maxshape=(None, nx), chunks=(1, nx))
-        f.create_dataset("omega_ExB",   data=result["omega_ExB"][np.newaxis, :],
-                         maxshape=(None, nx), chunks=(1, nx))
-        f.create_dataset("shearing_rms", data=np.array([result["shearing_rms"]]),
-                         maxshape=(None,), chunks=(1,))
+        for name in _RADIAL_VARS:
+            f.create_dataset(name, data=result[name][np.newaxis, :],
+                             maxshape=(None, nx), chunks=(1, nx))
+        for name in _SCALAR_VARS:
+            f.create_dataset(name, data=np.array([result[name]]),
+                             maxshape=(None,), chunks=(1,))
         if x_local and result["phi_zonal_fsavg"] is not None:
             nkx = len(result["phi_zonal_fsavg"])
-            f.create_dataset("abs_phi_zonal_kx",
+            f.create_dataset(_KX_VAR,
                              data=np.abs(result["phi_zonal_fsavg"])[np.newaxis, :],
                              maxshape=(None, nkx), chunks=(1, nkx))
 
@@ -301,15 +352,11 @@ class ShearingRate(RunDiagnostic):
                 ds.resize((n + 1, ds.shape[1]))
                 ds[n, :] = value
 
-        _append_ds("time",         time)
-        _append_ds("phi_zonal_x",  result["phi_zonal_x"])
-        _append_ds("E_r",          result["E_r"])
-        _append_ds("v_ExB",        result["v_ExB"])
-        _append_ds("omega_ExB",    result["omega_ExB"])
-        _append_ds("shearing_rms", result["shearing_rms"])
-        if x_local and "abs_phi_zonal_kx" in f:
-            _append_ds("abs_phi_zonal_kx",
-                       np.abs(result["phi_zonal_fsavg"]))
+        _append_ds("time", time)
+        for name in _RADIAL_VARS + _SCALAR_VARS:
+            _append_ds(name, result[name])
+        if x_local and _KX_VAR in f:
+            _append_ds(_KX_VAR, np.abs(result["phi_zonal_fsavg"]))
 
     # ------------------------------------------------------------------
     # Public interface
@@ -345,6 +392,7 @@ class ShearingRate(RunDiagnostic):
         saved_times = list(self._load_saved_times())
 
         with h5py.File(self.outfile, "a") as hf:
+            self._migrate_legacy_names(hf)
             initialised = "time" in hf
 
             # Process later segments first so that on restart overlaps the later
@@ -385,12 +433,16 @@ class ShearingRate(RunDiagnostic):
         Returns
         -------
         dict
-            Keys: ``'time'``, ``'phi_zonal_x'``, ``'E_r'``, ``'v_ExB'``,
-            ``'omega_ExB'``, ``'shearing_rms'``, and optionally
-            ``'abs_phi_zonal_kx'``.  Arrays are sorted by time.
+            Keys: ``'time'``, ``'phi_zonal'``, ``'e_r'``, ``'v_exb'``,
+            ``'omega_exb'``, ``'shearing_rms'``, and optionally
+            ``'phi_zonal_kx_abs'``.  Arrays are sorted by time.
+
+            A cache written before the geometry paths were made to agree on
+            these names is translated on the way in, so an existing
+            ``shearing_rate.h5`` keeps working.
         """
         with h5py.File(self.outfile, "r") as f:
-            data = {k: f[k][...] for k in f.keys()}
+            data = {_LEGACY_NAMES.get(k, k): f[k][...] for k in f.keys()}
 
         idx = np.argsort(data["time"])
         for k, v in data.items():
@@ -429,7 +481,7 @@ class ShearingRate(RunDiagnostic):
         def dim_of(var):
             if var == "shearing_rms":
                 return ("time",)
-            if var == "abs_phi_zonal_kx":
+            if var == _KX_VAR:
                 return ("time", "kx")
             return ("time", "x")
 
@@ -477,14 +529,16 @@ class ShearingRate(RunDiagnostic):
         _, idx = self._indices(reader, t)
         i_phi = reader.index_of("phi")
 
-        phi_fs, v_exb, w_exb, times = [], [], [], []
+        phi_fs, e_r, v_exb, w_exb, times = [], [], [], [], []
         for time, arrays in reader.stream_selected(idx):
             times.append(time)
             fs = g3.flux_surface_average(arrays[i_phi], J)
+            E = -np.gradient(fs, x)
             # C_xy only: the 1/sqrt(g^xx) of GENE-3D's flux_geomfac belongs to a
             # flux per unit physical area. This is a flow, not a flux.
-            v = -np.gradient(fs, x) / C_xy
+            v = E / C_xy
             phi_fs.append(fs)
+            e_r.append(E)
             v_exb.append(v)
             w_exb.append(np.gradient(v, x))
 
@@ -492,6 +546,7 @@ class ShearingRate(RunDiagnostic):
             "times": np.asarray(times), "x": x,
             "x_o_a": np.asarray(self.coord["x_o_a"], dtype=float),
             "phi_zonal": np.asarray(phi_fs),
+            "e_r": np.asarray(e_r),
             "v_exb": np.asarray(v_exb),
             "omega_exb": np.asarray(w_exb),
         }
@@ -501,12 +556,11 @@ class ShearingRate(RunDiagnostic):
         raw = self.compute(t)
         params = self.params
         ds = make_dataset(
-            {"phi_zonal": (("time", "x"), raw["phi_zonal"]),
-             "v_exb": (("time", "x"), raw["v_exb"]),
-             "omega_exb": (("time", "x"), raw["omega_exb"])},
+            {name: (("time", "x"), raw[name]) for name in _RADIAL_VARS},
             {"x": raw["x_o_a"], "time": raw["times"]}, params=params)
         ds = ds.assign(x_o_rho_ref=("x", raw["x"]))
         ds["phi_zonal"].attrs["units"] = "T_ref/e (normalised)"
+        ds["e_r"].attrs["units"] = "T_ref/(e rho_ref) (normalised)"
         ds["v_exb"].attrs["units"] = "c_ref (normalised)"
         ds["omega_exb"].attrs["units"] = "c_ref/L_ref"
         ds["omega_exb_rms_x"] = np.sqrt(self._t_average(ds["omega_exb"] ** 2))
@@ -515,184 +569,210 @@ class ShearingRate(RunDiagnostic):
         ds.attrs["geometry_kind"] = self.geometry_kind
         return ds
 
-    def _plot_3d(self, t):
-        """Three x-t maps plus the RMS shearing-rate summaries."""
-        ds = self._dataset_3d(t)
-        x = np.asarray(ds["x"])
-        times = np.asarray(ds["time"])
-
-        fig, axes = plt.subplots(1, 3, figsize=(14, 4))
-        for ax, name, title in zip(
-                axes, ("phi_zonal", "v_exb", "omega_exb"),
-                (r"$\langle\phi\rangle_{FS}$", r"$v_{E\times B}$",
-                 r"$\omega_{E\times B}$")):
-            mesh = ax.pcolormesh(times, x, np.asarray(ds[name]).T,
-                                 shading="nearest")
-            ax.set_title(title)
-            ax.set_xlabel(r"$t\;[L_{\rm ref}/c_{\rm ref}]$")
-            ax.set_ylabel(r"$x/a$")
-            fig.colorbar(mesh, ax=ax)
-        fig.tight_layout()
-
-        fig2, axes2 = plt.subplots(1, 2, figsize=(11, 4))
-        axes2[0].plot(times, np.asarray(ds["omega_exb_rms_t"]))
-        axes2[0].axhline(float(ds["omega_exb_rms_t"].mean()), ls="--", color="k")
-        axes2[0].set_xlabel(r"$t\;[L_{\rm ref}/c_{\rm ref}]$")
-        axes2[0].set_ylabel(r"$\langle|\omega_E|^2\rangle_x^{1/2}$")
-        axes2[1].plot(x, np.asarray(ds["omega_exb_rms_x"]))
-        axes2[1].axhline(float(ds["omega_exb_rms_x"].mean()), ls="--", color="k")
-        axes2[1].set_xlabel(r"$x/a$")
-        axes2[1].set_ylabel(r"$\langle|\omega_E|^2\rangle_t^{1/2}$")
-        for ax in axes2:
-            ax.grid(True, alpha=0.3)
-        fig2.tight_layout()
-        plt.show()
-        return fig
-
-    def plot(self, t=None, **kw):
-        """Plot the zonal quantities over the window *t*."""
-        if self.is_3d:
-            return self._plot_3d(t)
-        self.compute(t)
-        a, b = self._bounds(t)
-        return self._plot_spectral(self.coord, a, b)
 
     # ------------------------------------------------------------------
+    # Plot
+    #
+    # One implementation for every geometry: the rename above means both paths
+    # hand back the same variables on the same `(time, x)` dims, so there is no
+    # need for a spectral and a 3-D plotter that drift apart.
+    # ------------------------------------------------------------------
 
-    def _plot_spectral(self, coord=None, t_start=None, t_stop=None) -> None:
+    def plot(self, t=None, which="all", **kw):
         """
-        Plot E_r and ω_ExB diagnostics from the saved HDF5 file.
- 
-        Produces six figures:
- 
-        1. **RMS shearing rate** time trace
-        2. **E_r(x, t)** 2-D colour map
-        3. **⟨E_r⟩_t** time-averaged radial electric field profile
-        4. **ω_ExB(x, t)** 2-D colour map
-        5. **⟨ω_ExB⟩_t** time-averaged shearing rate profile
-        6. **Radial profiles** of ω_ExB at first, middle, last saved time
-        7. **|φ_zonal(kx)|** spectrum (local geometry only)
- 
+        Plot the zonal quantities over the window *t*.
+
         Parameters
         ----------
-        coord : dict, optional
-            Coordinate dictionary. If provided, uses physical x-axis;
-            otherwise uses grid index.
-        t_start, t_stop : float, optional
-            Restrict the time average to this window. If omitted, all
-            saved times are used.
+        t : (float, float), optional
+            Time window.
+        which : str or sequence of str
+            Which figures to draw. ``'all'`` (default) is
+            ``('maps', 'profiles', 'summary')``:
+
+            - ``'maps'``     — x-t colour maps of φ_zonal, E_r and ω_ExB
+            - ``'profiles'`` — their time-averaged radial profiles
+            - ``'summary'``  — RMS shearing rate, ω_ExB at three times, and the
+              zonal kx spectrum where it exists
+            - ``'zonal'``    — the φ_zonal x-t map beside its time-averaged
+              profile, on its own
+
+        Returns
+        -------
+        list of matplotlib.figure.Figure
         """
-        data = self.load()
-        times     = data["time"]
-        E_r       = data["E_r"]           # shape (n_times, nx)
-        omega     = data["omega_ExB"]     # shape (n_times, nx)
-        shear_rms = data["shearing_rms"]  # shape (n_times,)
- 
-        x_axis  = (np.arange(omega.shape[1])
-                   if coord is None else np.asarray(coord["x"]))
-        x_label = "x index" if coord is None else r"$x / \rho_{\rm ref}$"
-        t_label = r"$t\;c_{\rm ref}/L_{\rm ref}$"
- 
-        # ── Time window mask for averages ──────────────────────────────────
-        mask = np.ones(len(times), dtype=bool)
-        if t_start is not None:
-            mask &= times >= t_start
-        if t_stop is not None:
-            mask &= times <= t_stop
-        times_avg = times[mask]
-        E_r_avg   = E_r[mask]
-        omega_avg = omega[mask]
- 
-        # ── Fig 1: RMS shearing rate time trace ───────────────────────────
-        fig, ax = plt.subplots(figsize=(8, 3))
-        ax.plot(times, shear_rms, color="steelblue")
-        if t_start is not None:
-            ax.axvline(t_start, color="k", ls="--", lw=0.8, label="avg window")
-        if t_stop is not None:
-            ax.axvline(t_stop,  color="k", ls="--", lw=0.8)
-        ax.set_xlabel(t_label)
-        ax.set_ylabel(r"$\omega_{E\times B}^{\rm rms}$")
-        ax.set_title("RMS ExB shearing rate")
-        ax.grid(True)
-        plt.tight_layout()
+        ds = self.dataset(t)
+        if not ds.data_vars:
+            raise ValueError(
+                f"{type(self).__name__}: nothing computed for this window.")
+        figs = [fig for group in self._plot_groups(which)
+                if (fig := getattr(self, f"_fig_{group}")(ds)) is not None]
         plt.show()
- 
-        # ── Fig 2: E_r(x, t) colour map ───────────────────────────────────
-        fig, ax = plt.subplots(figsize=(9, 4))
-        vmax = np.percentile(np.abs(E_r), 98)
-        im = ax.pcolormesh(times, x_axis, E_r.T,
-                           cmap="bwr", vmin=-vmax, vmax=vmax,
-                           shading="auto")
-        fig.colorbar(im, ax=ax, label=r"$E_r$")
-        ax.set_xlabel(t_label)
-        ax.set_ylabel(x_label)
-        ax.set_title(r"$E_r(x,\,t)$")
-        plt.tight_layout()
-        plt.show()
- 
-        # ── Fig 3: time-averaged E_r profile ──────────────────────────────
-        E_r_mean = self._time_average(E_r_avg, times_avg)
-        fig, ax = plt.subplots(figsize=(7, 4))
-        ax.plot(x_axis, E_r_mean, color="crimson")
-        ax.axhline(0, color="k", lw=0.5, ls="--")
-        ax.set_xlabel(x_label)
-        ax.set_ylabel(r"$\langle E_r \rangle_t$")
-        ax.set_title("Time-averaged radial electric field")
-        ax.grid(True)
-        plt.tight_layout()
-        plt.show()
- 
-        # ── Fig 4: ω_ExB(x, t) colour map ────────────────────────────────
-        fig, ax = plt.subplots(figsize=(9, 4))
-        vmax = np.percentile(np.abs(omega), 98)
-        im = ax.pcolormesh(times, x_axis, omega.T,
-                           cmap="bwr", vmin=-vmax, vmax=vmax,
-                           shading="auto")
-        fig.colorbar(im, ax=ax,
-                     label=r"$\omega_{E\times B}$")
-        ax.set_xlabel(t_label)
-        ax.set_ylabel(x_label)
-        ax.set_title(r"$\omega_{E\times B}(x,\,t)$")
-        plt.tight_layout()
-        plt.show()
- 
-        # ── Fig 5: time-averaged ω_ExB profile ────────────────────────────
-        omega_mean = self._time_average(omega_avg, times_avg)
-        fig, ax = plt.subplots(figsize=(7, 4))
-        ax.plot(x_axis, omega_mean, color="steelblue")
-        ax.axhline(0, color="k", lw=0.5, ls="--")
-        ax.set_xlabel(x_label)
-        ax.set_ylabel(r"$\langle \omega_{E\times B} \rangle_t$")
-        ax.set_title("Time-averaged ExB shearing rate")
-        ax.grid(True)
-        plt.tight_layout()
-        plt.show()
- 
-        # ── Fig 6: ω_ExB radial profiles at selected times ────────────────
-        t_indices = [0, len(times) // 2, -1]
-        fig, ax = plt.subplots(figsize=(7, 4))
-        for ti in t_indices:
-            ax.plot(x_axis, omega[ti, :], label=f"t={times[ti]:.1f}")
-        ax.set_xlabel(x_label)
-        ax.set_ylabel(r"$\omega_{E\times B}$")
-        ax.set_title("ExB shearing rate — radial profiles")
-        ax.legend()
-        ax.grid(True)
-        plt.tight_layout()
-        plt.show()
- 
-        # ── Fig 7: |φ_zonal(kx)| spectrum (local geometry only) ───────────
-        if "abs_phi_zonal_kx" in data:
-            kx_spec = data["abs_phi_zonal_kx"]   # shape (n_times, nkx)
-            fig, ax = plt.subplots(figsize=(9, 4))
-            vmax = np.percentile(kx_spec, 98)
-            im = ax.pcolormesh(times, np.arange(kx_spec.shape[1]), kx_spec.T,
-                               cmap="inferno", vmin=0, vmax=vmax,
-                               shading="auto")
-            fig.colorbar(im, ax=ax,
-                         label=r"$|\hat{\phi}_{\rm zonal}(k_x)|$")
-            ax.set_xlabel(t_label)
-            ax.set_ylabel(r"$k_x$ index")
-            ax.set_title("Zonal potential kx spectrum")
-            plt.tight_layout()
-            plt.show()
+        return figs
+
+    @staticmethod
+    def _plot_groups(which):
+        """Normalise the ``which`` argument to a validated tuple of groups."""
+        if which == "all":
+            return _DEFAULT_GROUPS
+        groups = (which,) if isinstance(which, str) else tuple(which)
+        bad = [g for g in groups if g not in _PLOT_GROUPS]
+        if bad:
+            raise ValueError(
+                f"unknown plot group(s) {bad}; expected any of "
+                f"{list(_PLOT_GROUPS)} or 'all'")
+        return groups
+
+    @property
+    def _x_label(self):
+        """
+        Radial axis label.
+
+        GENE-3D indexes its dataset by ``x/a``; the spectral paths carry the
+        grid straight from ``coord['x']``, which is in ``rho_ref``.
+        """
+        return r"$x/a$" if self.is_3d else r"$x/\rho_{\rm ref}$"
+
+    def _panels(self, ds):
+        """The (variable, label) pairs from ``_PANEL_VARS`` present in *ds*."""
+        return [(name, label) for name, label in _PANEL_VARS if name in ds]
+
+    def _xt_map(self, fig, ax, ds, name, label):
+        """One x-t colour map, on a symmetric scale robust to outliers."""
+        arr = np.asarray(ds[name])
+        finite = arr[np.isfinite(arr)]
+        vmax = float(np.percentile(np.abs(finite), 98)) if finite.size else 1.0
+        mesh = ax.pcolormesh(np.asarray(ds["time"]), np.asarray(ds["x"]), arr.T,
+                             cmap="bwr", vmin=-vmax, vmax=vmax or 1.0,
+                             shading="auto")
+        ax.set_xlabel(_T_LABEL)
+        ax.set_ylabel(self._x_label)
+        ax.set_title(label)
+        fig.colorbar(mesh, ax=ax)
+
+    def _fig_maps(self, ds):
+        """x-t colour maps of every radial quantity."""
+        panels = self._panels(ds)
+        if not panels:
+            return None
+        fig, axes = plt.subplots(1, len(panels), figsize=(4.7 * len(panels), 4),
+                                 squeeze=False)
+        for ax, (name, label) in zip(axes[0], panels):
+            self._xt_map(fig, ax, ds, name, label)
+        fig.suptitle("ExB shearing — x-t maps")
+        fig.tight_layout()
+        return fig
+
+    def _fig_profiles(self, ds):
+        """Time-averaged radial profiles, trapezoidal over the uneven t axis."""
+        panels = self._panels(ds)
+        if not panels:
+            return None
+        x = np.asarray(ds["x"])
+        fig, axes = plt.subplots(1, len(panels), figsize=(4.4 * len(panels), 4),
+                                 squeeze=False)
+        for ax, (name, label) in zip(axes[0], panels):
+            ax.plot(x, np.asarray(self._t_average(ds[name])))
+            ax.axhline(0, color="k", lw=0.5, ls="--")
+            ax.set_xlabel(self._x_label)
+            ax.set_ylabel(rf"$\langle$ {label} $\rangle_t$")
+            ax.grid(True, alpha=0.3)
+        fig.suptitle("ExB shearing — time-averaged profiles")
+        fig.tight_layout()
+        return fig
+
+    def _fig_summary(self, ds):
+        """
+        RMS shearing rate and the supporting views.
+
+        Which panels exist is geometry-dependent — the spectral paths save a
+        per-time ``shearing_rms`` and, for a flux tube, the zonal kx spectrum;
+        GENE-3D gives the RMS reduced over each axis separately. Only the
+        panels backed by data are drawn.
+        """
+        times = np.asarray(ds["time"])
+        x = np.asarray(ds["x"])
+        draw = []
+
+        if "shearing_rms" in ds:
+            draw.append(("trace", "shearing_rms",
+                         r"$\omega_{E\times B}^{\rm rms}$"))
+        if "omega_exb_rms_t" in ds:
+            draw.append(("trace", "omega_exb_rms_t",
+                         r"$\langle|\omega_E|^2\rangle_x^{1/2}$"))
+        if "omega_exb_rms_x" in ds:
+            draw.append(("profile", "omega_exb_rms_x",
+                         r"$\langle|\omega_E|^2\rangle_t^{1/2}$"))
+        if "omega_exb" in ds and times.size:
+            draw.append(("snapshots", "omega_exb",
+                         r"$\omega_{E\times B}$"))
+        if _KX_VAR in ds:
+            draw.append(("kx", _KX_VAR,
+                         r"$|\hat{\phi}_{\rm zonal}(k_x)|$"))
+        if not draw:
+            return None
+
+        fig, axes = plt.subplots(1, len(draw), figsize=(4.7 * len(draw), 4),
+                                 squeeze=False)
+        for ax, (kind, name, label) in zip(axes[0], draw):
+            if kind == "trace":
+                ax.plot(times, np.asarray(ds[name]), color="steelblue")
+                ax.axhline(float(np.nanmean(np.asarray(ds[name]))),
+                           ls="--", color="k", lw=0.8)
+                ax.set_xlabel(_T_LABEL)
+                ax.grid(True, alpha=0.3)
+            elif kind == "profile":
+                ax.plot(x, np.asarray(ds[name]), color="steelblue")
+                ax.set_xlabel(self._x_label)
+                ax.grid(True, alpha=0.3)
+            elif kind == "snapshots":
+                arr = np.asarray(ds[name])
+                for ti in dict.fromkeys((0, len(times) // 2, len(times) - 1)):
+                    ax.plot(x, arr[ti], label=f"t={times[ti]:.3g}")
+                ax.set_xlabel(self._x_label)
+                ax.legend(fontsize=8)
+                ax.grid(True, alpha=0.3)
+            else:                                   # kx spectrum
+                spec = np.asarray(ds[name])
+                kx = np.asarray(ds["kx"]) if "kx" in ds.coords else \
+                    np.arange(spec.shape[1])
+                mesh = ax.pcolormesh(times, kx, spec.T, cmap="inferno",
+                                     vmin=0, vmax=np.percentile(spec, 98),
+                                     shading="auto")
+                ax.set_xlabel(_T_LABEL)
+                ax.set_ylabel(r"$k_x \rho_{\rm ref}$")
+                fig.colorbar(mesh, ax=ax)
+            ax.set_title(label)
+        fig.suptitle("ExB shearing — summary")
+        fig.tight_layout()
+        return fig
+
+    def _fig_zonal(self, ds):
+        """
+        The zonal potential on its own: x-t map beside its t-averaged profile.
+
+        This is the view the separate ``Zonal`` diagnostic used to give. The
+        spectral paths cache ``phi_zonal`` but drew only E_r and ω_ExB, so
+        without this the potential itself was never plotted for them.
+        """
+        if "phi_zonal" not in ds:
+            return None
+        x = np.asarray(ds["x"])
+        phiz = np.asarray(ds["phi_zonal"])
+        fig, (ax_xt, ax_prof) = plt.subplots(
+            1, 2, figsize=(11, 4.5), gridspec_kw={"width_ratios": [2, 1]})
+
+        vmax = float(np.max(np.abs(phiz))) or 1.0
+        pcm = ax_xt.pcolormesh(np.asarray(ds["time"]), x, phiz.T, cmap="bwr",
+                               vmin=-vmax, vmax=vmax, shading="auto")
+        ax_xt.set_xlabel(_T_LABEL)
+        ax_xt.set_ylabel(self._x_label)
+        ax_xt.set_title(r"$\langle\phi\rangle_{\rm zonal}(x,t)$")
+        fig.colorbar(pcm, ax=ax_xt)
+
+        ax_prof.plot(np.asarray(self._t_average(ds["phi_zonal"])), x)
+        ax_prof.set_xlabel(r"$\langle\phi\rangle_{\rm zonal}$ (t-avg)")
+        ax_prof.set_ylabel(self._x_label)
+        ax_prof.grid(True, alpha=0.3)
+        fig.tight_layout()
+        return fig

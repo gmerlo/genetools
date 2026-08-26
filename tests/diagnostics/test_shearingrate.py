@@ -124,8 +124,8 @@ class TestComputeExbLocal:
 
         result = compute_exb(phi, params, geom, coord)
         expected_keys = {
-            "phi_zonal_fsavg", "phi_zonal_x",
-            "E_r", "v_ExB", "omega_ExB", "shearing_rms",
+            "phi_zonal_fsavg", "phi_zonal",
+            "e_r", "v_exb", "omega_exb", "shearing_rms",
         }
         assert expected_keys == set(result.keys())
 
@@ -137,7 +137,7 @@ class TestComputeExbLocal:
                              _make_local_coord(nx, nky))
         assert result["phi_zonal_fsavg"].shape == (nx,)
 
-    @pytest.mark.parametrize("key", ["phi_zonal_x", "E_r", "v_ExB", "omega_ExB"])
+    @pytest.mark.parametrize("key", ["phi_zonal", "e_r", "v_exb", "omega_exb"])
     def test_real_arrays_shape_nx(self, key):
         nx, nky, nz = 12, 4, 8
         phi = _make_phi(nx, nky, nz)
@@ -170,9 +170,9 @@ class TestComputeExbLocal:
         result = compute_exb(phi, _make_local_params(nx, nky, nz),
                              _make_local_geom(nx, nz),
                              _make_local_coord(nx, nky))
-        np.testing.assert_allclose(result["phi_zonal_x"],  0.0, atol=1e-14)
-        np.testing.assert_allclose(result["E_r"],          0.0, atol=1e-14)
-        np.testing.assert_allclose(result["omega_ExB"],    0.0, atol=1e-14)
+        np.testing.assert_allclose(result["phi_zonal"],  0.0, atol=1e-14)
+        np.testing.assert_allclose(result["e_r"],          0.0, atol=1e-14)
+        np.testing.assert_allclose(result["omega_exb"],    0.0, atol=1e-14)
         assert result["shearing_rms"] == pytest.approx(0.0, abs=1e-14)
 
     def test_outputs_are_real(self):
@@ -181,7 +181,7 @@ class TestComputeExbLocal:
         result = compute_exb(phi, _make_local_params(nx, nky, nz),
                              _make_local_geom(nx, nz),
                              _make_local_coord(nx, nky))
-        for key in ("phi_zonal_x", "E_r", "v_ExB", "omega_ExB"):
+        for key in ("phi_zonal", "e_r", "v_exb", "omega_exb"):
             assert np.isrealobj(result[key]), f"{key} should be real"
 
 
@@ -219,8 +219,8 @@ class TestComputeExbGlobal:
                              _make_global_geom(nx, nz),
                              _make_global_coord(nx))
         expected_keys = {
-            "phi_zonal_fsavg", "phi_zonal_x",
-            "E_r", "v_ExB", "omega_ExB", "shearing_rms",
+            "phi_zonal_fsavg", "phi_zonal",
+            "e_r", "v_exb", "omega_exb", "shearing_rms",
         }
         assert expected_keys == set(result.keys())
 
@@ -233,7 +233,7 @@ class TestComputeExbGlobal:
                              _make_global_coord(nx))
         assert result["phi_zonal_fsavg"] is None
 
-    @pytest.mark.parametrize("key", ["phi_zonal_x", "E_r", "v_ExB", "omega_ExB"])
+    @pytest.mark.parametrize("key", ["phi_zonal", "e_r", "v_exb", "omega_exb"])
     def test_real_arrays_shape_nx(self, key):
         nx, nky, nz = 10, 3, 8
         phi = _make_phi(nx, nky, nz)
@@ -250,5 +250,102 @@ class TestComputeExbGlobal:
                              _make_global_params(nx, nky, nz),
                              _make_global_geom(nx, nz),
                              _make_global_coord(nx))
-        np.testing.assert_allclose(result["phi_zonal_x"], 0.0, atol=1e-14)
-        np.testing.assert_allclose(result["E_r"],         0.0, atol=1e-14)
+        np.testing.assert_allclose(result["phi_zonal"], 0.0, atol=1e-14)
+        np.testing.assert_allclose(result["e_r"],         0.0, atol=1e-14)
+
+
+# ---------------------------------------------------------------------------
+# Legacy cache compatibility
+# ---------------------------------------------------------------------------
+
+class TestLegacyCacheNames:
+    """
+    A `shearing_rate.h5` written before the two geometry paths were made to
+    agree on variable names must keep working: read through the alias map, and
+    migrated in place before anything is appended to it.
+    """
+
+    LEGACY = {"phi_zonal_x": "phi_zonal", "E_r": "e_r", "v_ExB": "v_exb",
+              "omega_ExB": "omega_exb", "abs_phi_zonal_kx": "phi_zonal_kx_abs"}
+
+    def _write_legacy(self, path, nx=6, nkx=4, nt=3):
+        import h5py
+        with h5py.File(path, "w") as f:
+            f.create_dataset("time", data=np.arange(nt, dtype=float),
+                             maxshape=(None,))
+            for old in ("phi_zonal_x", "E_r", "v_ExB", "omega_ExB"):
+                f.create_dataset(old, data=np.ones((nt, nx)),
+                                 maxshape=(None, nx))
+            f.create_dataset("shearing_rms", data=np.ones(nt),
+                             maxshape=(None,))
+            f.create_dataset("abs_phi_zonal_kx", data=np.ones((nt, nkx)),
+                             maxshape=(None, nkx))
+        return nx, nkx, nt
+
+    def test_load_translates_the_old_names(self, tmp_path):
+        from genetools.diagnostics.shearingrate import ShearingRate
+        path = tmp_path / "shearing_rate.h5"
+        self._write_legacy(path)
+        data = ShearingRate(outfile=str(path)).load()
+        for old, new in self.LEGACY.items():
+            assert new in data, new
+            assert old not in data, old
+
+    def _result(self, nx, nkx):
+        result = {n: np.zeros(nx) for n in
+                  ("phi_zonal", "e_r", "v_exb", "omega_exb")}
+        result["shearing_rms"] = 0.0
+        result["phi_zonal_fsavg"] = np.zeros(nkx)
+        return result
+
+    def test_append_without_migration_raises(self, tmp_path):
+        """
+        Why the migration exists. `load` translates names on read, so without
+        migrating the file itself an append goes looking for datasets that are
+        not there — and it half-succeeds first, growing `time` before it fails,
+        which is why `compute_and_save` migrates before writing anything.
+        """
+        import h5py
+        from genetools.diagnostics.shearingrate import ShearingRate
+        path = tmp_path / "shearing_rate.h5"
+        nx, nkx, _ = self._write_legacy(path)
+        with h5py.File(path, "a") as f:
+            with pytest.raises(KeyError):
+                ShearingRate._append_to_open_file(f, self._result(nx, nkx),
+                                                  99.0, True)
+
+    def test_append_after_migration_does_not_raise(self, tmp_path):
+        import h5py
+        from genetools.diagnostics.shearingrate import ShearingRate
+        path = tmp_path / "shearing_rate.h5"
+        nx, nkx, nt = self._write_legacy(path)
+        with h5py.File(path, "a") as f:
+            ShearingRate._migrate_legacy_names(f)
+            assert "phi_zonal_x" not in f and "phi_zonal" in f
+            ShearingRate._append_to_open_file(f, self._result(nx, nkx),
+                                              99.0, True)
+            assert f["time"].shape[0] == nt + 1
+            assert f["phi_zonal"].shape == (nt + 1, nx)
+
+    def test_migration_preserves_the_cached_values(self, tmp_path):
+        import h5py
+        from genetools.diagnostics.shearingrate import ShearingRate
+        path = tmp_path / "shearing_rate.h5"
+        self._write_legacy(path)
+        with h5py.File(path, "r") as f:
+            before = f["phi_zonal_x"][...]
+        with h5py.File(path, "a") as f:
+            ShearingRate._migrate_legacy_names(f)
+        with h5py.File(path, "r") as f:
+            np.testing.assert_array_equal(f["phi_zonal"][...], before)
+
+    def test_migration_is_idempotent(self, tmp_path):
+        import h5py
+        from genetools.diagnostics.shearingrate import ShearingRate
+        path = tmp_path / "shearing_rate.h5"
+        self._write_legacy(path)
+        with h5py.File(path, "a") as f:
+            ShearingRate._migrate_legacy_names(f)
+            ShearingRate._migrate_legacy_names(f)
+            assert sorted(f.keys()) == sorted(
+                ["time", "shearing_rms"] + list(self.LEGACY.values()))

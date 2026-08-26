@@ -36,7 +36,6 @@ from .fluxes2d import Fluxes2D
 from .ballooning import Ballooning
 from .growthrate import GrowthRate
 from .amplitude import AmplitudeSpectra
-from .zonal import Zonal
 from .profile_diag import ProfileDiag
 from .timetraces import TimeTraces
 from .gam import Gam
@@ -59,7 +58,6 @@ __all__ = [
     "Ballooning",
     "GrowthRate",
     "AmplitudeSpectra",
-    "Zonal",
     "ProfileDiag",
     # GENE-3D only (for now)
     "TimeTraces",

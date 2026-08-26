@@ -278,11 +278,40 @@ class TestShearing3D:
         assert ds["omega_exb_rms_x"].dims == ("x",)
         assert ds["omega_exb_rms_t"].dims == ("time",)
 
-    def test_zonal_view_is_a_subset(self, run3d):
+    def test_every_geometry_returns_the_same_variable_names(self, run3d):
+        """
+        The two paths used to disagree (`phi_zonal_x`/`omega_ExB` on spectral
+        runs, `phi_zonal`/`omega_exb` here), so `run.shearing.data` meant
+        different things depending on the run.
+        """
         _, run = run3d
-        ds = g3.Zonal(run).dataset()
-        assert "phi_zonal" in ds
-        assert "omega_exb" not in ds
+        ds = g3.ShearingRate(run).dataset()
+        for name in ("phi_zonal", "e_r", "v_exb", "omega_exb"):
+            assert name in ds, name
+
+    def test_e_r_is_v_exb_times_C_xy(self, run3d):
+        _, run = run3d
+        ds = g3.ShearingRate(run).dataset()
+        C_xy = np.asarray(run.geometry[0]["metric"]["C_xy"])
+        assert np.allclose(np.asarray(ds["e_r"].isel(time=0)) / C_xy,
+                           np.asarray(ds["v_exb"].isel(time=0)))
+
+    def test_zonal_view_is_one_figure(self, run3d, headless):
+        """The view the separate `Zonal` diagnostic used to give."""
+        _, run = run3d
+        figs = g3.ShearingRate(run).plot(which="zonal")
+        assert len(figs) == 1
+        titles = [a.get_title() for a in figs[0].axes if a.get_title()]
+        assert any("zonal" in t for t in titles)
+
+    def test_plot_groups_are_validated(self, run3d):
+        _, run = run3d
+        with pytest.raises(ValueError, match="unknown plot group"):
+            g3.ShearingRate(run).plot(which="nonsense")
+
+    def test_default_plot_draws_the_three_groups(self, run3d, headless):
+        _, run = run3d
+        assert len(g3.ShearingRate(run).plot()) == 3
 
 
 # ---------------------------------------------------------------------------
@@ -759,7 +788,7 @@ class TestFacade:
         ("spectra", g3.Spectra), ("fluxes2d", g3.Fluxes2D),
         ("profiles", g3.Profiles), ("shearing", g3.ShearingRate),
         ("contours", g3.Contours), ("growthrate", g3.GrowthRate),
-        ("amplitude", g3.AmplitudeSpectra), ("zonal", g3.Zonal),
+        ("amplitude", g3.AmplitudeSpectra),
         ("profile_diag", g3.ProfileDiag), ("gam", g3.Gam),
         ("chi", g3.ChiGradient), ("omega", g3.Omega),
         ("geometry_plots", g3.GeometryPlots), ("srcmom", g3.SrcMom),
@@ -815,7 +844,7 @@ class TestPlots:
 
     @pytest.mark.parametrize("name", [
         "spectra", "fluxes2d", "profiles", "shearing", "contours",
-        "growthrate", "amplitude", "zonal", "profile_diag", "gam", "chi",
+        "growthrate", "amplitude", "profile_diag", "gam", "chi",
         "omega", "geometry_plots", "srcmom", "vsp",
     ])
     def test_property_plots_run(self, run3d, headless, name):
