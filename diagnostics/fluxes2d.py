@@ -872,7 +872,7 @@ class Fluxes2D(RunDiagnostic):
         return any(float(units.get(k, 1.0)) != 1.0
                    for k in ("Lref", "Bref", "Tref", "nref", "mref"))
 
-    def volume_average(self, t=None, prefactor=True):
+    def volume_average(self, t=None):
         """
         GENE-3D only: the volume-averaged fluxes, for comparison with ``nrg``.
 
@@ -886,13 +886,16 @@ class Fluxes2D(RunDiagnostic):
         Parameters
         ----------
         t : (float, float), optional
-            Time window; a negative bound means "unbounded".
-        prefactor : bool
-            Whether to include the species factor this diagnostic applies to the
-            mom-file values — ``dens`` for the particle fluxes, ``dens*temp`` for
-            the heat fluxes. ``False`` reduces the mom-file arrays as they are.
-            The two differ by exactly that factor, so comparing both against a
-            run's own ``nrg`` is what settles which normalisation ``nrg`` uses.
+            Time window; a negative bound means "unbounded". A degenerate window
+            such as ``(t0, t0)`` selects the single output time at ``t0``, which
+            streams one snapshot instead of the whole run.
+
+        The species factor is always applied — ``dens`` to the particle fluxes
+        and ``dens*temp`` to the heat fluxes, to the electromagnetic parts
+        exactly as to the electrostatic ones. That is what ``nrg`` does
+        (``diag_3d.F90`` lines 698-701, after ``sum_3d_real``), and the mom file
+        this reads carries no species factor of its own (written at line 547,
+        before those lines).
 
         Returns
         -------
@@ -911,14 +914,9 @@ class Fluxes2D(RunDiagnostic):
 
         data_vars, per_species = {}, {}
         for v in present:
-            stack = []
-            for n in names:
-                arr = np.asarray(raw["species"][n][v])
-                if not prefactor:
-                    # compute() has already applied it; divide it back out so
-                    # this reports the mom-file values unmodified.
-                    arr = arr / self._prefactor_3d(self._FLUXES_3D[v][0], n)
-                stack.append(g3.volume_average(arr, J))
+            # compute() has already applied the species factor.
+            stack = [g3.volume_average(np.asarray(raw["species"][n][v]), J)
+                     for n in names]
             data_vars[v] = (("species", "time"), np.stack(stack, axis=0))
             per_species[v] = data_vars[v][1]
         for base in ("Gamma", "Q"):
@@ -930,8 +928,9 @@ class Fluxes2D(RunDiagnostic):
 
         ds = xr.Dataset(data_vars,
                         coords={"species": names, "time": raw["times"]})
-        ds.attrs["prefactor_applied"] = int(bool(prefactor))
         ds.attrs["reduction"] = "sum_xyz f J / sum_xyz J  (nrg convention)"
+        ds.attrs["species_factor"] = ("dens (particle), dens*temp (heat), "
+                                      "ES and EM alike")
         return ds
 
     def _plot_3d(self, t, si=None, x_avg_lims=None, buffer_frac=0.1,

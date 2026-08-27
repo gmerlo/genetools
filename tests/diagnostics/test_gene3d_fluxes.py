@@ -619,35 +619,37 @@ class TestVolumeAverage:
             mine = float(ds["Q_es_volume"].sel(species=name).isel(time=0))
             assert mine == pytest.approx(direct, rel=1e-10)
 
-    def test_prefactor_false_is_the_raw_mom_file_reduction(self, physical_run):
+    def test_equals_the_raw_file_times_the_species_factor(self, tmp_path):
         """
-        With the species factor off, the result must be exactly a 3-D
-        Jacobian-weighted mean of the array on disk — nothing else applied.
+        Against the array on disk: a 3-D Jacobian-weighted mean of the mom-file
+        values times the species factor, and nothing else. Species factors are
+        non-unity here, so the factor is genuinely exercised.
         """
-        run = Run(physical_run.folder)
-        J = run.geometry[0]["Jacobian"]
-        ds = Fluxes2D(run).volume_average(prefactor=False)
-        for name in run.species:
-            reader = run.mom(name)
-            arrays = next(iter(reader.stream_selected([0])))[1]
-            direct = np.average(arrays[reader.index_of("Q_es")], weights=J)
-            mine = float(ds["Q_es"].sel(species=name).isel(time=0))
-            assert mine == pytest.approx(direct, rel=1e-10)
-
-    def test_prefactor_is_the_only_difference(self, tmp_path):
-        """Species factors non-unity, so the ratio is a real check."""
         g = make_gene3d_run(tmp_path / "run", nx0=8, nz0=8, n_times=2,
                             physical=True, temps=[2.0, 0.5], denss=[3.0, 1.5])
         run = Run(g.folder)
         diag = Fluxes2D(run)
-        on = diag.volume_average(prefactor=True)
-        off = diag.volume_average(prefactor=False)
+        J = run.geometry[0]["Jacobian"]
+        ds = diag.volume_average()
         for name in run.species:
-            spec = next(s for s in run.params.get(0)["species"]
-                        if s["name"] == name)
-            got = (float(on["Q_es"].sel(species=name).isel(time=0))
-                   / float(off["Q_es"].sel(species=name).isel(time=0)))
-            assert got == pytest.approx(spec["dens"] * spec["temp"], rel=1e-10)
+            reader = run.mom(name)
+            arrays = next(iter(reader.stream_selected([0])))[1]
+            for flux, kind in (("Gamma_es", "dens"), ("Gamma_em", "dens"),
+                               ("Q_es", "dens_temp"), ("Q_em", "dens_temp")):
+                raw = np.average(arrays[reader.index_of(flux)], weights=J)
+                direct = raw * diag._prefactor_3d(kind, name)
+                mine = float(ds[flux].sel(species=name).isel(time=0))
+                assert mine == pytest.approx(direct, rel=1e-10), \
+                    f"{name} {flux}"
+
+    def test_no_way_to_switch_the_factor_off(self):
+        """
+        The species factor is what `nrg` applies, so it is not optional. The
+        keyword existed only while the convention was being settled.
+        """
+        import inspect
+        sig = inspect.signature(Fluxes2D.volume_average)
+        assert list(sig.parameters) == ["self", "t"]
 
     def test_totals_are_es_plus_em(self, physical_run):
         ds = Fluxes2D(Run(physical_run.folder)).volume_average()
@@ -711,13 +713,15 @@ class TestSpeciesPrefactor:
         _, run = scaled_run
         diag = Fluxes2D(run)
         assert (diag._FLUXES_3D[es][0] == diag._FLUXES_3D[em][0] == kind)
-        ds_on = diag.volume_average(prefactor=True)
-        ds_off = diag.volume_average(prefactor=False)
+        J = run.geometry[0]["Jacobian"]
+        ds = diag.volume_average()
         for name in run.species:
             expect = diag._prefactor_3d(kind, name)
+            reader = run.mom(name)
+            arrays = next(iter(reader.stream_selected([0])))[1]
             for flux in (es, em):
-                got = (float(ds_on[flux].sel(species=name).isel(time=0))
-                       / float(ds_off[flux].sel(species=name).isel(time=0)))
+                raw = np.average(arrays[reader.index_of(flux)], weights=J)
+                got = float(ds[flux].sel(species=name).isel(time=0)) / raw
                 assert got == pytest.approx(expect, rel=1e-10), f"{name} {flux}"
 
     def test_a_dropped_em_factor_would_be_detected(self, scaled_run):
