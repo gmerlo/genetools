@@ -685,7 +685,11 @@ class Profiles(RunDiagnostic):
             i_tper = reader.index_of("T_per")
 
             stacks = {v: [] for v in ("T", "n", "omt", "omn")}
-            for _, arrays in reader.stream_selected(idx):
+            # A GENE-3D moment file holds ten (nx, ny, nz) arrays and this
+            # needs three of them; reading the other seven per snapshot is
+            # what made the diagnostic unusable on a production grid.
+            for _, arrays in reader.stream_selected(
+                    idx, variables=("n", "T_par", "T_per")):
                 t_pert = g3.flux_surface_average(
                     arrays[i_tpar] / 3.0 + 2.0 * arrays[i_tper] / 3.0, J)
                 n_pert = g3.flux_surface_average(arrays[i_n], J)

@@ -53,6 +53,7 @@ Example
  
 import os
 import re
+from collections.abc import MutableMapping
 
 import h5py
 import numpy as np
@@ -302,6 +303,97 @@ _H5_BFIELD = {"Bfield": "Bfield", "dBdx": "dBdx", "dBdy": "dBdy",
               "dBdz": "dBdz", "Jacobian": "Jacobian"}
 
 
+class _DeferredArrays(MutableMapping):
+    """
+    Geometry mapping whose 3-D arrays are read from HDF5 only when asked for.
+
+    GENE-3D writes sixteen ``(nx, ny, nz)`` geometry arrays — the Jacobian, the
+    field and its three derivatives, six metric components, two curvature
+    components and three Cartesian coordinates. In float64 that is 128 bytes
+    per grid point, 1.1 GiB at 300x300x96, and a diagnostic such as
+    :class:`~genetools.diagnostics.profiles.Profiles` needs exactly one of them
+    (the Jacobian). Reading is therefore deferred per key and cached on first
+    use, so the cost follows what a diagnostic actually touches.
+
+    Only 3-D datasets are deferred. A flux tube's ``(nz,)`` and an x-global
+    run's ``(nx, nz)`` geometry is small enough that reading it eagerly, as
+    before, costs nothing worth a lazy indirection — so those paths keep
+    returning plain dictionaries.
+
+    Iterating or calling :meth:`items` still names every key, including the
+    ones not yet read; only ``__getitem__`` touches the file.
+    """
+
+    def __init__(self, fpath: str, specs: dict, eager: dict = None):
+        self._fpath = fpath
+        self._specs = dict(specs)        # key -> (group name, dataset name)
+        self._cache = dict(eager or {})
+
+    def __getitem__(self, key):
+        if key in self._cache:
+            return self._cache[key]
+        if key not in self._specs:
+            raise KeyError(key)
+        group, name = self._specs[key]
+        with h5py.File(self._fpath, "r") as f:
+            value = _h5_get(f.get(group), name)
+        self._cache[key] = value
+        return value
+
+    def __setitem__(self, key, value):
+        self._specs.pop(key, None)
+        self._cache[key] = value
+
+    def __delitem__(self, key):
+        deferred = self._specs.pop(key, None) is not None
+        if key in self._cache:
+            del self._cache[key]
+        elif not deferred:
+            raise KeyError(key)
+
+    def __iter__(self):
+        yield from self._cache
+        for key in self._specs:
+            if key not in self._cache:
+                yield key
+
+    def __len__(self) -> int:
+        return len(set(self._cache) | set(self._specs))
+
+    def copy(self) -> dict:
+        """Materialise every key into a plain dict (reads what is still deferred)."""
+        return {key: self[key] for key in self}
+
+    def __repr__(self) -> str:
+        pending = sorted(k for k in self._specs if k not in self._cache)
+        return (f"_DeferredArrays(loaded={sorted(self._cache)}, "
+                f"deferred={pending})")
+
+
+#: Returned by :func:`_h5_take` for a dataset registered to be read later.
+_DEFERRED = object()
+
+
+def _h5_take(group, group_name: str, h5name: str, specs: dict, key: str):
+    """
+    Read one dataset now, or register it in *specs* to be read on demand.
+
+    3-D datasets are GENE-3D's, and those are the ones big enough to be worth
+    deferring; anything smaller is read immediately so the flux-tube and
+    x-global paths behave exactly as they did.
+
+    Returns the array, ``None`` when the dataset is absent, or :data:`_DEFERRED`
+    when it has been registered for later.
+    """
+    dset = None if group is None else group.get(h5name)
+    if dset is None:
+        return None
+    if dset.ndim == 3:
+        specs[key] = (group_name, h5name)
+        return _DEFERRED
+    return np.asarray(dset[...]).T
+
+
 def _h5_get(group, name):
     """
     Return one dataset from *group* in GENE's axis order, or ``None``.
@@ -349,6 +441,9 @@ def _read_geom_h5(fpath: str, params: dict) -> dict:
     Returns the same dictionary structure as the ASCII readers.
     """
     metric, profiles, extra = {}, {}, {}
+    # key -> (group, dataset) for every 3-D array left to be read on demand;
+    # one collector per nesting level of the geometry dict.
+    top_specs, metric_specs, curv_specs, cart_specs = {}, {}, {}, {}
     with h5py.File(fpath, "r") as f:
         g_metric = f.get("metric")
         g_bfield = f.get("Bfield_terms")
@@ -358,8 +453,8 @@ def _read_geom_h5(fpath: str, params: dict) -> dict:
         g_cart = f.get("cart_coords")
 
         for h5name, key in _H5_METRIC.items():
-            val = _h5_get(g_metric, h5name)
-            if val is not None:
+            val = _h5_take(g_metric, "metric", h5name, metric_specs, key)
+            if val is not None and val is not _DEFERRED:
                 metric[key] = val
         for name in ("C_y", "C_xy"):
             val = _h5_get(g_metric, name)
@@ -367,11 +462,12 @@ def _read_geom_h5(fpath: str, params: dict) -> dict:
                 metric[name] = np.squeeze(val)[()] if val.size == 1 else val
 
         for h5name, key in _H5_BFIELD.items():
-            extra[key] = _h5_get(g_bfield, h5name)
+            extra[key] = _h5_take(g_bfield, "Bfield_terms", h5name,
+                                  top_specs, key)
 
         # GENE-3D writes the curvature; GENE's flux-tube files may not.
-        K_x = _h5_get(g_bfield, "K_x")
-        K_y = _h5_get(g_bfield, "K_y")
+        K_x = _h5_take(g_bfield, "Bfield_terms", "K_x", curv_specs, "K_x")
+        K_y = _h5_take(g_bfield, "Bfield_terms", "K_y", curv_specs, "K_y")
 
         R = _h5_get(g_shape, "R")
         Z = _h5_get(g_shape, "Z")
@@ -389,9 +485,13 @@ def _read_geom_h5(fpath: str, params: dict) -> dict:
         # what lets a snapshot be exported to a real-space 3-D viewer without
         # reconstructing the flux-surface mapping.
         cart = {}
+        n_cart = 0
         for name in ("x", "y", "z"):
-            val = _h5_get(g_cart, name)
-            if val is not None:
+            val = _h5_take(g_cart, "cart_coords", name, cart_specs, name)
+            if val is None:
+                continue
+            n_cart += 1
+            if val is not _DEFERRED:
                 cart[name] = val
 
         local = dict(
@@ -405,23 +505,36 @@ def _read_geom_h5(fpath: str, params: dict) -> dict:
             if value is not None:
                 local[name] = value
 
-    metric["dxdR"] = dxdR
-    metric["dxdZ"] = dxdZ
+    metric_map = (_DeferredArrays(fpath, metric_specs, metric)
+                  if metric_specs else metric)
+    metric_map["dxdR"] = dxdR
+    metric_map["dxdZ"] = dxdZ
 
-    geom = dict(
-        Bfield=extra.get("Bfield"), Jacobian=extra.get("Jacobian"),
-        dBdx=extra.get("dBdx"), dBdy=extra.get("dBdy"),
-        dBdz=extra.get("dBdz"),
-        metric=metric, shape=dict(gR=R, gZ=Z, gPhi=Phi), local=local,
+    eager = dict(
+        metric=metric_map, shape=dict(gR=R, gZ=Z, gPhi=Phi), local=local,
         dxdR=dxdR, dxdZ=dxdZ,
     )
+    # A deferred key must stay out of the eager half, or the None written here
+    # would shadow the loader and hand every caller a missing Jacobian.
+    for key in _H5_BFIELD.values():
+        if key not in top_specs:
+            eager[key] = extra.get(key)
+    geom = (_DeferredArrays(fpath, top_specs, eager)
+            if top_specs else dict(eager))
+
     if profiles:
         geom["profiles"] = profiles
-    if len(cart) == 3:
-        geom["cart_coords"] = cart
+    if n_cart == 3:
+        geom["cart_coords"] = (_DeferredArrays(fpath, cart_specs, cart)
+                               if cart_specs else cart)
     if K_x is not None and K_y is not None:
-        # Stashed for _compute_curvature to prefer over recomputing.
-        geom["_curv_from_file"] = dict(K_x=K_x, K_y=K_y, sloc=None)
+        # Stashed for _compute_curvature to prefer over recomputing. The
+        # deferred form is still truthy — it knows its three keys without
+        # reading any of them — so the caller's `or _compute_curvature(...)`
+        # fallback stays correct.
+        geom["_curv_from_file"] = (
+            _DeferredArrays(fpath, curv_specs, {"sloc": None})
+            if curv_specs else dict(K_x=K_x, K_y=K_y, sloc=None))
     return geom
 
 
@@ -509,10 +622,20 @@ def _get_area(geom: dict, params: dict) -> dict:
     C_y     = geom['metric'].get('C_y', 1.0)
  
     A0 = (2*np.pi)**2 * abs(C_y) * Lref**2
- 
-    J   = geom['Jacobian']
-    gxx = geom['metric'].get('gxx', np.ones_like(J))
- 
+
+    def surface_terms():
+        """
+        ``(J, gxx)``, read only by the branches that actually use them.
+
+        GENE-3D's are ``(nx, ny, nz)``, and the branch below that uses its
+        stored ``dVdx``/``sqrtgxx_fs`` needs neither — while the old eager
+        ``np.ones_like(J)`` default allocated a second full-size array even
+        when ``gxx`` was present.
+        """
+        J = geom['Jacobian']
+        gxx = geom['metric'].get('gxx')
+        return J, (np.ones_like(J) if gxx is None else gxx)
+
     if is_3d:
         # J and gxx are (nx, ny, nz); average over the flux surface. GENE-3D
         # already writes dVdx and sqrtgxx_fs, so use those when present — but
@@ -525,17 +648,22 @@ def _get_area(geom: dict, params: dict) -> dict:
             dVdx = np.abs(np.asarray(stored['dVdx'], dtype=float)) / n_pol
             dVdx = dVdx * Lref**2
             sqrtgxx = stored.get('sqrtgxx_fs')
-            Area = (dVdx * np.asarray(sqrtgxx, dtype=float)
-                    if sqrtgxx is not None
-                    else A0 * np.mean(J * np.sqrt(gxx), axis=(1, 2)))
+            if sqrtgxx is not None:
+                Area = dVdx * np.asarray(sqrtgxx, dtype=float)
+            else:
+                J, gxx = surface_terms()
+                Area = A0 * np.mean(J * np.sqrt(gxx), axis=(1, 2))
         else:
+            J, gxx = surface_terms()
             Area = A0 * np.mean(J * np.sqrt(gxx), axis=(1, 2))
             dVdx = A0 * np.mean(J, axis=(1, 2))
     elif x_local:
+        J, gxx = surface_terms()
         Area  = A0 * np.sum(J * np.sqrt(gxx)) / nz
         dVdx  = A0 * np.sum(J) / nz
     else:
         # Global: sum along z axis (axis=1), result shape (nx,)
+        J, gxx = surface_terms()
         Area  = A0 * np.sum(J * np.sqrt(gxx), axis=1) / nz
         dVdx  = A0 * np.sum(J, axis=1) / nz
  

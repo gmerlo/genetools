@@ -167,7 +167,7 @@ class _BaseReader(ABC):
         """Return a 1-D array of all simulation times in the file."""
 
     @abstractmethod
-    def stream_selected(self, iteration_indices):
+    def stream_selected(self, iteration_indices, variables=None):
         """
         Yield ``(time, arrays)`` for the given *iteration_indices*.
 
@@ -175,6 +175,9 @@ class _BaseReader(ABC):
         ----------
         iteration_indices : sequence of int
             Zero-based iteration indices to read.
+        variables : str or sequence of str, optional
+            Read only these variables, by name. The default reads every
+            variable in the file.
 
         Yields
         ------
@@ -182,13 +185,37 @@ class _BaseReader(ABC):
             Simulation time for the iteration.
         arrays : list of np.ndarray
             One complex array per field/moment, each shaped ``(ni, nj, nk)``.
+            With *variables* given, the list keeps its full length and the
+            entries that were not asked for are ``None``.
         """
+
+    def _slots(self, variables):
+        """
+        Positions in :attr:`var_names` to decode, or ``None`` for all of them.
+
+        A GENE-3D moment file holds ten ``(nx, ny, nz)`` arrays and a typical
+        diagnostic wants three of them; decoding the other seven costs the
+        memory of the whole snapshot for nothing. The yielded list keeps its
+        full length whatever is selected, so :meth:`index_of` remains the
+        address of every variable and a caller that asks for too few gets a
+        ``None`` rather than a silently shifted array.
+        """
+        if variables is None:
+            return None
+        names = self.var_names
+        wanted = {variables} if isinstance(variables, str) else set(variables)
+        missing = sorted(v for v in wanted if v not in names)
+        if missing:
+            raise KeyError(
+                f"{self.filename!r} has no variable(s) {', '.join(missing)}; "
+                f"available: {', '.join(names)}")
+        return frozenset(i for i, n in enumerate(names) if n in wanted)
 
     def segment_of(self, global_idx: int) -> int:
         """Return segment index for *global_idx* (always 0 for single readers)."""
         return 0
 
-    def stream_selected_with_seg(self, iteration_indices):
+    def stream_selected_with_seg(self, iteration_indices, variables=None):
         """
         Like :meth:`stream_selected` but also yields segment index (always 0).
 
@@ -198,7 +225,7 @@ class _BaseReader(ABC):
         arrays : list of np.ndarray
         seg_idx : int  (always 0 for single-segment readers)
         """
-        for t, arrays in self.stream_selected(iteration_indices):
+        for t, arrays in self.stream_selected(iteration_indices, variables):
             yield t, arrays, 0
 
 
@@ -391,13 +418,16 @@ class BinaryReader(_BaseReader):
             mm.close()
         return buf
 
-    def stream_selected(self, iteration_indices):
+    def stream_selected(self, iteration_indices, variables=None):
         """
         Stream only the requested iterations from the binary file.
 
         Yields ``(time, [array_0, array_1, ...])`` where each array has
-        shape ``(ni, nj, nk)`` in Fortran (column-major) order.
+        shape ``(ni, nj, nk)`` in Fortran (column-major) order. *variables*
+        restricts which of them are read; the records of the rest are skipped
+        over and their slots come back as ``None``.
         """
+        slots = self._slots(variables)
         with open(self.filename, "rb") as f:
             mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
             idx = self._get_record_index(mm)
@@ -409,6 +439,9 @@ class BinaryReader(_BaseReader):
                 # complex array records
                 data = []
                 for k in range(self.n_arrays):
+                    if slots is not None and k not in slots:
+                        data.append(None)
+                        continue
                     arr = self._read_payload(mm, idx[base + 1 + k],
                                              self.cpx_dtype, self.npts)
                     arr = arr.reshape((self.ni, self.nj, self.nk), order="F")
@@ -582,30 +615,38 @@ class H5Reader(_BaseReader):
         """
         return self._layout_cached()[2].copy()
 
-    def stream_selected(self, iteration_indices):
+    def stream_selected(self, iteration_indices, variables=None):
         """
         Stream only the requested snapshots from the HDF5 file.
 
         Yields ``(time, [array_0, array_1, ...])`` with one array per variable
         in :attr:`var_names` order, each in GENE's ``(ni, nj, nk)`` axis order.
         Unlike the BP reader, HDF5 allows random access, so the requested order
-        is honoured directly with no reorder buffer.
+        is honoured directly with no reorder buffer — and *variables* selects
+        which datasets are touched at all, leaving ``None`` in the slots of the
+        rest. That is what keeps a GENE-3D moment file, which holds ten
+        ``(nx, ny, nz)`` arrays, from costing ten arrays' memory per snapshot
+        when a diagnostic needs three.
 
         Parameters
         ----------
         iteration_indices : sequence of int
             Positions into the array returned by :meth:`read_all_times`.
+        variables : str or sequence of str, optional
+            Read only these variables (default: all of them).
         """
         var_names, snapshots, times = self._layout_cached()
         indices = list(iteration_indices)
         if not indices:
             return
+        slots = self._slots(variables)
         with h5py.File(self.filename, "r") as f:
             root = f[self._prefix]
             for pos in indices:
                 snap = snapshots[pos]
                 data = [self._decode(root[f"{name}/{snap:010d}"])
-                        for name in var_names]
+                        if slots is None or i in slots else None
+                        for i, name in enumerate(var_names)]
                 yield float(times[pos]), data
 
 
@@ -708,7 +749,7 @@ if _ADIOS2_AVAILABLE:
             """Names of the arrays yielded by :meth:`stream_selected`."""
             return self._var_names()
 
-        def stream_selected(self, iteration_indices):
+        def stream_selected(self, iteration_indices, variables=None):
             """
             Stream only the requested iterations from the BP file.
 
@@ -726,6 +767,7 @@ if _ADIOS2_AVAILABLE:
 
             iter_set  = set(iteration_indices)
             var_names = self._var_names()
+            slots     = self._slots(variables)
             buffer    = {}          # step_idx -> (time, data)
             next_out  = 0           # next position in iteration_indices to yield
 
@@ -734,7 +776,10 @@ if _ADIOS2_AVAILABLE:
                     continue
                 time = float(np.asarray(read("time")).ravel()[0])
                 data = []
-                for name in var_names:
+                for i, name in enumerate(var_names):
+                    if slots is not None and i not in slots:
+                        data.append(None)
+                        continue
                     arr = np.asarray(read(name)).astype(self.cpx_dtype,
                                                         copy=False)
                     arr = arr.reshape((self.ni, self.nj, self.nk), order="F")
@@ -905,7 +950,7 @@ class MultiSegmentReader:
         self._ensure_timeline()
         return self._global_map[global_idx][0]
 
-    def stream_selected(self, global_indices):
+    def stream_selected(self, global_indices, variables=None):
         """
         Yield ``(time, arrays)`` for the requested global indices.
 
@@ -919,6 +964,8 @@ class MultiSegmentReader:
         ----------
         global_indices : sequence of int
             Indices into the merged timeline from :meth:`read_all_times`.
+        variables : str or sequence of str, optional
+            Read only these variables, forwarded to each segment reader.
 
         Yields
         ------
@@ -926,9 +973,10 @@ class MultiSegmentReader:
         arrays : list of np.ndarray
         """
         self._ensure_timeline()
-        yield from self._stream_with_seg(global_indices, include_seg=False)
+        yield from self._stream_with_seg(global_indices, include_seg=False,
+                                         variables=variables)
 
-    def stream_selected_with_seg(self, global_indices):
+    def stream_selected_with_seg(self, global_indices, variables=None):
         """
         Like :meth:`stream_selected` but also yields the segment index.
 
@@ -940,9 +988,11 @@ class MultiSegmentReader:
             Index into the original readers list that produced this step.
         """
         self._ensure_timeline()
-        yield from self._stream_with_seg(global_indices, include_seg=True)
+        yield from self._stream_with_seg(global_indices, include_seg=True,
+                                         variables=variables)
 
-    def _stream_with_seg(self, global_indices, include_seg: bool):
+    def _stream_with_seg(self, global_indices, include_seg: bool,
+                         variables=None):
         """
         Core streaming implementation.
 
@@ -975,7 +1025,7 @@ class MultiSegmentReader:
             reader      = self.readers[seg_idx]
 
             for (t, arrays), g_idx in zip(
-                    reader.stream_selected(local_iters), g_idxs):
+                    reader.stream_selected(local_iters, variables), g_idxs):
                 entry = (t, arrays, seg_idx) if include_seg else (t, arrays)
                 buffer[g_idx] = entry
 
