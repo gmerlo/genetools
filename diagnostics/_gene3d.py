@@ -127,14 +127,20 @@ def to_ky(var: np.ndarray, axis: int = 1) -> np.ndarray:
 
     The result spans the full signed ky range in FFT order, matching the ``ky``
     array built by :func:`~genetools.io.coordinates.load_coord_xy_global`.
+
+    Normalised in place: ``/ n`` as an expression would allocate a second
+    full-size complex array per transform, and this runs once per moment per
+    snapshot.
     """
-    n = var.shape[axis]
-    return np.fft.fft(var, axis=axis) / n
+    out = np.fft.fft(var, axis=axis)
+    out /= var.shape[axis]
+    return out
 
 def to_kx(var: np.ndarray, axis: int = 0) -> np.ndarray:
     """As :func:`to_ky`, for the radial axis."""
-    n = var.shape[axis]
-    return np.fft.fft(var, axis=axis) / n
+    out = np.fft.fft(var, axis=axis)
+    out /= var.shape[axis]
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -154,8 +160,26 @@ def jacobian_yz(J: np.ndarray) -> np.ndarray:
     return np.broadcast_to(J.mean(axis=1)[:, np.newaxis, :], J.shape)
 
 def flux_surface_average(var: np.ndarray, J: np.ndarray) -> np.ndarray:
-    """Jacobian-weighted average over y and z, giving a radial profile."""
-    return np.average(var, weights=J, axis=(1, 2))
+    """
+    Jacobian-weighted average over y and z, giving a radial profile.
+
+    Contracted with ``einsum`` rather than ``np.average(var, weights=J)``:
+    the latter forms the full ``(nx, ny, nz)`` product before summing it, which
+    on a GENE-3D grid is another whole snapshot's worth of float64 per call.
+    The arithmetic is the same sum of the same products.
+    """
+    return (np.einsum("xyz,xyz->x", var, J, optimize=False)
+            / J.sum(axis=(1, 2)))
+
+def weighted_total(var: np.ndarray, J: np.ndarray):
+    """
+    Jacobian-weighted mean of *var* over every axis, as a scalar.
+
+    The ``einsum`` form of ``np.average(var, weights=J)``, which would build the
+    full product array before summing it.
+    """
+    return np.einsum("xyz,xyz->", var, J, optimize=False) / J.sum()
+
 
 def xz_average(var: np.ndarray, J: np.ndarray, xslice=slice(None)):
     """
@@ -163,9 +187,14 @@ def xz_average(var: np.ndarray, J: np.ndarray, xslice=slice(None)):
 
     *xslice* restricts the radial range — useful for excluding the buffer
     regions, where the Krook operators make the fluxes unphysical.
+
+    The weight is y-independent (see :func:`jacobian_yz`), so the contraction
+    carries the ``(nx, nz)`` form of it and never builds the full-size product
+    that ``np.average`` would.
     """
-    weights = jacobian_yz(J)[xslice]
-    return np.average(var[xslice], weights=weights, axis=(0, 2))
+    w = J.mean(axis=1)[xslice]
+    return (np.einsum("xyz,xz->y", var[xslice], w, optimize=False)
+            / w.sum())
 
 def volume_weights(J: np.ndarray) -> np.ndarray:
     """
@@ -226,8 +255,9 @@ def z_average_ky(var: np.ndarray, J: np.ndarray) -> np.ndarray:
     The sibling of :func:`xz_average`, which also collapses x. Keeping x is what
     makes the radial structure of a ky spectrum visible instead of averaged away.
     """
-    w = jacobian_yz(J)
-    return np.sum(var * w, axis=2) / np.sum(w, axis=2)
+    w = J.mean(axis=1)                                    # (nx, nz)
+    return (np.einsum("xyz,xz->xy", var, w, optimize=False)
+            / w.sum(axis=1)[:, np.newaxis])
 
 
 def index_window(values, limits, n=None) -> slice:
@@ -301,8 +331,19 @@ def exb_velocity_ky(phi, ky, geomfac) -> np.ndarray:
     ``v_E^x = -flux_geomfac * dphi/dy``, so with ``d/dy -> i k_y``::
 
         v_E^x(k_y) = -i k_y phi(k_y) * flux_geomfac
+
+    Scaled in place, and in the precision the data arrives in.
+
+    GENE-3D writes float32 and numpy's FFT preserves that, so ``to_ky`` returns
+    complex64. The ``*=`` form keeps it there; writing these factors as an
+    expression would promote the whole ``(nx, nky, nz)`` array to complex128 on
+    the first float64 operand — doubling the largest array in the flux
+    reconstruction to carry digits the snapshot never had.
     """
-    return (-1j * ky[np.newaxis, :, np.newaxis] * to_ky(phi)) * geomfac
+    out = to_ky(phi)
+    out *= -1j * ky[np.newaxis, :, np.newaxis]
+    out *= geomfac
+    return out
 
 def flutter_velocity_ky(a_par, ky, geomfac) -> np.ndarray:
     """
@@ -313,8 +354,14 @@ def flutter_velocity_ky(a_par, ky, geomfac) -> np.ndarray:
     so this is ``+i k_y A_par(k_y) * flux_geomfac``. Carrying the ExB sign over
     here (as one of the reference GUI's two branches does) flips the sign of
     every electromagnetic flux.
+
+    Scaled in place and in the snapshot's own precision, for the reasons given
+    in :func:`exb_velocity_ky`.
     """
-    return (1j * ky[np.newaxis, :, np.newaxis] * to_ky(a_par)) * geomfac
+    out = to_ky(a_par)
+    out *= 1j * ky[np.newaxis, :, np.newaxis]
+    out *= geomfac
+    return out
 
 
 # ---------------------------------------------------------------------------

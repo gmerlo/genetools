@@ -765,7 +765,10 @@ class Fluxes2D(RunDiagnostic):
             wanted = [v for v in self._FLUXES_3D if g3.has_var(reader, v)]
             slots = {v: reader.index_of(v) for v in wanted}
             stacks = {v: [] for v in wanted}
-            for _, arrays in reader.stream_selected(idx):
+            # Four of the moment file's ten (nx, ny, nz) arrays are fluxes;
+            # decoding the six moments as well costs their memory per snapshot
+            # and this path never looks at them.
+            for _, arrays in reader.stream_selected(idx, variables=wanted):
                 for v in wanted:
                     stacks[v].append(
                         g3.flux_surface_average(arrays[slots[v]], J))

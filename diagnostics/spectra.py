@@ -590,37 +590,59 @@ class Spectra(RunDiagnostic):
 
         spectra = {n: {} for n in run.species}
         code_flux = {n: {} for n in run.species}
+        fld_vars = ("phi",) if i_apar is None else ("phi", "A_par")
         for name in run.species:
             n0, T0 = self._background(name)
             reader = mom_readers[name]
             wanted = [v for v in self._ES_FLUXES + self._EM_FLUXES
                       if g3.has_var(reader, v)]
+            # The moments the fluxes are rebuilt from, plus the code's own
+            # fluxes the consistency check compares against. Anything else in
+            # the file (B_par moments, say) is never touched, so it is not
+            # decoded either.
+            mom_vars = [v for v in self._MOMENTS_USED if g3.has_var(reader, v)]
+            mom_vars += [v for v in wanted if v not in mom_vars]
             acc = {v: [] for v in wanted}
             ref = {v: [] for v in wanted}
 
-            stream_f = fld.stream_selected(common["field"])
-            stream_m = reader.stream_selected(common[name])
+            stream_f = fld.stream_selected(common["field"], variables=fld_vars)
+            stream_m = reader.stream_selected(common[name], variables=mom_vars)
             for (_, f_arrays), (_, m_arrays) in zip(stream_f, stream_m):
                 phi = f_arrays[i_phi]
-                v_E = g3.exb_velocity_ky(phi, ky, geomfac)
-                b_x = (g3.flutter_velocity_ky(f_arrays[i_apar], ky, geomfac)
+                # Conjugated once here, not once per flux: every flux below is
+                # built from conj(v_E) or conj(b_x), and np.conj allocates a
+                # full complex snapshot each time it is called.
+                v_E = np.conj(g3.exb_velocity_ky(phi, ky, geomfac))
+                b_x = (np.conj(g3.flutter_velocity_ky(f_arrays[i_apar], ky,
+                                                      geomfac))
                        if i_apar is not None else None)
 
-                fluxes = self._fluxes_from_moments(
-                    reader, m_arrays, v_E, b_x, n0, T0, wanted)
                 for v in wanted:
+                    # One flux at a time: each is a complex (nx, nky, nz)
+                    # array, four times the bytes of the real snapshot behind
+                    # it, and reducing it here lets it go before the next is
+                    # built. Assembling all four into a dict first — as this
+                    # used to — held every transformed moment and every product
+                    # alive at once, so the peak was the whole set rather than
+                    # the largest single flux.
+                    flux = self._flux_density(reader, m_arrays, v,
+                                              v_E, b_x, n0, T0)
                     # Keep the radial axis: the (x, ky) map is the primary
                     # product and both 1-D views are reductions of it. Averaging
                     # x away here, as this used to, threw the radial structure
                     # of the spectrum out before anyone could look at it.
-                    acc[v].append(g3.z_average_ky(fluxes[v], J))
+                    acc[v].append(g3.z_average_ky(flux, J))
+                    del flux
                     # The reference has to be reduced identically, or the
                     # comparison measures the difference between two averaging
                     # weights rather than a normalisation error: summing the
                     # spectrum over ky is a Jacobian-weighted average over
                     # x, y and z, so the code's own flux gets the same.
-                    ref[v].append(np.average(g3.pick(reader, m_arrays, v)[xsl],
-                                             weights=J[xsl]))
+                    # Contracted rather than np.average'd: the latter builds
+                    # the full float64 product of the windowed snapshot just
+                    # to sum it.
+                    ref[v].append(g3.weighted_total(
+                        g3.pick(reader, m_arrays, v)[xsl], J[xsl]))
 
             for v in wanted:
                 spectra[name][v] = self._time_average(
@@ -647,9 +669,15 @@ class Spectra(RunDiagnostic):
         w = np.asarray(weights)[xsl]
         return (np.asarray(spectrum)[xsl] * w).sum(axis=0) / w.sum(axis=0)
 
-    def _fluxes_from_moments(self, reader, arrays, v_E, b_x, n0, T0, wanted):
+    #: Moments the GENE-3D flux reconstruction reads, beyond the fluxes
+    #: themselves. Anything else in the file stays undecoded.
+    _MOMENTS_USED = ("n", "T_par", "T_per", "u_par", "q_par", "q_perp")
+
+    def _flux_density(self, reader, arrays, name, v_E_c, b_x_c, n0, T0):
         """
-        Build the complex per-mode flux densities from one snapshot.
+        Build one complex per-mode flux density from one snapshot.
+
+        *v_E_c* and *b_x_c* arrive already conjugated — see the caller.
 
         Both integrands follow from GENE-3D's own moment slots rather than
         being assumed. Its heat flux is built from ``momc(5) = mat_20 + mat_01``
@@ -663,33 +691,64 @@ class Spectra(RunDiagnostic):
         ``q_par`` and ``q_perp`` — so ``Q_em`` is an exact identity in the data
         on disk. The reference GUI omits both from its variable map and
         therefore reports ``Q_em = 0`` for every GENE-3D run.
+
+        Each moment is transformed where it is used rather than up front, so
+        only the moments of the flux being built are ever in memory at once.
+        ``n`` is therefore transformed twice across ``Gamma_es`` and ``Q_es``;
+        an FFT costs less than keeping a second full-size complex array alive.
         """
         nx = n0[:, np.newaxis, np.newaxis]
         tx = T0[:, np.newaxis, np.newaxis]
 
-        dens = g3.to_ky(g3.pick(reader, arrays, "n"))
-        t_par = g3.to_ky(g3.pick(reader, arrays, "T_par"))
-        t_perp = g3.to_ky(g3.pick(reader, arrays, "T_per"))
+        def ky_of(var):
+            """
+            Transform one moment to ky, in the precision it was written in.
 
-        out = {}
-        if "Gamma_es" in wanted:
-            out["Gamma_es"] = np.conj(v_E) * dens
-        if "Q_es" in wanted:
-            integrand = (0.5 * t_par + t_perp) * nx + 1.5 * dens * tx
-            out["Q_es"] = np.conj(v_E) * integrand
+            GENE-3D writes float32 and numpy's FFT preserves that, so this is
+            complex64 and the in-place accumulation below keeps it there. The
+            expression form this replaced promoted every intermediate to
+            complex128 on its first float64 factor, doubling the biggest
+            arrays in the reconstruction for digits the data never carried.
+            """
+            return g3.to_ky(g3.pick(reader, arrays, var))
 
-        if b_x is not None:
-            if "Gamma_em" in wanted:
-                u_par = g3.to_ky(g3.pick(reader, arrays, "u_par"))
-                out["Gamma_em"] = np.conj(b_x) * u_par
-            if "Q_em" in wanted:
-                if g3.has_var(reader, "q_par") and g3.has_var(reader, "q_perp"):
-                    q_tot = (g3.to_ky(g3.pick(reader, arrays, "q_par"))
-                             + g3.to_ky(g3.pick(reader, arrays, "q_perp")))
-                    out["Q_em"] = np.conj(b_x) * q_tot
-                else:
-                    out["Q_em"] = np.zeros_like(out.get("Gamma_em", dens))
-        return out
+        if name == "Gamma_es":
+            out = ky_of("n")
+            out *= v_E_c
+            return out
+        if name == "Q_es":
+            # Accumulated in place: written as one expression this holds three
+            # transformed moments and two products at once, five complex
+            # snapshots where two will do.
+            out = ky_of("T_par")
+            out *= 0.5
+            out += ky_of("T_per")
+            out *= nx
+            term = ky_of("n")
+            term *= 1.5
+            term *= tx          # in this order: (1.5 n) T_0, bit for bit
+            out += term
+            del term
+            out *= v_E_c
+            return out
+
+        if b_x_c is None:
+            raise ValueError(
+                f"{name} needs A_par, which this run's field file does not "
+                "hold; an electromagnetic flux cannot be rebuilt from phi "
+                "alone.")
+        if name == "Gamma_em":
+            out = ky_of("u_par")
+            out *= b_x_c
+            return out
+        if name == "Q_em":
+            if g3.has_var(reader, "q_par") and g3.has_var(reader, "q_perp"):
+                out = ky_of("q_par")
+                out += ky_of("q_perp")
+                out *= b_x_c
+                return out
+            return np.zeros_like(b_x_c)
+        raise ValueError(f"unknown GENE-3D flux {name!r}")
 
     def _check(self, result):
         """Compare each ky-summed spectrum against the code's own flux."""
