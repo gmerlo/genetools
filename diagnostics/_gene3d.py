@@ -168,7 +168,7 @@ def flux_surface_average(var: np.ndarray, J: np.ndarray) -> np.ndarray:
     on a GENE-3D grid is another whole snapshot's worth of float64 per call.
     The arithmetic is the same sum of the same products.
     """
-    return (np.einsum("xyz,xyz->x", var, J, optimize=False)
+    return (np.einsum("xyz,xyz->x", var, J, optimize=True)
             / J.sum(axis=(1, 2)))
 
 def weighted_total(var: np.ndarray, J: np.ndarray):
@@ -178,7 +178,7 @@ def weighted_total(var: np.ndarray, J: np.ndarray):
     The ``einsum`` form of ``np.average(var, weights=J)``, which would build the
     full product array before summing it.
     """
-    return np.einsum("xyz,xyz->", var, J, optimize=False) / J.sum()
+    return np.einsum("xyz,xyz->", var, J, optimize=True) / J.sum()
 
 
 def xz_average(var: np.ndarray, J: np.ndarray, xslice=slice(None)):
@@ -193,7 +193,7 @@ def xz_average(var: np.ndarray, J: np.ndarray, xslice=slice(None)):
     that ``np.average`` would.
     """
     w = J.mean(axis=1)[xslice]
-    return (np.einsum("xyz,xz->y", var[xslice], w, optimize=False)
+    return (np.einsum("xyz,xz->y", var[xslice], w, optimize=True)
             / w.sum())
 
 def volume_weights(J: np.ndarray) -> np.ndarray:
@@ -256,7 +256,7 @@ def z_average_ky(var: np.ndarray, J: np.ndarray) -> np.ndarray:
     makes the radial structure of a ky spectrum visible instead of averaged away.
     """
     w = J.mean(axis=1)                                    # (nx, nz)
-    return (np.einsum("xyz,xz->xy", var, w, optimize=False)
+    return (np.einsum("xyz,xz->xy", var, w, optimize=True)
             / w.sum(axis=1)[:, np.newaxis])
 
 
