@@ -331,6 +331,78 @@ def flux_ratios(path: str, species: list, navg: int) -> dict:
 # Plotting
 # ---------------------------------------------------------------------------
 
+def collect_rows(scan_dir, entries, param_names, ky_col, navg=1,
+                 ratios=True):
+    """
+    One row per run: its parameters, its eigenvalue and its flux ratios.
+
+    Returns ``(rows, missing)`` — *missing* naming the runs whose ``nrg`` file
+    could not be found, whose ratios come back as NaN rather than as a guess.
+    Shared by the command line and :func:`load_scan` so the two cannot report
+    different numbers for the same scan.
+    """
+    rows, missing = [], []
+    for e in entries:
+        row = {"run": e["run"], "ky": e["params"].get(ky_col, np.nan),
+               "gamma": e["gamma"], "omega": e["omega"]}
+        row.update({p: e["params"].get(p) for p in param_names if p != ky_col})
+        row.update({"q_es_e_over_i": np.nan, "q_em_over_es_e": np.nan})
+        if ratios:
+            nrg = find_run_file(scan_dir, "nrg", e["run"])
+            if nrg is None:
+                missing.append(e["run"])
+            else:
+                row.update(flux_ratios(nrg, species_order(scan_dir, e["run"]),
+                                       navg))
+        row["_key"] = group_key(e, ky_col, param_names)
+        rows.append(row)
+    return rows, missing
+
+
+def load_scan(path, navg: int = 1, ky_col: str = None, ratios: bool = True):
+    """
+    Read a whole scan into one :class:`pandas.DataFrame` — the notebook entry.
+
+    *path* is the scan directory or its ``scan.log``. Every scanned parameter
+    becomes a column, alongside ``gamma``, ``omega`` and the two flux ratios.
+    Sorted by the non-ky parameters and then by ky, so plotting a group needs no
+    further sorting.
+
+    ``df.attrs`` carries what a plot needs to label itself: ``ky`` (the name of
+    the ky column, always stored as ``'ky'``), ``group_by`` (the other scanned
+    parameters) and ``missing`` (runs with no ``nrg``).
+
+    pandas is imported here rather than at module scope: the command line does
+    not need it.
+    """
+    import pandas as pd
+
+    path = os.path.abspath(path)
+    log_path = os.path.join(path, "scan.log") if os.path.isdir(path) else path
+    scan_dir = os.path.dirname(log_path) or "."
+    if not os.path.isfile(log_path):
+        raise FileNotFoundError(f"no scan.log at {log_path}")
+
+    entries, param_names = parse_scan_log(log_path)
+    ky_col = identify_ky(param_names, ky_col)
+    others = [p for p in param_names if p != ky_col]
+
+    rows, missing = collect_rows(scan_dir, entries, param_names, ky_col,
+                                 navg=navg, ratios=ratios)
+    for row in rows:
+        row.pop("_key", None)
+
+    # The column keeps the scan's own name for ky, so the table reads the way
+    # scan.log does; df.attrs["ky"] says which column that is.
+    df = pd.DataFrame(rows).rename(columns={"ky": ky_col,
+                                            "q_es_e_over_i": "Qes_e/Qes_i",
+                                            "q_em_over_es_e": "Qem/Qes_e"})
+    df = df.sort_values(others + [ky_col]).reset_index(drop=True)
+    df.attrs.update(ky=ky_col, group_by=others, missing=missing,
+                    scan_dir=scan_dir)
+    return df
+
+
 def group_key(entry: dict, ky_col: str, param_names: list) -> tuple:
     """The scanned parameters other than ky, as a hashable key."""
     return tuple((p, entry["params"].get(p))
@@ -425,22 +497,8 @@ def main(argv=None) -> int:
     print(f"{len(entries)} runs, scanned parameters: {param_names} "
           f"(ky column: {ky_col})")
 
-    rows = []
-    missing = []
-    for e in entries:
-        row = {"run": e["run"], "ky": e["params"].get(ky_col, np.nan),
-               "gamma": e["gamma"], "omega": e["omega"]}
-        row.update({p: e["params"].get(p) for p in param_names if p != ky_col})
-        row.update({"q_es_e_over_i": np.nan, "q_em_over_es_e": np.nan})
-        if not args.no_ratios:
-            nrg = find_run_file(scan_dir, "nrg", e["run"])
-            if nrg is None:
-                missing.append(e["run"])
-            else:
-                row.update(flux_ratios(nrg, species_order(scan_dir, e["run"]),
-                                       args.navg))
-        row["_key"] = group_key(e, ky_col, param_names)
-        rows.append(row)
+    rows, missing = collect_rows(scan_dir, entries, param_names, ky_col,
+                                 navg=args.navg, ratios=not args.no_ratios)
     if missing:
         print(f"  no nrg file for runs: {', '.join(missing)}", file=sys.stderr)
 

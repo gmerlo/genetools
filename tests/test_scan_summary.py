@@ -119,6 +119,68 @@ class TestParseScanLog:
         assert scan_summary.identify_ky(names, "x0") == "x0"
 
 
+class TestLoadScan:
+    """The notebook entry point: a folder in, one table out."""
+
+    def _scan(self, tmp_path):
+        (tmp_path / "scan.log").write_text(
+            "#Run  | x0        1  | kymin     1  /Eigenvalue1\n"
+            "0001  | 9.750000e-01 | 5.000000e-02 |  0.0670 -1.0260\n"
+            "0002  | 9.750000e-01 | 1.000000e-01 |  0.1500 -0.5000\n"
+            "0003  | 9.500000e-01 | 5.000000e-02 |  0.0570 -0.0880\n")
+        for run in ("0001", "0002", "0003"):
+            (tmp_path / f"parameters_{run}").write_text(
+                "&species\n name = 'ions'\n charge = 1.0\n/\n"
+                "&species\n name = 'electrons'\n charge = -1.0\n/\n")
+            with open(tmp_path / f"nrg_{run}", "w") as fh:
+                for it in range(2):
+                    fh.write(f"   {it * 2.0:.6f}\n")
+                    fh.write("  " + "  ".join(["1.0"] * 6 + ["80.0", "-6.0"]
+                                              + ["0.0"] * 2) + "\n")
+                    fh.write("  " + "  ".join(["1.0"] * 6 + ["40.0", "-8.0"]
+                                              + ["0.0"] * 2) + "\n")
+        return tmp_path
+
+    def test_a_folder_gives_a_table(self, tmp_path):
+        df = scan_summary.load_scan(str(self._scan(tmp_path)))
+        assert list(df.columns)[:5] == ["run", "kymin", "gamma", "omega", "x0"]
+        assert len(df) == 3
+
+    def test_attrs_say_how_to_plot_it(self, tmp_path):
+        df = scan_summary.load_scan(str(self._scan(tmp_path)))
+        assert df.attrs["ky"] == "kymin"
+        assert df.attrs["group_by"] == ["x0"]
+        assert df.attrs["missing"] == []
+        # the ky column is addressable by the name attrs gives
+        assert df[df.attrs["ky"]].notna().all()
+
+    def test_sorted_by_group_then_ky(self, tmp_path):
+        df = scan_summary.load_scan(str(self._scan(tmp_path)))
+        assert list(df["x0"]) == [0.95, 0.975, 0.975]
+        assert list(df["kymin"]) == [0.05, 0.05, 0.10]
+
+    def test_ratios_are_present(self, tmp_path):
+        df = scan_summary.load_scan(str(self._scan(tmp_path)))
+        assert list(df["Qes_e/Qes_i"]) == pytest.approx([0.5] * 3)
+        assert list(df["Qem/Qes_e"]) == pytest.approx([-0.2] * 3)
+
+    def test_scan_log_itself_is_accepted(self, tmp_path):
+        folder = self._scan(tmp_path)
+        df = scan_summary.load_scan(str(folder / "scan.log"))
+        assert len(df) == 3
+
+    def test_missing_nrg_is_reported_not_guessed(self, tmp_path):
+        folder = self._scan(tmp_path)
+        (folder / "nrg_0002").unlink()
+        df = scan_summary.load_scan(str(folder))
+        assert df.attrs["missing"] == ["0002"]
+        assert df.loc[df["run"] == "0002", "Qes_e/Qes_i"].isna().all()
+
+    def test_a_folder_without_a_scan_log_says_so(self, tmp_path):
+        with pytest.raises(FileNotFoundError, match="no scan.log"):
+            scan_summary.load_scan(str(tmp_path))
+
+
 class TestNrgRatios:
     def _nrg(self, tmp_path, ion, ele, n_times=3):
         path = tmp_path / "nrg_0001"
