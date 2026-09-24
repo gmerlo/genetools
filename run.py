@@ -419,6 +419,17 @@ class Run:
         from .diagnostics.timetraces import TimeTraces
         return TimeTraces(self, **kw)
 
+    def frequency(self, **kw):
+        """
+        Fluctuation frequency spectrum of a nonlinear run (GENE-3D).
+
+        The nonlinear counterpart of ``run.omega``: instead of fitting one
+        coherent mode per ky it builds ``|phi(ky, omega)|^2`` and reports where
+        the band sits and how wide it is.
+        """
+        from .diagnostics.frequency import Frequency
+        return Frequency(self, **kw)
+
     @cached_property
     def gam(self):
         """Zonal-flow / GAM oscillation traces (GENE-3D)."""

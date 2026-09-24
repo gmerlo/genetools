@@ -49,6 +49,7 @@ DIAGNOSTICS = {
     # GENE-3D only
     "timetraces": "timetraces",
     "gam": "gam",
+    "frequency": "frequency",
     "chi": "chi",
     "omega": "omega",
     "geometry": "geometry_plots",
@@ -64,6 +65,7 @@ PARAMETRIZED = {
     "timetraces": "quantities",
     "planes": "quantities",
     "vis3d": "quantities",
+    "frequency": "quantities",
 }
 
 #: Geometry kinds each diagnostic class supports, read from the class itself

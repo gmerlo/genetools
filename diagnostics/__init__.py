@@ -38,6 +38,7 @@ from .amplitude import AmplitudeSpectra
 from .profile_diag import ProfileDiag
 from .timetraces import TimeTraces
 from .gam import Gam
+from .frequency import Frequency
 from .chi import ChiGradient
 from .omega import Omega
 from .geometry_plots import GeometryPlots
@@ -60,6 +61,7 @@ __all__ = [
     # GENE-3D only (for now)
     "TimeTraces",
     "Gam",
+    "Frequency",
     "ChiGradient",
     "Omega",
     "GeometryPlots",
