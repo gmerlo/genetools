@@ -13,7 +13,7 @@ Examples
 --------
     genetools /run --nrg
     genetools /run --spectra --t 500 2000 --save spectra.png
-    genetools /run --contours --field 0 --ifft xy
+    genetools /run --contours --quantities phi --reductions all
     genetools . --profiles --no-show
 
 GENE-3D runs use the same flags, plus a few of their own:
@@ -121,19 +121,23 @@ def build_parser() -> argparse.ArgumentParser:
     # Diagnostic-specific options
     p.add_argument("--ky", type=float, default=None,
                    help="ky mode (ballooning).")
-    p.add_argument("--field", type=int, default=0,
-                   help="Field/moment index (contours).")
-    p.add_argument("--ifft", default=None, choices=["x", "y", "xy"],
-                   help="Inverse FFT axes (contours); omit for spectral view.")
     p.add_argument("--quantities", nargs="+", default=None,
-                   help="Variable names, e.g. phi n Q_es (GENE-3D "
-                        "contours/timetraces/planes/vis3d).")
+                   help="Variable names, e.g. phi n Q_es "
+                        "(contours/timetraces/planes/vis3d).")
     p.add_argument("--xlim", nargs=2, type=float, default=None,
                    metavar=("LO", "HI"),
-                   help="Radial window in x/a (GENE-3D).")
+                   help="Radial window, on the displayed axis.")
+    p.add_argument("--zlim", nargs=2, type=float, default=None,
+                   metavar=("LO", "HI"),
+                   help="Parallel window (contours); default cuts at z=0.")
+    p.add_argument("--ylim", nargs=2, type=float, default=None,
+                   metavar=("LO", "HI"),
+                   help="Binormal window (contours); default cuts at y=0.")
     p.add_argument("--fourier", default=None, choices=["x", "y", "xy"],
-                   help="View these directions in Fourier space (GENE-3D "
-                        "contours).")
+                   help="View these directions in Fourier space (contours); "
+                        "the default is real space for every geometry.")
+    p.add_argument("--square", action="store_true",
+                   help="Reduce |f|^2 rather than f (contours).")
     p.add_argument("--si", action="store_true",
                    help="Plot SI-converted values where available.")
     p.add_argument("--t-avg", action="store_true",
@@ -141,7 +145,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--reductions", nargs="+", default=None,
                    metavar="RED",
                    help="Contour reductions to draw: any of xy xz yz x y z, "
-                        "or all (GENE-3D; default xy xz).")
+                        "or all (default xy xz).")
     return p
 
 
@@ -167,32 +171,30 @@ def _construct_kwargs(name: str, args) -> dict:
     return kw
 
 
-def _plot_kwargs(name: str, args, is_3d: bool) -> dict:
+def _plot_kwargs(name: str, args) -> dict:
     """Build the per-diagnostic plot kwargs from parsed args."""
     t = tuple(args.t) if args.t is not None else None
     kw = {"t": t}
     if name == "contours":
-        if is_3d:
-            if args.quantities:
-                kw["quantities"] = tuple(args.quantities)
-            if args.species:
-                kw["species"] = args.species[0]
-            if args.fourier:
-                kw["x_fourier"] = "x" in args.fourier
-                kw["y_fourier"] = "y" in args.fourier
-            if args.xlim:
-                kw["xlim"] = tuple(args.xlim)
-            if args.t_avg:
-                kw["t_avg"] = True
-            if args.reductions:
-                kw["reductions"] = (
-                    "all" if args.reductions == ["all"]
-                    else tuple(args.reductions))
-        else:
-            kw["field"] = args.field
-            kw["ifft"] = args.ifft
-            if args.species:
-                kw["species"] = args.species[0]
+        # One option set for every geometry: the diagnostic inverts or forward
+        # transforms as the run requires, so the CLI never asks which code it is.
+        if args.quantities:
+            kw["quantities"] = tuple(args.quantities)
+        if args.species:
+            kw["species"] = args.species[0]
+        if args.fourier:
+            kw["x_fourier"] = "x" in args.fourier
+            kw["y_fourier"] = "y" in args.fourier
+        for axis in ("xlim", "ylim", "zlim"):
+            if getattr(args, axis):
+                kw[axis] = tuple(getattr(args, axis))
+        if args.square:
+            kw["square"] = True
+        if args.t_avg:
+            kw["t_avg"] = True
+        if args.reductions:
+            kw["reductions"] = ("all" if args.reductions == ["all"]
+                                else tuple(args.reductions))
     elif name in ("profiles", "profile_diag", "fluxes2d", "chi") and args.si:
         kw["si"] = True
     return kw
@@ -235,7 +237,7 @@ def main(argv=None) -> int:
                       file=sys.stderr)
                 return 2
             diag = diag(**construct)
-        diag.plot(**_plot_kwargs(name, args, run.is_3d))
+        diag.plot(**_plot_kwargs(name, args))
     except Exception as exc:  # surface a clean message, not a traceback
         print(f"genetools: error: {exc}", file=sys.stderr)
         return 1

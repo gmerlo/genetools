@@ -5,46 +5,64 @@
 """
 contours.py — 2-D cuts and 1-D line profiles of GENE field and moment data.
 
-One class covers every geometry and every projection of a snapshot: the three
-2-D planes (``xy``, ``xz``, ``yz``) and the three 1-D lines (``x``, ``y``,
-``z``). Which ones you get is the ``reductions`` argument; the default is the
-two cuts almost always wanted, ``xy`` and ``xz``.
+One class, one interface, every geometry. A snapshot has six projections — the
+three 2-D planes (``xy``, ``xz``, ``yz``) and the three 1-D lines (``x``, ``y``,
+``z``) — and ``reductions`` picks them; the default is the two cuts almost
+always wanted, ``xy`` and ``xz``.
+
+The same call means the same thing whatever the run is::
+
+    run.contours.plot(quantities=("phi",), reductions="all")
+
+What differs between the codes is only where the data starts. GENE-3D stores x
+and y in real space; a flux tube stores both spectrally; an x-global run stores
+x real and y spectral. ``x_fourier`` and ``y_fourier`` name the view you want,
+not the transform needed to get there, so ``x_fourier=False`` means "show me
+real x" and this module inverse-transforms a flux tube to honour it, exactly as
+``x_fourier=True`` forward-transforms GENE-3D. Both default to ``False``: a
+contour plot means real space.
 
 Cut, not average
 ----------------
 Every coordinate a reduction drops is held at the grid point nearest zero unless
-you pass ``xlim``/``ylim``/``zlim``, in which case it is averaged over that
-range. So ``xy`` defaults to the plane at ``z = 0`` (the outboard midplane on a
-standard grid) and ``xz`` to the plane at ``y = 0``. A bare average over the
-whole of ``z`` would smear the outboard and inboard sides of a global run
-together, which is why it is not the default. ``zlim=(z[0], z[-1])`` asks for it
-explicitly.
+you pass ``ylim``/``zlim``, in which case it is averaged over that range. So
+``xy`` is the plane at ``z = 0`` (the outboard midplane on a standard grid) and
+``xz`` the plane at ``y = 0``. A bare average over the whole of ``z`` would
+smear the outboard and inboard sides of a global run together, which is why it
+is not the default; ``zlim=(z[0], z[-1])`` asks for it explicitly.
+
+``x`` is the exception: it defaults to the *whole* range, because it is the axis
+the common planes keep, and a global run's radial grid never passes through
+zero, so "nearest zero" would silently mean "the innermost surface". Pass
+``xlim`` to restrict it.
+
+Limits are read on the axis you are looking at: with ``y_fourier=True``,
+``ylim`` is a ky range, and the default cut lands on ky = 0.
 
 Averages are plain means, not Jacobian-weighted: a cut is a picture of the field
 on the grid, and weighting it by the volume element would show the metric as
 much as the turbulence. The flux and profile diagnostics, which do need the
 volume element, weight explicitly.
 
-Geometry paths
---------------
-GENE-3D is real space in x and y, so a reduction is a slice-and-mean of the
-stored array and either horizontal direction can be viewed in Fourier space
-instead (``x_fourier``, ``y_fourier``).
+Axis conventions
+----------------
+A real-space axis reconstructed from modes comes out of the transform starting
+at zero, so this module uses the 0-based box grid for it (``y`` everywhere, and
+``x`` for a flux tube), which is also the grid GENE-3D writes. The genuinely
+radial geometries keep ``x/a``. Fourier axes are ``fftshift``ed for display when
+they are stored in FFT order, and the data is shifted with them.
 
-The spectral geometries are plot-only and stream: slice the 3-D array *before*
-any transform, so every IFFT runs on a 2-D array; use ``irfft`` rather than a
-Hermitian mirror; downcast to float32 first; and buffer one snapshot at a time.
-That is what makes them usable on field files larger than memory (up to
-1536 x 700 x 128), and it is also why they have no ``.dataset()`` — the frames
-are drawn and discarded. Axes show physical units when coordinates are
-available:
+The real-space y grid has ``2 * nky0`` points: GENE's ``discretization.F90``
+sets ``ly0da = 2 * nky0`` (and ``3 * nky0`` with the 3/2 dealiasing rule), so
+``ny0 = 2 * nky0`` and the Nyquist bin GENE does not store is reconstructed as
+zero, which is what ``np.fft.irfft`` does when handed the shorter input.
 
-  x-axis XY: x  if IFFT along x (or global),  kx otherwise
-  y-axis XY: y  if IFFT along y,               ky otherwise
-  y-axis XZ: same rule as XY x-axis
-  x-axis XZ: z always
-
-``iy`` always indexes the stored ky dimension, before any y-transform.
+Memory
+------
+One snapshot at a time is read, transformed and reduced; only the reductions are
+kept, so the time axis costs nothing. A transformed snapshot is the same size as
+the stored one it came from — a flux tube's ``(nx, nky, nz)`` complex64 array
+and its ``(nx, 2*nky, nz)`` real counterpart hold the same number of bytes.
 """
 
 from collections import namedtuple
@@ -66,8 +84,23 @@ _ALL = tuple(_PLANES) + tuple(_LINES)
 _DEFAULT_REDUCTIONS = ("xy", "xz")
 
 _AXIS_LABELS = {
-    "x": r"$x/a$", "y": r"$y/\rho_{\rm ref}$", "z": r"$z/\pi$",
+    "x": r"$x/a$", "x_box": r"$x/\rho_{\rm ref}$",
+    "y": r"$y/\rho_{\rm ref}$", "z": r"$z/\pi$",
     "kx": r"$k_x \rho_{\rm ref}$", "ky": r"$k_y \rho_{\rm ref}$",
+}
+
+#: Options removed when the two geometry paths were merged, and what replaced
+#: them. Named explicitly so a script written against the old spectral-only
+#: interface fails with the new spelling rather than a bare TypeError.
+_RETIRED = {
+    "field": "quantities=('phi',) — variables are named, not indexed",
+    "ifft": "x_fourier / y_fourier — name the view, not the transform",
+    "iz": "zlim=(z0, z0) — cut at a coordinate, not an index",
+    "iy": "ylim=(y0, y0) — cut at a coordinate, not an index",
+    "show_xz": "reductions=('xy', 'xz')",
+    "max_loads": "n_max",
+    "del_zonal": "no replacement; filter the dataset from .dataset() instead",
+    "zero_range": "no replacement; filter the dataset from .dataset() instead",
 }
 
 #: The reduction options, frozen so it can key the snapshot cache.
@@ -76,14 +109,20 @@ _Selection = namedtuple(
     "quantities species x_fourier y_fourier square xlim ylim zlim t_avg")
 
 
-def _ifft_x_2d(f2d, nx):
-    """IFFT along axis 0 with GENE normalisation (multiply by nx)."""
-    return np.fft.ifft(f2d, axis=0) * nx
+def _inverse_x(arr, axis=0):
+    """Inverse transform a spectral radial axis, with GENE's normalisation."""
+    return np.fft.ifft(arr, axis=axis) * arr.shape[axis]
 
 
-def _irfft_y_2d(f2d, ny_full):
-    """Real IFFT along axis 1 from one-sided spectrum, GENE normalisation."""
-    return np.fft.irfft(f2d, n=ny_full, axis=1) * ny_full
+def _inverse_y(arr, axis=1):
+    """
+    Inverse transform a one-sided ky axis to real y, GENE's normalisation.
+
+    The output has ``2 * nky`` points: GENE stores ``nky0 = ny0 / 2`` modes and
+    leaves the Nyquist bin out, which ``irfft`` supplies as zero.
+    """
+    ny = 2 * arr.shape[axis]
+    return np.fft.irfft(arr, n=ny, axis=axis) * ny
 
 
 class Contours(RunDiagnostic):
@@ -101,8 +140,8 @@ class Contours(RunDiagnostic):
     cmap : str, optional
         Matplotlib colormap (default 'bwr').
 
-    Call options (GENE-3D)
-    ----------------------
+    Call options
+    ------------
     quantities : sequence of str
         Variable names from the field or moment file. Default ``('phi',)``.
     species : str
@@ -112,13 +151,14 @@ class Contours(RunDiagnostic):
         Any of ``xy``, ``xz``, ``yz``, ``x``, ``y``, ``z``. Default
         ``('xy', 'xz')``.
     x_fourier, y_fourier : bool
-        View that direction in Fourier space (``|FFT|``).
+        View that direction in Fourier space. Both default to ``False``, i.e.
+        real space, whatever the run stores.
     square : bool
         Reduce ``|f|^2`` rather than ``f``.
     xlim, ylim, zlim : (float, float)
-        Average the dropped coordinate over this range instead of cutting at
-        zero. ``xlim`` is in ``x/a``, ``ylim`` in ``y/rho_ref``, ``zlim`` in
-        ``z``.
+        Range of the dropped coordinate to average over, on the displayed axis.
+        ``y`` and ``z`` default to a cut at the grid point nearest zero; ``x``
+        defaults to the whole range.
     t_avg : bool
         Average over time instead of keeping the time axis.
     n_max : int
@@ -152,32 +192,51 @@ class Contours(RunDiagnostic):
 
     def _select(self, kw):
         """
-        Build the frozen selection for *kw*, filling in the cut-at-zero defaults.
+        Build the frozen selection for *kw*.
 
         Built from the defaults and *this* call's arguments only. Carrying the
         previous call's arguments forward would make an earlier ``zlim`` leak
         into a later plot that never asked for it.
         """
+        retired = sorted(set(kw) & set(_RETIRED))
+        if retired:
+            raise TypeError(
+                "contour option(s) " + ", ".join(repr(r) for r in retired)
+                + " were removed when the geometry paths were unified; use "
+                + "; ".join(f"{r} -> {_RETIRED[r]}" for r in retired))
         unknown = set(kw) - set(_Selection._fields)
         if unknown:
             raise TypeError(
                 f"unknown contour option(s) {sorted(unknown)}; "
                 f"expected any of {list(_Selection._fields)}")
-        coord = self.coord
         return _Selection(
             quantities=tuple(kw.get("quantities", ("phi",))),
-            species=kw.get("species") or (self.run.species[0]
-                                          if self.run.species else None),
+            species=kw.get("species") or self._default_species(),
             x_fourier=bool(kw.get("x_fourier", False)),
             y_fourier=bool(kw.get("y_fourier", False)),
             square=bool(kw.get("square", False)),
-            xlim=kw.get("xlim"),
-            ylim=(kw["ylim"] if "ylim" in kw
-                  else self._at(coord["y"])),
-            zlim=(kw["zlim"] if "zlim" in kw
-                  else self._at(coord["z"])),
+            xlim=self._as_limits(kw.get("xlim")),
+            ylim=self._as_limits(kw.get("ylim")),
+            zlim=self._as_limits(kw.get("zlim")),
             t_avg=bool(kw.get("t_avg", False)),
         )
+
+    def _default_species(self):
+        """
+        The species whose moment file supplies moment quantities.
+
+        The first one, or ``None`` on a detached instance — which is what makes
+        the option handling usable without a run, as the class docstring
+        promises of the pure helpers.
+        """
+        run = getattr(self, "run", None)
+        names = getattr(run, "species", None) if run is not None else None
+        return names[0] if names else None
+
+    @staticmethod
+    def _as_limits(value):
+        """Normalise a limit pair to a hashable tuple, or ``None``."""
+        return None if value is None else (float(value[0]), float(value[1]))
 
     @staticmethod
     def _reductions(value):
@@ -211,62 +270,226 @@ class Contours(RunDiagnostic):
         return "ky" if sel.y_fourier else "y"
 
     # ------------------------------------------------------------------
-    # GENE-3D: the reduction engine
+    # Where the data starts, and how to get it onto the requested axes
     # ------------------------------------------------------------------
 
-    def _windows(self, sel, coord, shape):
-        """Index slices for the three coordinates, from the requested limits."""
-        nx, ny, nz = shape
-        return (c.index_window(coord["x_o_a"], sel.xlim, nx),
-                c.index_window(coord["y"], sel.ylim, ny),
-                c.index_window(coord["z"], sel.zlim, nz))
+    @property
+    def _x_is_spectral(self) -> bool:
+        """Whether the run stores its radial axis as kx (flux tube only)."""
+        return self.geometry_kind == "flux_tube"
 
-    def _transform(self, sel, var):
-        """Apply the requested Fourier views, then ``|.|`` or ``|.|^2``."""
-        out = var
+    @property
+    def _y_is_spectral(self) -> bool:
+        """Whether the run stores its binormal axis as ky (everything but 3-D)."""
+        return not self.is_3d
+
+    @staticmethod
+    def _fft_ordered(values) -> bool:
+        """
+        Whether *values* are in numpy's ``fftfreq`` order — 0, positive, negative.
+
+        A one-sided ky axis is already ascending and must not be shifted; a
+        signed kx or a GENE-3D ky is stored wrapped and must be.
+        """
+        v = np.asarray(values, dtype=float)
+        return bool(v.size > 2 and v[0] == 0.0 and v[1] > 0.0 and v.min() < 0.0)
+
+    def _box_grid(self, k_values, n):
+        """
+        The 0-based real-space grid dual to a spectral axis of *n* points.
+
+        ``L = 2 pi / k_min`` from the smallest positive wavenumber. This is the
+        grid the inverse transform actually produces — it starts at zero, not at
+        ``-L/2`` — and it is also the convention GENE-3D writes.
+        """
+        k = np.asarray(k_values, dtype=float)
+        positive = k[k > 0]
+        if positive.size == 0 or n <= 0:
+            return np.arange(max(n, 0), dtype=float)
+        L = 2.0 * np.pi / float(positive.min())
+        return np.arange(n, dtype=float) * (L / n)
+
+    def _axes(self, sel, coord, shape):
+        """
+        Displayed axis values and their labels, plus which need an fftshift.
+
+        Returns ``(values, labels, shift)``, each keyed ``'x'``, ``'y'``, ``'z'``.
+        *shape* is the shape the snapshot will have once transformed, which is
+        what fixes the length of a reconstructed real-space axis.
+        """
+        nx, ny, nz = shape
+        values, labels, shift = {}, {}, {}
+
         if sel.x_fourier:
-            out = np.fft.fftshift(np.abs(c.to_kx(out)), axes=0)
+            kx = np.asarray(coord["kx"], dtype=float)[:nx]
+            shift["x"] = self._fft_ordered(kx)
+            values["x"] = np.fft.fftshift(kx) if shift["x"] else kx
+            labels["x"] = "kx"
+        elif self._x_is_spectral:
+            # Reconstructed from kx: a box coordinate, not a radial one.
+            values["x"] = self._box_grid(coord["kx"], nx)
+            labels["x"], shift["x"] = "x_box", False
+        else:
+            values["x"] = np.asarray(coord["x_o_a"], dtype=float)[:nx]
+            labels["x"], shift["x"] = "x", False
+
         if sel.y_fourier:
-            out = np.fft.fftshift(np.abs(c.to_ky(out)), axes=1)
+            ky = np.asarray(coord["ky"], dtype=float)[:ny]
+            shift["y"] = self._fft_ordered(ky)
+            values["y"] = np.fft.fftshift(ky) if shift["y"] else ky
+            labels["y"] = "ky"
+        elif self._y_is_spectral:
+            values["y"] = self._box_grid(coord["ky"], ny)
+            labels["y"], shift["y"] = "y", False
+        else:
+            values["y"] = np.asarray(coord["y"], dtype=float)[:ny]
+            labels["y"], shift["y"] = "y", False
+
+        values["z"] = np.asarray(coord["z"], dtype=float)[:nz]
+        labels["z"], shift["z"] = "z", False
+        return values, labels, shift
+
+    def _to_axes(self, sel, arr, shift):
+        """
+        Bring one stored snapshot onto the axes *sel* asks for.
+
+        The order of the y inverse is not free. GENE stores only ``ky >= 0``
+        because the *real-space* field is real, and that gives
+        ``f(-kx, -ky) = conj(f(kx, ky))`` — a relation linking the two
+        wavenumbers. At fixed ``kx`` the ky axis is therefore **not** a
+        Hermitian one-sided spectrum, and an ``irfft`` along it is meaningless.
+        Only once x is back in real space does ``f(x, -ky) = conj(f(x, ky))``
+        hold and the real transform apply. So a flux tube is inverted in x
+        first, and a view that wants kx *and* real y goes back out to kx
+        afterwards rather than taking a shortcut that would be wrong.
+
+        A view that matches what the run already stores costs nothing: no
+        round trip is made just to return to the representation on disk.
+
+        The magnitude is taken once at the end rather than after each axis, so
+        ``x_fourier`` and ``y_fourier`` together mean ``|FFT_xy(f)|`` and not
+        ``FFT_y(|FFT_x(f)|)``.
+        """
+        out = arr
+        if self._y_is_spectral and not sel.y_fourier:
+            # Real y wanted: x must be real for the Hermitian inverse to hold.
+            if self._x_is_spectral:
+                out = _inverse_x(out)
+            out = _inverse_y(out)
+            if sel.x_fourier:
+                out = c.to_kx(out)
+        else:
+            if self._x_is_spectral and not sel.x_fourier:
+                out = _inverse_x(out)
+            elif not self._x_is_spectral and sel.x_fourier:
+                out = c.to_kx(out)
+            if not self._y_is_spectral and sel.y_fourier:
+                out = c.to_ky(out)
+
+        if sel.x_fourier or sel.y_fourier:
+            out = np.abs(out)
+        elif np.iscomplexobj(out):
+            out = out.real
         if sel.square:
             out = np.abs(out) ** 2
+
+        for axis, name in ((0, "x"), (1, "y")):
+            if shift.get(name):
+                out = np.fft.fftshift(out, axes=axis)
         return out
+
+    def _transformed_shape(self, sel, shape):
+        """Shape a stored snapshot will have once brought onto the axes."""
+        nx, nj, nz = shape
+        ny = 2 * nj if (self._y_is_spectral and not sel.y_fourier) else nj
+        return nx, ny, nz
+
+    # ------------------------------------------------------------------
+    # The reduction engine
+    # ------------------------------------------------------------------
+
+    def _limits(self, sel, values):
+        """
+        The bounds each coordinate is reduced over, resolved on the shown axes.
+
+        ``y`` and ``z`` fall back to a cut at the grid point nearest zero; ``x``
+        falls back to its whole range. See the module docstring for why x is
+        the exception.
+        """
+        out = {}
+        for name in "xyz":
+            given = getattr(sel, f"{name}lim")
+            if given is not None:
+                out[name] = given
+            elif name == "x":
+                out[name] = None
+            else:
+                out[name] = self._at(values[name])
+        return out
+
+    @staticmethod
+    def _windows(limits, values, shape):
+        """Index slices for the three coordinates, from the resolved limits."""
+        return tuple(c.index_window(values[name], limits[name], n)
+                     for name, n in zip("xyz", shape))
 
     def compute(self, t=None, **kw):
         """
-        GENE-3D only: stream the requested variables and build every reduction.
+        Stream the requested variables and build every reduction.
 
-        All six reductions are built — they are cheap means over an array already
-        in memory — so ``reductions`` only selects what :meth:`dataset` returns
-        and one streaming pass serves any choice of them.
+        All six reductions are built — they are cheap means over an array
+        already in memory — so ``reductions`` only selects what :meth:`dataset`
+        returns and one streaming pass serves any choice of them.
+
+        Works for every geometry: the snapshot is brought onto the requested
+        axes first (:meth:`_to_axes`), and everything after that is the same
+        slice-and-mean whatever the run stores.
         """
-        self._require("xy_global")
         _, sel = self._split_kw(kw)
         key = (self._key(t), sel)
         if key in self._cache:
             return self._cache[key]
 
         coord = self.coord
-        acc, times = {}, None
-        for reader, names in self._sources(sel.quantities, sel.species):
-            _, idx = self._indices(reader, t)
+        sources = self._sources(sel.quantities, sel.species)
+        if len(sources) > 1:
+            # More than one file per time step: only the times all of them have.
+            times, index_of = self._common_indices([r for r, _ in sources], t)
+            per_reader = {id(r): index_of[id(r)] for r, _ in sources}
+        else:
+            reader = sources[0][0]
+            all_times, idx = self._indices(reader, t)
+            times = np.asarray(all_times)[idx]
+            per_reader = {id(reader): idx}
+
+        acc, axes = {}, None
+        for reader, names in sources:
             slots = {n: reader.index_of(n) for n in names}
-            got = []
-            for time, arrays in reader.stream_selected(idx):
-                got.append(time)
+            for _, arrays in reader.stream_selected(per_reader[id(reader)],
+                                                    variables=names):
                 for n in names:
-                    var = self._transform(sel, arrays[slots[n]])
-                    xsl, ysl, zsl = self._windows(sel, coord, var.shape)
+                    stored = arrays[slots[n]]
+                    if axes is None:
+                        shape = self._transformed_shape(sel, stored.shape)
+                        values, labels, shift = self._axes(sel, coord, shape)
+                        limits = self._limits(sel, values)
+                        axes = (values, labels, shift, limits)
+                    values, labels, shift, limits = axes
+                    var = self._to_axes(sel, stored, shift)
+                    xsl, ysl, zsl = self._windows(limits, values, var.shape)
                     store = acc.setdefault(n, {})
                     for plane, axis in _PLANES.items():
                         sub = _apply(var, xsl, ysl, zsl, keep=plane)
                         store.setdefault(plane, []).append(sub.mean(axis=axis))
-                    for line, axes in _LINES.items():
+                    for line, drop in _LINES.items():
                         sub = _apply(var, xsl, ysl, zsl, keep=line)
-                        store.setdefault(line, []).append(sub.mean(axis=axes))
-            if times is None:
-                times = np.asarray(got)
+                        store.setdefault(line, []).append(sub.mean(axis=drop))
 
+        if axes is None:
+            raise ValueError("No snapshot found in the requested time window.")
+        values, labels, shift, limits = axes
+
+        times = np.asarray(times, dtype=float)
         reduced = {}
         for name, store in acc.items():
             reduced[name] = {}
@@ -276,33 +499,22 @@ class Contours(RunDiagnostic):
                                       if sel.t_avg else arr)
 
         result = {"reduced": reduced, "times": times, "coord": coord,
-                  "selection": sel}
+                  "selection": sel, "values": values, "labels": labels,
+                  "limits": limits}
         self._cache[key] = result
         return result
 
-    def _axis_values(self, sel, coord):
-        """Coordinate values for each named axis, honouring the Fourier views."""
-        return {
-            "x": (np.fft.fftshift(np.asarray(coord["kx"])) if sel.x_fourier
-                  else np.asarray(coord["x_o_a"])),
-            "y": (np.fft.fftshift(np.asarray(coord["ky"])) if sel.y_fourier
-                  else np.asarray(coord["y"])),
-            "z": np.asarray(coord["z"]),
-        }
-
     def dataset(self, t=None, **kw):
         """
-        GENE-3D only: the requested reductions as an :class:`xarray.Dataset`.
+        The requested reductions as an :class:`xarray.Dataset`, any geometry.
 
-        The spectral paths are plot-only — they stream, draw and discard, which
-        is what makes them usable on runs whose field file does not fit in
-        memory.
+        Dimension names follow the view: the radial axis is ``x`` or ``kx`` and
+        the binormal one ``y`` or ``ky``, so a script can tell from the dataset
+        what it is looking at without knowing the run.
         """
-        self._require("xy_global")
         reductions, sel = self._split_kw(kw)
         raw = self.compute(t, **kw)
-        coord = raw["coord"]
-        axis_vals = self._axis_values(sel, coord)
+        values, labels = raw["values"], raw["labels"]
         rename = {"x": self._x_axis(sel), "y": self._y_axis(sel), "z": "z"}
 
         data_vars, candidates = {}, {}
@@ -315,7 +527,7 @@ class Contours(RunDiagnostic):
                     dims = ("time",) + dims
                 data_vars[f"{name}_{red}"] = (dims, np.asarray(store[red]))
         for ch, axis_name in rename.items():
-            candidates[axis_name] = axis_vals[ch]
+            candidates[axis_name] = values[ch]
         if not sel.t_avg:
             candidates["time"] = raw["times"]
 
@@ -326,6 +538,10 @@ class Contours(RunDiagnostic):
         ds.attrs["x_fourier"] = int(sel.x_fourier)
         ds.attrs["y_fourier"] = int(sel.y_fourier)
         ds.attrs["squared"] = int(sel.square)
+        # The label carries what the dimension name cannot: whether a real x is
+        # a radial coordinate (x/a) or a flux tube's box coordinate.
+        for ch, axis_name in rename.items():
+            ds.attrs[f"{axis_name}_label"] = labels[ch]
         if sel.species:
             ds.attrs["species"] = sel.species
         return ds
@@ -334,40 +550,24 @@ class Contours(RunDiagnostic):
     # Plot
     # ------------------------------------------------------------------
 
-    def plot(self, t=None, **kw):
-        """
-        Plot the requested reductions.
-
-        GENE-3D takes the call options listed in the class docstring; the
-        spectral geometries take the arguments of :meth:`plot_timeseries_2d`.
-        """
-        if self.is_3d:
-            return self._plot_3d(t, **kw)
-        return self._plot_spectral(t, **kw)
-
-    def _plot_spectral(self, t, **kw):
-        a, b = self._bounds(t)
-        species = kw.pop("species", None)
-        reader = self.run.field if species is None else self.run.mom(species)
-        return self.plot_timeseries_2d(
-            reader, a, b, params_list=self.params, coords=self.coord,
-            species=species, **kw)
-
-    def _plot_3d(self, t=None, n_max=4, **kw):
+    def plot(self, t=None, n_max=4, **kw):
         """
         Plot the requested reductions, one row each and one column per time.
 
-        ``x`` runs horizontally in every reduction that has it, so the rows share
-        a radial axis and read together.
+        ``x`` runs horizontally in every reduction that has it, so the rows
+        share a radial axis and read together.
         """
         reductions, sel = self._split_kw(kw)
+        raw = self.compute(t, **kw)
         ds = self.dataset(t, **kw)
         quantities = [q for q in sel.quantities
                       if any(f"{q}_{r}" in ds for r in reductions)]
         if not quantities:
             raise ValueError("No reduction available to plot.")
 
-        fixed = self._fixed_values(sel)
+        fixed = self._fixed_values(raw["limits"])
+        labels = {self._x_axis(sel): raw["labels"]["x"],
+                  self._y_axis(sel): raw["labels"]["y"], "z": "z"}
         figs = []
         for name in quantities:
             reds = [r for r in reductions if f"{name}_{r}" in ds]
@@ -388,9 +588,9 @@ class Contours(RunDiagnostic):
                     ax = axes[row][col]
                     frame = da if index is None else da.isel(time=index)
                     if len(red) == 2:
-                        self._draw_plane(fig, ax, ds, frame, vmax)
+                        self._draw_plane(fig, ax, ds, frame, vmax, labels)
                     else:
-                        self._draw_line(ax, ds, frame, vmax)
+                        self._draw_line(ax, ds, frame, vmax, labels)
                     ax.set_title(self._panel_title(red, fixed, time),
                                  fontsize=9)
             fig.suptitle(self._title(name, sel))
@@ -399,23 +599,23 @@ class Contours(RunDiagnostic):
         plt.show()
         return figs
 
-    def _draw_plane(self, fig, ax, ds, frame, vmax):
+    def _draw_plane(self, fig, ax, ds, frame, vmax, labels):
         """pcolormesh of a 2-D reduction, with the radial axis horizontal."""
         dims = frame.dims
         # dims[0] is the radial axis: put it horizontal.
         h, v = np.asarray(ds[dims[0]]), np.asarray(ds[dims[1]])
         mesh = ax.pcolormesh(h, v, np.asarray(frame).T, shading="nearest",
                              cmap=self.cmap, vmin=-vmax, vmax=vmax)
-        ax.set_xlabel(_AXIS_LABELS.get(dims[0], dims[0]))
-        ax.set_ylabel(_AXIS_LABELS.get(dims[1], dims[1]))
+        ax.set_xlabel(_AXIS_LABELS.get(labels.get(dims[0], dims[0]), dims[0]))
+        ax.set_ylabel(_AXIS_LABELS.get(labels.get(dims[1], dims[1]), dims[1]))
         fig.colorbar(mesh, ax=ax)
 
     @staticmethod
-    def _draw_line(ax, ds, frame, vmax):
+    def _draw_line(ax, ds, frame, vmax, labels):
         """Line plot of a 1-D reduction, on the scale shared across the row."""
         dim = frame.dims[0]
         ax.plot(np.asarray(ds[dim]), np.asarray(frame))
-        ax.set_xlabel(_AXIS_LABELS.get(dim, dim))
+        ax.set_xlabel(_AXIS_LABELS.get(labels.get(dim, dim), dim))
         ax.set_ylim(-vmax, vmax)
         ax.grid(True, alpha=0.3)
 
@@ -438,13 +638,13 @@ class Contours(RunDiagnostic):
         return "  ".join(bits)
 
     @staticmethod
-    def _fixed_values(sel):
+    def _fixed_values(limits):
         """The coordinates this selection cuts at, for the panel titles."""
         out = {}
         for held in "xyz":
-            limits = getattr(sel, f"{held}lim")
-            if limits and limits[0] == limits[1]:
-                out[held] = float(limits[0])
+            bounds = limits.get(held)
+            if bounds and bounds[0] == bounds[1]:
+                out[held] = float(bounds[0])
         return out
 
     @staticmethod
@@ -456,278 +656,6 @@ class Contours(RunDiagnostic):
         picks = np.unique(np.linspace(0, n_total - 1,
                                       min(n_max, n_total)).astype(int))
         return [(float(da["time"].values[i]), int(i)) for i in picks], n_total
-
-    # ------------------------------------------------------------------
-    # Spectral geometries: streaming plot-only path
-    # ------------------------------------------------------------------
-
-    def select_indices(self, reader, t_start, t_stop, max_loads):
-        """Return downsampled iteration indices within the time window."""
-        times = reader.read_all_times()
-        mask  = (times >= t_start) & (times <= t_stop)
-        idx   = np.where(mask)[0]
-        if len(idx) == 0:
-            print("No data found in the selected time interval.")
-            return []
-        if len(idx) > max_loads:
-            stride = max(1, len(idx) // max_loads)
-            idx    = idx[::stride][:max_loads]
-        return idx.tolist()
-
-    @staticmethod
-    def _resolve_ifft(ifft_option, x_local):
-        """Restrict ifft option for global geometry (x already real)."""
-        if x_local:
-            return ifft_option
-        _map = {"xy": "y", "x": None, "y": "y", None: None}
-        effective = _map.get(ifft_option, ifft_option)
-        if effective != ifft_option:
-            print(f"  [Contours] x_local=False: IFFT along x skipped "
-                  f"('{ifft_option}' -> '{effective}')")
-        return effective
-
-    @staticmethod
-    def _get_axes(coord, effective_ifft, x_local, nky=None):
-        """
-        Return (x_ax, y_ax, z_ax, x_label, y_label, z_label).
-
-        x -> real (x) if ifft includes x or global, else spectral (kx).
-        y -> real (y) if ifft includes y,            else spectral (ky).
-        z -> always real (z).
-        """
-        if effective_ifft in ("x", "xy") or not x_local:
-            x_ax, x_label = np.asarray(coord["x"]),  "x  [rho_ref]"
-        else:
-            x_ax, x_label = np.asarray(coord["kx"]), "kx [rho_ref]"
-
-        if effective_ifft in ("y", "xy"):
-            # Compute y-axis matching the irfft output size: ny_full = 2*(nky-1)
-            ky_arr = np.asarray(coord["ky"])
-            _nky = nky if nky is not None else len(ky_arr)
-            ny_full = 2 * (_nky - 1) if _nky > 1 else 1
-            kymin = float(ky_arr[0]) if len(ky_arr) > 0 else 1.0
-            Ly = 2 * np.pi / kymin if kymin > 0 else 1.0
-            y_ax = np.linspace(-Ly / 2, Ly / 2, ny_full, endpoint=False)
-            y_label = "y  [rho_ref]"
-        else:
-            y_ax, y_label = np.asarray(coord["ky"]), "ky [rho_ref]"
-
-        z_ax, z_label = np.asarray(coord["z"]), "z  [pi]"
-
-        return x_ax, y_ax, z_ax, x_label, y_label, z_label
-
-    def _compute_slices(self, field_3d, effective_ifft,
-                        iz, iy, del_zonal, zero_range, nky):
-        """
-        Extract XY and XZ 2D slices with IFFT applied on 2D only.
-
-        The 3D array is never copied. Mode filters are applied to a 2D
-        copy of the z-slice only when needed. Both outputs are float32.
-
-        Parameters
-        ----------
-        field_3d : np.ndarray  (nx, nky, nz) complex
-        effective_ifft : str or None
-        iz : int   z-index for XY slice
-        iy : int   ky-index for XZ slice (always pre-y-IFFT index)
-        del_zonal, zero_range : filter parameters
-        nky : int  number of stored ky modes
-
-        Returns
-        -------
-        f_xy : np.ndarray (nx, ny_real)  float32
-        f_xz : np.ndarray (nx, nz)       float32
-        """
-        nx      = field_3d.shape[0]
-        ny_full = 2 * (nky - 1) if nky > 1 else 0
-
-        # ── XY slice — extract z first, transform in 2D ────────────────
-        f_xy = field_3d[:, :, iz]               # view (nx, nky), no copy
-        f_xy = f_xy.astype(np.complex64, copy=False)  # downcast, may be view
-
-        if del_zonal or zero_range is not None:
-            f_xy = f_xy.copy()                  # only copy needed here
-            if del_zonal:
-                f_xy[:, 0] = 0.0
-            if zero_range is not None:
-                f_xy[:, :zero_range] = 0.0
-
-        if effective_ifft in ("x", "xy"):
-            f_xy = _ifft_x_2d(f_xy, nx)         # (nx, nky) complex
-
-        if effective_ifft in ("y", "xy") and ny_full > 0:
-            f_xy = _irfft_y_2d(f_xy, ny_full).astype(np.float32)
-        else:
-            f_xy = f_xy.real.astype(np.float32)
-
-        # ── XZ slice — extract ky first, transform in 2D ───────────────
-        f_xz = field_3d[:, iy, :]               # view (nx, nz), no copy
-        f_xz = f_xz.astype(np.complex64, copy=False)
-
-        if effective_ifft in ("x", "xy"):
-            f_xz = _ifft_x_2d(f_xz, nx).real.astype(np.float32)
-        else:
-            f_xz = f_xz.real.astype(np.float32)
-
-        return f_xy, f_xz
-
-    def plot_timeseries_2d(
-        self,
-        reader,
-        t_start,
-        t_stop,
-        field=0,
-        max_loads=9,
-        iz=None,
-        iy=None,
-        ifft=None,
-        del_zonal=False,
-        zero_range=None,
-        params_list=None,
-        coords=None,
-        show_xz=True,
-        species=None,
-    ):
-        """
-        Stream selected time steps and plot 2D XY and XZ slices.
-
-        Parameters
-        ----------
-        reader
-            BinaryReader, BPReader, or MultiSegmentReader.
-        t_start, t_stop : float
-            Time window.
-        field : int, optional
-            Field/moment index. Fields: 0=phi,1=A_par,2=B_par.
-            Moments: 0=n,1=T_par,2=T_perp,3=q_par,4=q_perp,5=u_par.
-        max_loads : int, optional
-            Max snapshots (default 9).
-        iz : int, optional
-            z-index for XY slice (default nz//2).
-        iy : int, optional
-            ky-index for XZ slice (default nky//2). Always indexes the
-            stored ky dimension regardless of ifft.
-        ifft : str or None, optional
-            None | 'x' | 'y' | 'xy'. Auto-restricted for global geometry.
-        del_zonal : bool, optional
-            Zero ky=0 before transforming (default False).
-        zero_range : int or None, optional
-            Zero ky=0..N-1 before transforming (default None).
-        params_list : list of dict, or dict, optional
-            Per-segment parameter dicts. Single dict accepted for
-            single-segment readers.
-        coords : list of dict, or dict, optional
-            Per-segment coordinate dicts from Coordinates().
-            Single dict accepted. Enables physical axis labels.
-        show_xz : bool, optional
-            Show XZ figure (default True).
-        species : str, optional
-            Species name appended to subplot titles, e.g. 'ions'.
-        """
-        # Normalise to lists
-        if params_list is not None and not isinstance(params_list, list):
-            params_list = [params_list]
-        if coords is not None and not isinstance(coords, list):
-            coords = [coords]
-
-        def _p(seg):
-            return params_list[seg] if params_list else None
-
-        def _c(seg):
-            return coords[seg] if coords else None
-
-        # Default slice indices
-        if iz is None:
-            iz = reader.nk // 2
-        if iy is None:
-            iy = reader.nj // 2
-
-        indices = self.select_indices(reader, t_start, t_stop, max_loads)
-        
-        if not indices:
-            return
-
-        n_plots = len(indices)
-        ncols   = min(3, n_plots)
-        nrows   = int(np.ceil(n_plots / ncols))
-
-        fig_xy, axes_xy = plt.subplots(nrows, ncols,
-                                        figsize=(5*ncols, 4*nrows),
-                                        squeeze=False)
-        axes_xy = axes_xy.reshape(-1)
-
-        if show_xz:
-            fig_xz, axes_xz = plt.subplots(nrows, ncols,
-                                            figsize=(5*ncols, 4*nrows),
-                                            squeeze=False)
-            axes_xz = axes_xz.reshape(-1)
-
-        sp_str = f"  [{species}]" if species else ""
-
-        for plot_idx, (t, arrays, seg_idx) in enumerate(
-                reader.stream_selected_with_seg(indices)):
-
-            p     = _p(seg_idx)
-            coord = _c(seg_idx)
-
-            x_local = p.get("general", {}).get("x_local", True) if p else True
-            nky     = p["box"]["nky0"] if p else reader.nj
-
-            effective_ifft = self._resolve_ifft(ifft, x_local)
-
-            if coord is not None:
-                x_ax, y_ax, z_ax, x_label, y_label, z_label = \
-                    self._get_axes(coord, effective_ifft, x_local, nky=nky)
-            else:
-                x_ax = y_ax = z_ax = None
-                x_label, y_label, z_label = "x index", "y index", "z index"
-
-            f_xy, f_xz = self._compute_slices(
-                arrays[field], effective_ifft, iz, iy,
-                del_zonal, zero_range, nky,
-            )
-
-            # XY subplot
-            ax = axes_xy[plot_idx]
-            if x_ax is not None:
-                nx_s, ny_s = f_xy.shape
-                im = ax.pcolormesh(x_ax[:nx_s], y_ax[:ny_s], f_xy.T,
-                                   cmap=self.cmap, shading="auto")
-            else:
-                im = ax.imshow(f_xy.T, origin="lower", aspect="auto",
-                               cmap=self.cmap)
-            ax.set_title(f"t={t:.2f}  z={iz}{sp_str}")
-            ax.set_xlabel(x_label)
-            ax.set_ylabel(y_label)
-            fig_xy.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-
-            # XZ subplot
-            if show_xz:
-                ax = axes_xz[plot_idx]
-                if x_ax is not None:
-                    nx_s, nz_s = f_xz.shape
-                    im = ax.pcolormesh(x_ax[:nx_s], z_ax[:nz_s], f_xz.T,
-                                       cmap=self.cmap, shading="auto")
-                else:
-                    im = ax.imshow(f_xz.T, origin="lower", aspect="auto",
-                                   cmap=self.cmap)
-                ax.set_title(f"t={t:.2f}  ky={iy}{sp_str}")
-                ax.set_xlabel(x_label)
-                ax.set_ylabel(z_label)
-                fig_xz.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-
-        for ax in axes_xy[n_plots:]:
-            ax.axis("off")
-        fig_xy.suptitle("XY slices", y=1.01)
-        fig_xy.tight_layout()
-
-        if show_xz:
-            for ax in axes_xz[n_plots:]:
-                ax.axis("off")
-            fig_xz.suptitle("XZ slices", y=1.01)
-            fig_xz.tight_layout()
-
-        plt.show()
 
 
 # ---------------------------------------------------------------------------

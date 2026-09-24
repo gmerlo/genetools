@@ -368,6 +368,10 @@ class Run:
 
         Every reduction of a snapshot lives here: pass ``reductions="all"`` for
         the three planes and three lines, or name the ones you want.
+
+        One option set covers every geometry, and ``x_fourier``/``y_fourier``
+        name the view rather than the transform — the default is real space
+        whether the run stores it that way or not.
         """
         from .diagnostics.contours import Contours
         return Contours(self)
