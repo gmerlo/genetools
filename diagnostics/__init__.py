@@ -39,6 +39,7 @@ from .profile_diag import ProfileDiag
 from .timetraces import TimeTraces
 from .gam import Gam
 from .frequency import Frequency
+from .diffusivity import Diffusivity
 from .chi import ChiGradient
 from .omega import Omega
 from .geometry_plots import GeometryPlots
@@ -62,6 +63,7 @@ __all__ = [
     "TimeTraces",
     "Gam",
     "Frequency",
+    "Diffusivity",
     "ChiGradient",
     "Omega",
     "GeometryPlots",

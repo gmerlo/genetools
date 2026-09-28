@@ -50,6 +50,7 @@ DIAGNOSTICS = {
     "timetraces": "timetraces",
     "gam": "gam",
     "frequency": "frequency",
+    "diffusivity": "diffusivity",
     "chi": "chi",
     "omega": "omega",
     "geometry": "geometry_plots",
@@ -66,6 +67,7 @@ PARAMETRIZED = {
     "planes": "quantities",
     "vis3d": "quantities",
     "frequency": "quantities",
+    "diffusivity": "xlim",
 }
 
 #: Geometry kinds each diagnostic class supports, read from the class itself

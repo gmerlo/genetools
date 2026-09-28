@@ -419,6 +419,17 @@ class Run:
         from .diagnostics.timetraces import TimeTraces
         return TimeTraces(self, **kw)
 
+    def diffusivity(self, **kw):
+        """
+        Heat and particle diffusivity from the background profiles (global).
+
+        ``chi = Q/(<g^xx> n T omt)`` and ``D = Gamma/(<g^xx> n omn)`` with the
+        gradients taken from ``profiles_<species>`` rather than from the evolved
+        profiles — the difference from ``run.chi``.
+        """
+        from .diagnostics.diffusivity import Diffusivity
+        return Diffusivity(self, **kw)
+
     def frequency(self, **kw):
         """
         Fluctuation frequency spectrum of a nonlinear run (GENE-3D).
