@@ -1077,14 +1077,29 @@ class Fluxes2D(RunDiagnostic):
 
     # ------------------------------------------------------------------
 
-    def plot(self, t=None, show_heatmaps=False, **kw):
-        """Plot the x-resolved fluxes over the window *t*."""
+    def plot(self, t=None, si=None, show_heatmaps=False, **kw):
+        """
+        Plot the x-resolved fluxes over the window *t*.
+
+        *si* selects the unit system, the same way on every geometry: ``None``
+        (the default) draws gyro-Bohm **and** SI, ``True`` SI only, ``False``
+        gyro-Bohm only. The SI figures were previously reachable on the
+        spectral path only by calling :meth:`plot_SI` by hand with the
+        coordinates, parameters and geometry passed in — so ``plot()`` on an
+        x-global run silently gave gyro-Bohm alone while the same call on
+        GENE-3D gave both.
+        """
         if self.is_3d:
-            return self._plot_3d(t, **kw)
+            return self._plot_3d(t, si=si, **kw)
         self.compute(t)
         a, b = self._bounds(t)
-        return self._plot_spectral(self.coord, self.params, a, b,
-                                   show_heatmaps=show_heatmaps, **kw)
+        figs = []
+        if si is not True:
+            figs.append(self._plot_spectral(self.coord, self.params, a, b,
+                                            show_heatmaps=show_heatmaps, **kw))
+        if si is not False:
+            figs.append(self.plot_SI(t_start=a, t_stop=b))
+        return figs
 
     def _plot_spectral(self, coords: dict, params: dict,
              t_start: float = None, t_stop: float = None,
@@ -1211,10 +1226,14 @@ class Fluxes2D(RunDiagnostic):
             plt.tight_layout()
             plt.show()
 
-    def plot_SI(self, coords, params, geom,
+    def plot_SI(self, coords=None, params=None, geom=None,
                 t_start: float = None, t_stop: float = None) -> None:
         """
         Plot time-averaged flux profiles in SI units.
+
+        The three leading arguments default to the run's own coordinates,
+        parameters and geometry; they predate :class:`RunDiagnostic` and are
+        kept so existing calls that pass them explicitly still work.
 
         Heat flux is converted to W and particle flux to 1/s by
         multiplying with the gyro-Bohm normalisation and the
@@ -1232,6 +1251,9 @@ class Fluxes2D(RunDiagnostic):
         t_start, t_stop : float, optional
             Time window.
         """
+        coords = self.coord if coords is None else coords
+        params = self.params if params is None else params
+        geom = self.geom if geom is None else geom
         if hasattr(params, 'get') and callable(params.get) and not isinstance(params, dict):
             params = params.get(0)
         if isinstance(coords, list):
