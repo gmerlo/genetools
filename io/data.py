@@ -220,6 +220,27 @@ class _BaseReader(ABC):
             entries that were not asked for are ``None``.
         """
 
+    def index_of(self, name: str) -> int:
+        """
+        Return the position of variable *name* in the yielded array list.
+
+        Defined here, not per subclass: every reader exposes :attr:`var_names`,
+        so the lookup is identical for all of them, and a diagnostic that
+        addresses a variable by name has to work whatever wrote the file.
+
+        Raises
+        ------
+        KeyError
+            If the file holds no such variable, listing what it does hold.
+        """
+        names = self.var_names
+        try:
+            return names.index(name)
+        except ValueError:
+            raise KeyError(
+                f"{self.filename!r} has no variable {name!r}; "
+                f"available: {', '.join(names)}") from None
+
     def _slots(self, variables):
         """
         Positions in :attr:`var_names` to decode, or ``None`` for all of them.
@@ -585,23 +606,6 @@ class H5Reader(_BaseReader):
     def var_names(self) -> list:
         """Names of the arrays yielded by :meth:`stream_selected`, in order."""
         return list(self._layout_cached()[0])
-
-    def index_of(self, name: str) -> int:
-        """
-        Return the position of variable *name* in the yielded array list.
-
-        Raises
-        ------
-        KeyError
-            If the file holds no such variable, listing what it does hold.
-        """
-        names = self.var_names
-        try:
-            return names.index(name)
-        except ValueError:
-            raise KeyError(
-                f"{self.filename!r} has no variable {name!r}; "
-                f"available: {', '.join(names)}") from None
 
     # ------------------------------------------------------------------
     # Array decoding

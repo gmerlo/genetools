@@ -294,3 +294,41 @@ class TestVariableAliases:
         for name, others in VAR_ALIASES.items():
             for other in others:
                 assert name in VAR_ALIASES[other], f"{other} -> {name} missing"
+
+
+class TestIndexOfEveryReader:
+    """
+    ``index_of`` belongs to every reader, not just the HDF5 one.
+
+    The spectral contour path used to address variables by integer, so
+    `BinaryReader` was never asked for one; unifying the interface made every
+    diagnostic name its variables, and a Fortran-binary run then failed with
+    ``'BinaryReader' object has no attribute 'index_of'``.
+    """
+
+    def _reader(self, tmp_path, n_arrays=2):
+        make_binary_file(tmp_path, n_iters=2, ni=2, nj=2, nk=2,
+                         n_arrays=n_arrays)
+        params = make_params(nx0=2, nky0=2, nz0=2, n_fields=n_arrays)
+        return BinaryReader("field", str(tmp_path) + "/", "_0001", params)
+
+    def test_binary_reader_has_it(self, tmp_path):
+        reader = self._reader(tmp_path)
+        assert reader.index_of("phi") == 0
+        assert reader.index_of("A_par") == 1
+
+    def test_it_agrees_with_var_names(self, tmp_path):
+        reader = self._reader(tmp_path)
+        for i, name in enumerate(reader.var_names):
+            assert reader.index_of(name) == i
+
+    def test_an_absent_variable_lists_what_is_there(self, tmp_path):
+        reader = self._reader(tmp_path)
+        with pytest.raises(KeyError, match="phi"):
+            reader.index_of("B_par")     # only two fields were written
+
+    def test_every_reader_class_defines_it(self):
+        from genetools.io.data import (BinaryReader as B, H5Reader as H,
+                                       MultiSegmentReader as M)
+        for cls in (B, H, M):
+            assert callable(getattr(cls, "index_of", None)), cls.__name__
