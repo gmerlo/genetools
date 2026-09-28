@@ -241,3 +241,56 @@ class TestSubrecords:
             f.write(b"\x01\x02\x03")
         np.testing.assert_allclose(
             self._reader(tmp_path, "_0001").read_all_times(), self.TIMES)
+
+
+class TestVariableAliases:
+    """
+    GENE and GENE-3D spell two moments differently; either name resolves.
+
+    ``diag.F90`` writes ``dens`` and ``T_perp`` where ``diag_3d.F90`` writes
+    ``n`` and ``T_per``. A script naming a variable cannot know which code wrote
+    the run, so both spellings are accepted — and the name that comes back is
+    the file's, so dataset keys and plot titles say what the data really is.
+    """
+
+    class _Reader:
+        def __init__(self, names):
+            self.var_names = list(names)
+
+    GENE = ["dens", "T_par", "T_perp", "q_par", "q_perp", "u_par"]
+    GENE3D = ["n", "u_par", "T_par", "T_per", "Q_es"]
+
+    @pytest.mark.parametrize("asked, expected", [
+        ("n", "dens"), ("dens", "dens"),
+        ("T_per", "T_perp"), ("T_perp", "T_perp"),
+        ("u_par", "u_par"),
+    ])
+    def test_gene_file_accepts_either_spelling(self, asked, expected):
+        from genetools.io.data import resolve_var
+        assert resolve_var(self._Reader(self.GENE), asked) == expected
+
+    @pytest.mark.parametrize("asked, expected", [
+        ("dens", "n"), ("n", "n"),
+        ("T_perp", "T_per"), ("T_per", "T_per"),
+    ])
+    def test_gene3d_file_accepts_either_spelling(self, asked, expected):
+        from genetools.io.data import resolve_var
+        assert resolve_var(self._Reader(self.GENE3D), asked) == expected
+
+    def test_a_name_in_neither_spelling_is_absent(self):
+        from genetools.io.data import resolve_var
+        assert resolve_var(self._Reader(self.GENE), "Q_es") is None
+        assert resolve_var(self._Reader(self.GENE), "nonsense") is None
+
+    def test_the_file_name_wins_over_the_alias(self):
+        """A file holding both keeps the one that was asked for."""
+        from genetools.io.data import resolve_var
+        both = self._Reader(["n", "dens"])
+        assert resolve_var(both, "n") == "n"
+        assert resolve_var(both, "dens") == "dens"
+
+    def test_aliases_are_symmetric(self):
+        from genetools.io.data import VAR_ALIASES
+        for name, others in VAR_ALIASES.items():
+            for other in others:
+                assert name in VAR_ALIASES[other], f"{other} -> {name} missing"

@@ -90,6 +90,37 @@ MOM_VARS = ["dens", "T_par", "T_perp", "q_par", "q_perp", "u_par",
 MOM_VARS_3D = ["n", "u_par", "T_par", "T_per", "Gamma_es", "Gamma_em",
                "Q_es", "Q_em", "q_par", "q_perp"]
 
+#: Spellings of the same physical quantity in the two codes. GENE's
+#: ``diag.F90`` and GENE-3D's ``diag_3d.F90`` label the density and the
+#: perpendicular temperature differently, and a script that names a variable
+#: should not have to know which code wrote the file -- the same reason
+#: `Contours` takes one option set for every geometry. Lookup is one hop: the
+#: name asked for is tried first, then the other code's spelling of it.
+VAR_ALIASES = {
+    "n": ("dens",),
+    "dens": ("n",),
+    "T_per": ("T_perp",),
+    "T_perp": ("T_per",),
+}
+
+
+def resolve_var(reader, name: str) -> str:
+    """
+    The name *reader*'s file actually uses for the quantity called *name*.
+
+    Returns ``None`` when the file holds neither spelling. The file's own name
+    comes back, not the one asked for, so everything downstream -- ``index_of``,
+    dataset keys, plot titles -- says what the data really is.
+    """
+    names = reader.var_names
+    if name in names:
+        return name
+    for alias in VAR_ALIASES.get(name, ()):
+        if alias in names:
+            return alias
+    return None
+
+
 #: ``vsp_label`` from GENE-3D's ``diag_3d.F90``.
 VSP_VARS_3D = ["G_es", "G_em", "Q_ese", "Q_eme", "<f_>"]
 

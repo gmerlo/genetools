@@ -436,21 +436,37 @@ class RunDiagnostic(CachingDiagnostic):
         is streamed once however many of its variables were asked for. The field
         file wins a name collision, which is what the field/moment split gives
         anyway.
+
+        Either code's spelling is accepted: GENE writes ``dens`` and ``T_perp``
+        where GENE-3D writes ``n`` and ``T_per``, and asking for the wrong one
+        is a mistake a script makes only because it cannot know which code wrote
+        the run. The name that comes back is the **file's**, so the dataset keys
+        and plot titles say what the data really is.
         """
+        from genetools.io.data import VAR_ALIASES, resolve_var
+
         fld = self.run.field
         mom = self.run.mom(species) if species else None
         out = {}
         for name in quantities:
-            if name in fld.var_names:
-                out.setdefault(id(fld), (fld, []))[1].append(name)
-            elif mom is not None and name in mom.var_names:
-                out.setdefault(id(mom), (mom, []))[1].append(name)
-            else:
-                available = list(fld.var_names) + (
-                    list(mom.var_names) if mom is not None else [])
-                raise KeyError(
-                    f"unknown quantity {name!r}; available: "
-                    f"{', '.join(available)}")
+            actual = resolve_var(fld, name)
+            if actual is not None:
+                out.setdefault(id(fld), (fld, []))[1].append(actual)
+                continue
+            actual = resolve_var(mom, name) if mom is not None else None
+            if actual is not None:
+                out.setdefault(id(mom), (mom, []))[1].append(actual)
+                continue
+            available = list(fld.var_names) + (
+                list(mom.var_names) if mom is not None else [])
+            hint = ""
+            if name in VAR_ALIASES:
+                hint = (f" (this run calls it "
+                        f"{' or '.join(VAR_ALIASES[name])}, but that is not "
+                        "here either)")
+            raise KeyError(
+                f"unknown quantity {name!r}{hint}; available: "
+                f"{', '.join(available)}")
         return list(out.values())
 
     @staticmethod
