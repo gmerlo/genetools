@@ -256,7 +256,7 @@ class Diffusivity(RunDiagnostic):
         ds.attrs["x_avg_range"] = [float(lo), float(hi)]
         return ds
 
-    def plot(self, t=None, si=False, **kw):
+    def plot(self, t=None, si=False, trim=True, **kw):
         """
         ``chi`` and ``D`` against radius, with the gradients that set them.
 
@@ -264,9 +264,19 @@ class Diffusivity(RunDiagnostic):
         divide into them below — because a diffusivity spiking where ``omt``
         passes through zero is an artefact of the denominator, and the two
         panels have to be read together to see that.
+
+        *trim* (default) draws only the retained radial window. The buffer
+        regions are where the Krook operators hold the profiles, so the flux
+        there is not transport and the diffusivity built from it is meaningless
+        — and being the largest numbers on the axis, they set the y-scale and
+        flatten everything that is physical. ``trim=False`` draws the whole
+        domain, with the excluded ends shaded.
         """
         ds = self.dataset(t)
         x = np.asarray(ds["x"])
+        lo_t, hi_t = ds.attrs.get("x_avg_range", (x[0], x[-1]))
+        keep = ((x >= lo_t) & (x <= hi_t)) if trim else np.ones(x.size, bool)
+        x = x[keep]
         ref = ds.attrs.get("chi_ref_SI") if si else None
         scale = ref if ref else 1.0
         unit = r"$\;[\mathrm{m^2/s}]$" if ref else r"$/\chi_{gB}$"
@@ -277,28 +287,28 @@ class Diffusivity(RunDiagnostic):
                                  squeeze=False)
         for name in ds["species"].values:
             name = str(name)
-            axes[0][0].plot(x, np.asarray(ds["chi"].sel(species=name)) * scale,
-                            label=name)
-            axes[0][1].plot(x, np.asarray(ds["D"].sel(species=name)) * scale,
-                            label=name)
-            axes[1][0].plot(x, np.asarray(ds["omt"].sel(species=name)),
-                            label=name)
-            axes[1][1].plot(x, np.asarray(ds["omn"].sel(species=name)),
-                            label=name)
+            pick = lambda v: np.asarray(ds[v].sel(species=name))[keep]
+            axes[0][0].plot(x, pick("chi") * scale, label=name)
+            axes[0][1].plot(x, pick("D") * scale, label=name)
+            axes[1][0].plot(x, pick("omt"), label=name)
+            axes[1][1].plot(x, pick("omn"), label=name)
         axes[0][0].set_ylabel(r"$\chi$" + unit)
         axes[0][1].set_ylabel(r"$D$" + unit)
         axes[1][0].set_ylabel(r"$\omega_T = -L_{ref}\,\partial_x \ln T$")
         axes[1][1].set_ylabel(r"$\omega_n = -L_{ref}\,\partial_x \ln n$")
-        lo, hi = ds.attrs.get("x_avg_range", (x[0], x[-1]))
+        full = np.asarray(ds["x"])
         for row in axes:
             for ax in row:
                 ax.set_xlabel(r"$x/a$")
                 ax.grid(True, alpha=0.3)
                 ax.legend(fontsize=8)
-                ax.axvspan(x[0], lo, color="0.9", zorder=0)
-                ax.axvspan(hi, x[-1], color="0.9", zorder=0)
+                if not trim:
+                    # Whole domain drawn: show which ends are excluded.
+                    ax.axvspan(full[0], lo_t, color="0.9", zorder=0)
+                    ax.axvspan(hi_t, full[-1], color="0.9", zorder=0)
+        shown = "buffers excluded" if trim else "buffers shaded"
         fig.suptitle("Diffusivity from the background profiles "
-                     f"($x/a \\in [{lo:.2f}, {hi:.2f}]$ averaged)")
+                     f"($x/a \\in [{lo_t:.2f}, {hi_t:.2f}]$, {shown})")
         fig.tight_layout()
         plt.show()
         return [fig]
