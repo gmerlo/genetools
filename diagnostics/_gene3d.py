@@ -292,7 +292,54 @@ def index_window(values, limits, n=None) -> slice:
     return slice(i0, i1 + 1)
 
 
-def radial_slice(x_o_a, limits=None, buffer_frac=None) -> slice:
+#: Namelist spellings of the Krook buffer width, as a fraction of ``nx0``.
+#: GENE writes ``l_buffer_size``/``u_buffer_size`` into ``&nonlocal_x`` and only
+#: when they are non-zero, so an absent key means "no buffer here", not
+#: "unknown". ``l_buff``/``u_buff`` are the names `Params._DEFAULTS` carries.
+_BUFFER_KEYS = (("l_buffer_size", "l_buff"), ("u_buffer_size", "u_buff"))
+
+
+def buffer_widths(params, nx: int) -> tuple:
+    """
+    ``(n_lower, n_upper)`` grid points held by the Krook buffers.
+
+    Taken from the run's own ``&nonlocal_x`` namelist rather than guessed:
+    ``sources_mod.F90:294`` sets ``l_nxbuf = int(l_buffer_size * nx0)`` and
+    damps ``i = 0 .. l_nxbuf`` at the lower end, ``i = nx0-1-u_nxbuf .. nx0-1``
+    at the upper, with ``nu_K`` vanishing exactly at the inner edge of each — so
+    the first undamped point is ``l_nxbuf`` and the last is ``nx0-1-u_nxbuf``.
+
+    **The two ends are independent.** GENE lets them differ, and a fixed
+    ``nx0/10`` at both ends — the reference GUI's convention — is right only by
+    coincidence.
+    """
+    block = {}
+    if isinstance(params, dict):
+        block = params.get("nonlocal_x", {}) or {}
+    widths = []
+    for names in _BUFFER_KEYS:
+        frac = 0.0
+        for key in names:
+            value = block.get(key)
+            if value:
+                frac = float(value)
+                break
+        widths.append(int(frac * nx) if 0.0 < frac < 1.0 else 0)
+    return tuple(widths)
+
+
+def buffer_slice(params, nx: int) -> slice:
+    """
+    The physical region, with both Krook buffers removed.
+
+    ``slice(None)`` when the run declares no buffer — which is an answer, not a
+    failure: nothing should be trimmed from a run that damps nothing.
+    """
+    lo, up = buffer_widths(params, nx)
+    return slice(lo, nx - up) if (lo or up) else slice(None)
+
+
+def radial_slice(x_o_a, limits=None, buffer_frac=None, params=None) -> slice:
     """
     Return a radial slice from *limits* in ``x/a``, or an inner-region fraction.
 
@@ -303,14 +350,23 @@ def radial_slice(x_o_a, limits=None, buffer_frac=None) -> slice:
     limits : (float, float), optional
         Inclusive bounds in ``x/a``. Nearest grid points are used.
     buffer_frac : float, optional
-        Used only when *limits* is ``None``: trim this fraction of the grid from
-        each end. The reference GUI hard-codes ``nx0/10``, which is what
-        ``buffer_frac=0.1`` reproduces.
+        Fallback when *limits* is ``None`` and *params* names no buffer: trim
+        this fraction of the grid from each end. The reference GUI hard-codes
+        ``nx0/10``, which is what ``buffer_frac=0.1`` reproduces.
+    params : dict, optional
+        The run's parameters. When given, the Krook buffer widths in
+        ``&nonlocal_x`` decide the trim — the run's own answer, per end, rather
+        than a symmetric guess. Takes precedence over *buffer_frac*; *limits*
+        still beats both, being an explicit request.
     """
     x = np.asarray(x_o_a, dtype=float)
     n = x.size
     if limits is not None:
         return index_window(x, limits)
+    if params is not None:
+        declared = buffer_slice(params, n)
+        if declared != slice(None):
+            return declared
     if buffer_frac:
         cut = int(n * float(buffer_frac))
         if 2 * cut < n:

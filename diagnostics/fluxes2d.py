@@ -937,7 +937,8 @@ class Fluxes2D(RunDiagnostic):
         return ds
 
     def _plot_3d(self, t, si=None, x_avg_lims=None, buffer_frac=0.1,
-                 show_map=True, show_traces=None, components=True, **kw):
+                 show_map=True, show_traces=None, components=True,
+                 surface=None, **kw):
         """
         Time-averaged radial flux profiles, and the ``(x, t)`` map.
 
@@ -949,11 +950,17 @@ class Fluxes2D(RunDiagnostic):
         Each panel shows the total and its electrostatic and electromagnetic
         parts; pass ``components=False`` for totals alone.
 
+        ``surface=x0`` adds the ``(y, z)`` maps on the flux surface nearest
+        ``x0`` in ``x/a`` — what the radial profiles above are an average over.
+
         Returns the list of figures drawn.
         """
         ds = self._dataset_3d(t)
         x = np.asarray(ds["x"])
-        sl = g3.radial_slice(x, limits=x_avg_lims, buffer_frac=buffer_frac)
+        # The run's own Krook buffer widths decide the trim; buffer_frac is
+        # only the fallback for a run whose namelist declares none.
+        sl = g3.radial_slice(x, limits=x_avg_lims, buffer_frac=buffer_frac,
+                             params=self.params)
         bases = [b for b in ("Q", "Gamma") if f"{b}_total" in ds]
         if not bases:
             raise ValueError("No flux variables available to plot.")
@@ -970,6 +977,8 @@ class Fluxes2D(RunDiagnostic):
             show_map = show_traces
 
         figs = []
+        if surface is not None:
+            figs.extend(self.plot_surface(surface, t=t))
         if show_gb:
             figs.append(self._plot_3d_profiles(ds, x, sl, bases, si=False,
                                                components=components))
@@ -1034,7 +1043,9 @@ class Fluxes2D(RunDiagnostic):
                 ax.set_ylabel(ds[unit_key].attrs.get("units", ""))
                 ax.grid(True, alpha=0.3)
                 ax.legend(fontsize=7, ncol=1)
-                # Mark the window the quoted means are taken over.
+                # The edge of the physical region: the first and last grid
+                # point the Krook buffers do not damp, which is also the window
+                # the quoted means are taken over.
                 ax.axvline(x[sl][0], ls="--", lw=0.8, color="k")
                 ax.axvline(x[sl][-1], ls="--", lw=0.8, color="k")
             axes[row][0].set_title(rf"$\langle {symbol} \rangle_{{FS,t}}$")
@@ -1045,6 +1056,89 @@ class Fluxes2D(RunDiagnostic):
                         else ""))
         fig.tight_layout()
         return fig
+
+    def surface_maps(self, x0, t=None, species=None):
+        """
+        The fluxes on the flux surface nearest *x0*, as ``(y, z)`` maps.
+
+        GENE-3D only: it writes ``Gamma_*``/``Q_*`` as ``(x, y, z)``, so one
+        radial index is a genuine surface. The spectral geometries reconstruct
+        their fluxes from phi and store ky, not y, so there is no such map to
+        slice.
+
+        Returns ``(maps, info)`` where *maps* is ``{species: {flux: (ny, nz)}}``,
+        time-averaged over the window. The species factor is applied, as
+        everywhere else in this class.
+        """
+        self._require("xy_global")
+        coord = self.coord
+        x_o_a = np.asarray(coord["x_o_a"], dtype=float)
+        ix = int(np.argmin(np.abs(x_o_a - float(x0))))
+
+        run = self.run
+        names = [species] if species else list(run.species)
+        readers = [run.mom(n) for n in names]
+        times, index_of = self._common_indices(readers, t)
+
+        maps = {}
+        for name, reader in zip(names, readers):
+            idx = index_of[id(reader)]
+            wanted = [v for v in self._FLUXES_3D if g3.has_var(reader, v)]
+            slots = {v: reader.index_of(v) for v in wanted}
+            acc = {v: [] for v in wanted}
+            for _, arrays in reader.stream_selected(idx, variables=wanted):
+                for v in wanted:
+                    # One radial index only: a surface costs (ny, nz) per step,
+                    # not the snapshot.
+                    acc[v].append(np.asarray(arrays[slots[v]][ix]))
+            maps[name] = {
+                v: self._time_average(np.asarray(acc[v]), times)
+                   * self._prefactor_3d(self._FLUXES_3D[v][0], name)
+                for v in wanted}
+
+        info = {"ix": ix, "x_o_a": float(x_o_a[ix]), "x_requested": float(x0),
+                "times": times, "y": np.asarray(coord["y"], dtype=float),
+                "z": np.asarray(coord["z"], dtype=float)}
+        return maps, info
+
+    def plot_surface(self, x0, t=None, species=None, cmap="RdBu_r"):
+        """
+        Draw the ``(y, z)`` flux maps on the surface nearest *x0* (in ``x/a``).
+
+        One figure per species, one panel per flux. The colour scale is
+        symmetric about zero: these change sign across a surface and a
+        sequential map would hide that.
+        """
+        maps, info = self.surface_maps(x0, t=t, species=species)
+        y, z = info["y"], info["z"]
+        if abs(info["x_o_a"] - info["x_requested"]) > 1e-9:
+            print(f"fluxes2d: surface x/a = {info['x_o_a']:.4f} "
+                  f"(nearest to {info['x_requested']:.4f}), index {info['ix']}")
+
+        figs = []
+        for name, per in maps.items():
+            present = [v for v in self._FLUXES_3D if v in per]
+            if not present:
+                continue
+            fig, axes = plt.subplots(1, len(present),
+                                     figsize=(4.6 * len(present), 3.8),
+                                     squeeze=False)
+            for ax, v in zip(axes[0], present):
+                arr = np.asarray(per[v], dtype=float)
+                vmax = float(np.max(np.abs(arr))) or 1.0
+                mesh = ax.pcolormesh(y, z, arr.T, shading="auto", cmap=cmap,
+                                     vmin=-vmax, vmax=vmax)
+                ax.set_xlabel(r"$y/\rho_{\rm ref}$")
+                ax.set_ylabel(r"$z/\pi$")
+                ax.set_title(v, fontsize=9)
+                fig.colorbar(mesh, ax=ax)
+            n_t = np.size(info["times"])
+            fig.suptitle(f"{name} — flux surface $x/a$ = {info['x_o_a']:.4f}"
+                         f"  ({n_t} snapshot{'s' if n_t != 1 else ''} averaged)")
+            fig.tight_layout()
+            figs.append(fig)
+        plt.show()
+        return figs
 
     def _plot_3d_map(self, ds, x, bases, si: bool):
         """``(x, t)`` heatmap per flux and species — shows avalanches and drift."""

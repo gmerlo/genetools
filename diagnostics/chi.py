@@ -79,7 +79,8 @@ class ChiGradient(RunDiagnostic):
         geom_fac = self._geom_factor()
         x_o_a = np.asarray(prof_ds["x"], dtype=float)
         xsl = g3.radial_slice(x_o_a, limits=self.x_avg_lims,
-                             buffer_frac=self.buffer_frac)
+                             buffer_frac=self.buffer_frac,
+                             params=self.params)
 
         # The two datasets are streamed from the same moment files, so their
         # time axes match; guard rather than assume.

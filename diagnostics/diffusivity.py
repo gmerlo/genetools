@@ -180,7 +180,8 @@ class Diffusivity(RunDiagnostic):
         x_o_a = np.asarray(self.coord["x_o_a"], dtype=float)
         geom_fac = np.asarray(self._geom_factor(), dtype=float)
         xsl = g3.radial_slice(x_o_a, limits=self.x_avg_lims,
-                              buffer_frac=self.buffer_frac)
+                              buffer_frac=self.buffer_frac,
+                              params=self.params)
 
         per = {}
         for name, (Q, Gamma) in fluxes.items():
