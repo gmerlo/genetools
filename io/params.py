@@ -124,7 +124,13 @@ class Params:
             "Tref": 1.0,
             "mref": 1.0,
             "omegatorref": 0.0,
-            "qe": 1.602e-19,
+            # GENE's own constants, so the derived gyro-Bohm units match the
+            # code to round-off rather than to three digits: diag_3d.F90:913
+            # sets e = 1.60217662E-19, and the reference GUI
+            # (utils/run.py:69-71) uses the same pair. The old 1.602e-19 left
+            # Qgb 0.0055% below the Fortran's Qref -- harmless on its own, but
+            # it is a difference with no reason to exist.
+            "qe": 1.60217662e-19,
             "mp": 1.6726219e-27,
         },
         "box": {
