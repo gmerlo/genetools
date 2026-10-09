@@ -531,7 +531,9 @@ class _BoundNrg:
                 f"has; this run is {self.run.geometry_kind}. Use "
                 f"run.fluxes2d.dataset() -- its *_integrated variables keep "
                 f"the radial axis.")
-        return self.run.geom["area"]["dVdx"]
+        # Run exposes the per-segment list; _BoundNrg is not a RunDiagnostic
+        # and so has no .geom shortcut of its own.
+        return self.run.geometry[0]["area"]["dVdx"]
 
     def summary(self, t=None, integrate=None):
         """

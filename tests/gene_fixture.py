@@ -61,6 +61,7 @@ def make_xglobal_run(tmp_path, ext=".dat", nx0=12, nky0=4, nz0=8,
          n_procs_s = 1
         /
         &box
+         n_spec = {len(species)}
          nx0 = {nx0}
          nky0 = {nky0}
          nz0 = {nz0}
@@ -99,9 +100,34 @@ def make_xglobal_run(tmp_path, ext=".dat", nx0=12, nky0=4, nz0=8,
          mref = 2.0
          Lref = 3.0
         /
+        &info
+         nrgcols = 10
+        /
         """) + spec_blocks)
-    (folder / f"nrg{ext}").touch()
+    write_nrg(folder, ext=ext, species=species)
     return folder
+
+
+def write_nrg(folder, ext=".dat", species=("ions", "electrons"),
+              times=(0.0, 1.0, 10.0), n_cols=10, seed=11):
+    """
+    Write a GENE ``nrg<ext>`` file: a time line, then one row per species.
+
+    The time axis is **uneven on purpose** -- GENE's dt is adaptive and ``nrg``
+    is written every ``istep_nrg`` *steps*, so a trapezoidal time average and a
+    plain mean differ here, which is the point. ``n_cols`` is 10 for GENE and 8
+    for GENE-3D; it must match ``nrgcols`` in the parameter file.
+    """
+    import numpy as np
+
+    rng = np.random.default_rng(seed)
+    lines = []
+    for t in times:
+        lines.append(f"{t:13.6f}")
+        for _ in species:
+            lines.append("".join(f"{v:16.8e}" for v in rng.random(n_cols)))
+    (folder / f"nrg{ext}").write_text("\n".join(lines) + "\n")
+    return folder / f"nrg{ext}"
 
 
 def write_srcmom(folder, ext=".dat", nx0=12, n_times=4,
@@ -161,6 +187,7 @@ def make_fluxtube_run(tmp_path, ext=".dat", nz0=16, nv0=8, nw0=4,
 
     (folder / f"parameters{ext}").write_text(textwrap.dedent(f"""\
         &box
+         n_spec = {len(species)}
          nx0 = 4
          nky0 = 2
          nz0 = {nz0}
@@ -191,8 +218,11 @@ def make_fluxtube_run(tmp_path, ext=".dat", nz0=16, nv0=8, nw0=4,
          mref = 2.0
          Bref = 2.0
         /
+        &info
+         nrgcols = 10
+        /
         """) + spec_blocks)
-    (folder / f"nrg{ext}").touch()
+    write_nrg(folder, ext=ext, species=species)
 
     rng = np.random.default_rng(0)
     # Columns: gxx gxy gxz gyy gyz gzz B dBdx dBdy dBdz J R Phi Z dxdR dxdZ.

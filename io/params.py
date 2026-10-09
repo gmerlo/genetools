@@ -325,6 +325,14 @@ class Params:
         info["geometry_kind"] = kind
         info["is_3d"] = kind == "xy_global"
 
+        # GENE writes nrgcols into &info only when momentum_flux is on
+        # (parameters_IO.F90:2175-2180); without it the key is simply absent,
+        # though the file still has the module default of 10 columns
+        # (diag.F90:114). GENE-3D writes eight. Defaulting here beats letting
+        # NrgReader raise KeyError on a perfectly ordinary run.
+        if "nrgcols" not in info:
+            info["nrgcols"] = 8 if info["is_3d"] else 10
+
         # Box lengths can arrive via &info rather than &box:
         #   * GENE-3D writes both lx and ly into &info.
         #   * GENE with `adapt_lx = T` computes lx at runtime and reports the

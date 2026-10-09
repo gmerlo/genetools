@@ -286,3 +286,93 @@ class TestIntegrated:
         assert f"{self.DVDX:.6g} m^2" in text
         assert "->  W" in text
         assert "x dVdx" not in reader.print_summary()
+
+
+class TestThroughRun:
+    """
+    End-to-end through the ``Run`` facade.
+
+    These exist because ``_BoundNrg._dVdx`` reached for ``run.geom``, which is a
+    ``RunDiagnostic`` shortcut that ``_BoundNrg`` does not inherit -- ``Run``
+    itself only has the per-segment ``geometry`` list. Nothing exercised the
+    flux-tube path through ``Run``, so it raised ``AttributeError`` on first use.
+    """
+
+    def test_flux_tube_integrates_by_default(self, tmp_path):
+        from genetools.run import Run
+        from tests.gene_fixture import make_fluxtube_run
+
+        make_fluxtube_run(tmp_path)
+        run = Run(str(tmp_path))
+        assert run.geometry_kind == "flux_tube"
+
+        ds = run.nrg.summary()
+        assert "dVdx" in ds.attrs
+        assert float(ds.attrs["dVdx"]) == pytest.approx(
+            float(run.geometry[0]["area"]["dVdx"]))
+        assert float(ds.Q_total_integrated_SI.sel(species="ions")) == (
+            pytest.approx(float(ds.Q_total_SI.sel(species="ions"))
+                          * ds.attrs["dVdx"]))
+
+    def test_flux_tube_table_renders(self, tmp_path):
+        from genetools.run import Run
+        from tests.gene_fixture import make_fluxtube_run
+
+        make_fluxtube_run(tmp_path)
+        text = Run(str(tmp_path)).nrg.print_summary(t=(0, -1))
+        assert "x dVdx" in text and "->  W" in text
+
+    def test_global_run_does_not_integrate_by_default(self, tmp_path):
+        from genetools.run import Run
+        from tests.gene_fixture import make_xglobal_run
+
+        make_xglobal_run(tmp_path)
+        run = Run(str(tmp_path))
+        assert run.geometry_kind == "x_global"
+        ds = run.nrg.summary()
+        assert not [v for v in ds.data_vars if v.endswith("_integrated")]
+        assert "dVdx" not in ds.attrs
+
+    def test_global_run_refuses_integrate(self, tmp_path):
+        from genetools.run import Run
+        from tests.gene_fixture import make_xglobal_run
+
+        make_xglobal_run(tmp_path)
+        with pytest.raises(ValueError, match="only a flux tube"):
+            Run(str(tmp_path)).nrg.summary(integrate=True)
+
+
+class TestNrgcolsDefault:
+    """
+    GENE writes ``nrgcols`` into ``&info`` only when ``momentum_flux`` is on
+    (``parameters_IO.F90:2175-2180``), so an ordinary run can omit it entirely
+    while still writing the module default of ten columns (``diag.F90:114``).
+    Before the default, ``NrgReader.__init__`` raised ``KeyError: 'nrgcols'``.
+    """
+
+    def test_absent_nrgcols_defaults_to_ten_for_gene(self, tmp_path):
+        from genetools.io.params import Params
+        from tests.gene_fixture import make_fluxtube_run
+
+        make_fluxtube_run(tmp_path)
+        path = tmp_path / "parameters.dat"
+        text = path.read_text().replace("&info\n nrgcols = 10\n/\n", "")
+        assert "nrgcols" not in text
+        path.write_text(text)
+
+        params = Params(str(tmp_path), [".dat"]).get(0)
+        assert params["info"]["nrgcols"] == 10
+
+    def test_gene3d_defaults_to_eight(self, tmp_path):
+        from genetools.io.params import Params
+        from tests.gene3d_fixture import make_gene3d_run
+
+        make_gene3d_run(tmp_path)
+        path = next(tmp_path.glob("parameters*"))
+        text = "\n".join(l for l in path.read_text().splitlines()
+                         if "nrgcols" not in l)
+        path.write_text(text + "\n")
+
+        params = Params(str(tmp_path), [path.name.replace("parameters", "")]).get(0)
+        assert params["info"]["is_3d"] is True
+        assert params["info"]["nrgcols"] == 8
