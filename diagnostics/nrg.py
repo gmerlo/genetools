@@ -54,6 +54,7 @@ import glob
 import numpy as np
 import matplotlib.pyplot as plt
 
+from genetools.compat import trapz as _trapz
 from genetools.io.params import Params
 
 # ---------------------------------------------------------------------------
@@ -155,6 +156,9 @@ class NrgReader:
         else:
             self.nrg_files = self._build_file_list(extensions)
 
+        #: The parameter dict these traces belong to; summary() needs its
+        #: ``units`` block for the SI columns.
+        self.params: dict = params
         self.n_rows_per_block: int = params["box"]["n_spec"]
         self.n_cols_per_row: int  = params["info"]["nrgcols"]
         self.specnames: list      = [d["name"] for d in params["species"]]
@@ -376,6 +380,243 @@ class NrgReader:
         """Raise if :meth:`read_all` has not been called yet."""
         if self.times is None or self.data is None:
             raise ValueError("No data loaded — call read_all() first.")
+
+    # ------------------------------------------------------------------
+    # Time-averaged summary
+    # ------------------------------------------------------------------
+
+    #: nrg column -> (gyro-Bohm reference in ``params['units']``, SI unit).
+    #: Columns absent from this map (the fluctuation amplitudes) have no
+    #: conversion and stay normalised.
+    _SI_REFS = {
+        "Gamma_es": ("Ggb", "1e19 m^-2 s^-1"),
+        "Gamma_em": ("Ggb", "1e19 m^-2 s^-1"),
+        "Q_es": ("Qgb", "W m^-2"),
+        "Q_em": ("Qgb", "W m^-2"),
+        "Pi_es": ("Pgb", "N m^-2"),
+        "Pi_em": ("Pgb", "N m^-2"),
+        "Pi_t_par_es": ("Pgb", "N m^-2"),
+        "Pi_t_perp_es": ("Pgb", "N m^-2"),
+    }
+
+    #: Gyro-Bohm unit label per flux family, for the dataset ``units`` attribute.
+    _GB_LABELS = {"Gamma": "Gamma_gB", "Q": "Q_gB", "Pi": "Pi_gB"}
+
+    @staticmethod
+    def _summary_window(t):
+        """
+        Normalise *t* to concrete bounds, negative meaning unbounded.
+
+        Same convention as the diagnostics' ``_window``/``_bounds``: GENE times
+        start at zero and increase, so ``t=(500, -1)`` is "from 500 to the end".
+        """
+        def one(v, fallback):
+            if v is None:
+                return fallback
+            v = float(v)
+            return fallback if v < 0 else v
+
+        if t is None:
+            return -1e30, 1e30
+        if isinstance(t, (tuple, list)):
+            a, b = t
+            return one(a, -1e30), one(b, 1e30)
+        return one(t, -1e30), 1e30
+
+    def _si_units(self, params: dict = None):
+        """
+        The ``units`` block, or ``None`` when nobody filled it in.
+
+        An all-1.0 block would relabel gyro-Bohm numbers as watts, which is
+        worse than reporting no SI column at all.
+        """
+        params = params if params is not None else self.params
+        units = (params or {}).get("units", {}) or {}
+        if not any(float(units.get(k, 1.0)) != 1.0
+                   for k in ("Lref", "Bref", "Tref", "nref", "mref")):
+            return None
+        return units
+
+    def summary(self, t=None, params: dict = None):
+        """
+        Time-averaged ``nrg`` traces, in GENE units and in SI.
+
+        The average is **trapezoidal** over the selected window, matching
+        :meth:`genetools.diagnostics._base.CachingDiagnostic._time_average`:
+        GENE's dt is adaptive and ``nrg`` is written every ``istep_nrg``
+        *steps*, so the output times are unevenly spaced and a plain
+        ``mean()`` is biased by tens of percent.
+
+        Every named column gets a mean and a standard deviation; the fluxes
+        additionally get ``_SI`` companions and ES+EM totals. The fluctuation
+        amplitudes (``n_sq`` and friends) have no SI conversion and stay
+        normalised — they are never relabelled as physical units.
+
+        Parameters
+        ----------
+        t : float or (float, float), optional
+            Averaging window. A negative bound means "unbounded on that side",
+            so ``t=(500, -1)`` averages from t=500 to the end of the run.
+            Defaults to the whole run.
+        params : dict, optional
+            Parameter dictionary supplying ``units``. Defaults to the reader's.
+
+        Returns
+        -------
+        xarray.Dataset
+            Dims ``(species,)``. ``ds.attrs`` carries ``t_start``/``t_stop``
+            (the times actually used), ``n_samples`` and ``si`` (whether the
+            SI columns are present).
+
+        Raises
+        ------
+        ValueError
+            If the window selects no output times.
+        """
+        import xarray as xr
+        from genetools import _xr
+
+        if self.times is None or self.data is None:
+            self.read_all()
+        params = params if params is not None else self.params
+        times = np.asarray(self.times, dtype=float)
+        a, b = self._summary_window(t)
+        sel = (times >= a) & (times <= b)
+        if not sel.any():
+            raise ValueError(
+                f"no nrg output in the window ({a:g}, {b:g}); "
+                f"the run spans {times[0]:g} to {times[-1]:g}")
+
+        tw = times[sel]
+        data = np.asarray(self.data)[:, :, sel]      # (species, column, time)
+        n_spec, n_cols, _ = data.shape
+        sp = list(self.specnames)[:n_spec]
+        if len(sp) < n_spec:
+            sp += [f"sp{i}" for i in range(len(sp), n_spec)]
+
+        # Trapezoidal in time; _time_average wants time along axis 0.
+        dt = tw[-1] - tw[0]
+        if dt == 0 or tw.size == 1:
+            mean = data[:, :, 0]
+        else:
+            mean = _trapz(data, x=tw, axis=2) / dt
+        std = data.std(axis=2)
+
+        units = self._si_units(params)
+        data_vars, si_unit_of, gb_unit_of = {}, {}, {}
+        for col, name in self._NAMED_COLS.items():
+            if col >= n_cols:
+                continue
+            data_vars[name] = (("species",), mean[:, col])
+            data_vars[name + "_std"] = (("species",), std[:, col])
+            base = name.split("_")[0]
+            gb_unit_of[name] = self._GB_LABELS.get(base, "GENE units")
+            ref_key, si_unit = self._SI_REFS.get(name, (None, None))
+            if units is not None and ref_key is not None:
+                ref = float(units.get(ref_key, 1.0))
+                data_vars[name + "_SI"] = (("species",), mean[:, col] * ref)
+                data_vars[name + "_SI_std"] = (("species",), std[:, col] * ref)
+                si_unit_of[name] = si_unit
+
+        # ES + EM totals, which is what one usually quotes.
+        for base in ("Gamma", "Q", "Pi"):
+            es, em = base + "_es", base + "_em"
+            if es not in data_vars or em not in data_vars:
+                continue
+            total = data_vars[es][1] + data_vars[em][1]
+            data_vars[base + "_total"] = (("species",), total)
+            gb_unit_of[base + "_total"] = self._GB_LABELS[base]
+            if es + "_SI" in data_vars:
+                data_vars[base + "_total_SI"] = (
+                    ("species",), data_vars[es + "_SI"][1] + data_vars[em + "_SI"][1])
+                si_unit_of[base + "_total"] = si_unit_of[es]
+
+        ds = xr.Dataset(data_vars, coords={"species": sp})
+        for name, unit in gb_unit_of.items():
+            ds[name].attrs["units"] = unit
+        for name, unit in si_unit_of.items():
+            ds[name + "_SI"].attrs["units"] = unit
+        ds.attrs.update(_xr.unit_attrs(params))
+        ds.attrs["t_start"] = float(tw[0])
+        ds.attrs["t_stop"] = float(tw[-1])
+        ds.attrs["n_samples"] = int(tw.size)
+        ds.attrs["si"] = units is not None
+        ds.attrs["average"] = "trapezoidal in time"
+        return ds
+
+    def print_summary(self, t=None, params: dict = None, file=None,
+                      std=True) -> str:
+        """
+        Render :meth:`summary` as a text table and write it out.
+
+        One block per species: the gyro-Bohm value, its standard deviation over
+        the window, and the SI value where one exists. Quantities with no SI
+        conversion show a blank SI column rather than a normalised number under
+        a physical heading.
+
+        Parameters
+        ----------
+        t : float or (float, float), optional
+            Averaging window; see :meth:`summary`.
+        params : dict, optional
+            Parameter dictionary supplying ``units``.
+        file : file-like or str, optional
+            Where to write. A string is opened as a path. Defaults to stdout.
+        std : bool, default True
+            Include the standard-deviation column.
+
+        Returns
+        -------
+        str
+            The rendered table, so it can also be embedded elsewhere.
+        """
+        import sys
+
+        ds = self.summary(t=t, params=params)
+        order = [n for n in ("Gamma_es", "Gamma_em", "Gamma_total",
+                             "Q_es", "Q_em", "Q_total",
+                             "Pi_es", "Pi_em", "Pi_total",
+                             "n_sq", "u_par_sq", "T_par_sq", "T_perp_sq")
+                 if n in ds]
+
+        lines = [
+            f"nrg summary   t = {ds.attrs['t_start']:.6g} .. "
+            f"{ds.attrs['t_stop']:.6g}   ({ds.attrs['n_samples']} samples, "
+            f"{ds.attrs['average']})"]
+        if not ds.attrs["si"]:
+            lines.append("  (no reference units in the parameter file "
+                         "-- gyro-Bohm only)")
+
+        head = f"  {'quantity':<14}{'GENE units':>14}"
+        if std:
+            head += f"{'std':>12}"
+        head += f"{'SI':>16}  unit"
+        rule = "  " + "-" * (len(head) - 2)
+
+        for spec in ds["species"].values:
+            lines += ["", f"species: {spec}", head, rule]
+            s = ds.sel(species=spec)
+            for name in order:
+                gb = float(s[name])
+                row = f"  {name:<14}{gb:>14.6g}"
+                if std:
+                    key = name + "_std"
+                    row += (f"{float(s[key]):>12.4g}" if key in ds
+                            else f"{'':>12}")
+                si_key = name + "_SI"
+                if si_key in ds:
+                    row += f"{float(s[si_key]):>16.6g}  {ds[si_key].attrs.get('units', '')}"
+                else:
+                    row += f"{'':>16}  {ds[name].attrs.get('units', '')}"
+                lines.append(row)
+
+        text = "\n".join(lines) + "\n"
+        if isinstance(file, str):
+            with open(file, "w") as fh:
+                fh.write(text)
+        else:
+            (file or sys.stdout).write(text)
+        return text
 
     def plot_fluxes(self, titles=None) -> None:
         """

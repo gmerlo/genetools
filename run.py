@@ -514,6 +514,15 @@ class _BoundNrg:
     def data(self):
         return self._reader.dataset(self.run.params.get(0))
 
+    def summary(self, t=None):
+        """Time-averaged traces in GENE units and SI; see NrgReader.summary."""
+        return self._reader.summary(t=t, params=self.run.params.get(0))
+
+    def print_summary(self, t=None, file=None, std=True):
+        """Render :meth:`summary` as a text table; see NrgReader.print_summary."""
+        return self._reader.print_summary(t=t, params=self.run.params.get(0),
+                                          file=file, std=std)
+
     def plot(self, t=None):
         # nrg plots the full time series; t is accepted for a uniform facade API.
         self._reader.plot()
