@@ -402,6 +402,10 @@ class NrgReader:
     #: Gyro-Bohm unit label per flux family, for the dataset ``units`` attribute.
     _GB_LABELS = {"Gamma": "Gamma_gB", "Q": "Q_gB", "Pi": "Pi_gB"}
 
+    #: SI unit of ``flux x dVdx`` per family. ``dVdx`` is in m^2, so each is the
+    #: family's SI flux-density unit with the m^-2 cancelled.
+    _INTEGRATED_UNITS = {"Gamma": "1e19 s^-1", "Q": "W", "Pi": "N"}
+
     @staticmethod
     def _summary_window(t):
         """
@@ -437,7 +441,7 @@ class NrgReader:
             return None
         return units
 
-    def summary(self, t=None, params: dict = None):
+    def summary(self, t=None, params: dict = None, dVdx=None):
         """
         Time-averaged ``nrg`` traces, in GENE units and in SI.
 
@@ -460,18 +464,31 @@ class NrgReader:
             Defaults to the whole run.
         params : dict, optional
             Parameter dictionary supplying ``units``. Defaults to the reader's.
+        dVdx : float, optional
+            Flux-surface volume element, from ``geom['area']['dVdx']``. When
+            given, each flux gains an ``_integrated`` column (``flux * dVdx``)
+            and its ``_integrated_SI`` companion, so the heat flux is reported
+            in watts rather than W/m^2.
+
+            **Flux tube only**, and the restriction is the geometry's, not a
+            choice: ``_get_area`` returns a scalar ``dVdx`` for ``x_local``
+            but a radial *profile* for both global geometries, and ``nrg``
+            carries no radial axis to integrate one against. For a global run
+            use :meth:`genetools.diagnostics.fluxes2d.Fluxes2D.dataset`, whose
+            ``*_integrated`` variables keep the x axis.
 
         Returns
         -------
         xarray.Dataset
             Dims ``(species,)``. ``ds.attrs`` carries ``t_start``/``t_stop``
-            (the times actually used), ``n_samples`` and ``si`` (whether the
-            SI columns are present).
+            (the times actually used), ``n_samples``, ``si`` (whether the SI
+            columns are present) and, when integrating, ``dVdx``.
 
         Raises
         ------
         ValueError
-            If the window selects no output times.
+            If the window selects no output times, or if *dVdx* is not a
+            scalar -- which is what a global run's profile would be.
         """
         import xarray as xr
         from genetools import _xr
@@ -486,6 +503,16 @@ class NrgReader:
             raise ValueError(
                 f"no nrg output in the window ({a:g}, {b:g}); "
                 f"the run spans {times[0]:g} to {times[-1]:g}")
+
+        if dVdx is not None:
+            dVdx_arr = np.asarray(dVdx, dtype=float)
+            if dVdx_arr.ndim != 0:
+                raise ValueError(
+                    f"dVdx must be a scalar, got shape {dVdx_arr.shape}. "
+                    "Only a flux tube has one; both global geometries give a "
+                    "radial profile, and nrg has no radial axis to integrate "
+                    "it against -- use Fluxes2D.dataset() there.")
+            dVdx = float(dVdx_arr)
 
         tw = times[sel]
         data = np.asarray(self.data)[:, :, sel]      # (species, column, time)
@@ -531,21 +558,47 @@ class NrgReader:
                     ("species",), data_vars[es + "_SI"][1] + data_vars[em + "_SI"][1])
                 si_unit_of[base + "_total"] = si_unit_of[es]
 
+        # flux x dVdx: the total through the surface, in W / 1e19 s^-1 / N.
+        # Only the fluxes get one -- the fluctuation amplitudes are not fluxes
+        # and multiplying them by an area would mean nothing.
+        int_unit_of = {}
+        if dVdx is not None:
+            for name in [n for n in list(data_vars)
+                         if n in self._SI_REFS or n.endswith("_total")]:
+                base = name.split("_")[0]
+                if base not in self._INTEGRATED_UNITS:
+                    continue
+                data_vars[name + "_integrated"] = (
+                    ("species",), data_vars[name][1] * dVdx)
+                if name + "_SI" in data_vars:
+                    data_vars[name + "_integrated_SI"] = (
+                        ("species",), data_vars[name + "_SI"][1] * dVdx)
+                    int_unit_of[name] = self._INTEGRATED_UNITS[base]
+
         ds = xr.Dataset(data_vars, coords={"species": sp})
         for name, unit in gb_unit_of.items():
             ds[name].attrs["units"] = unit
         for name, unit in si_unit_of.items():
             ds[name + "_SI"].attrs["units"] = unit
+        for name, unit in int_unit_of.items():
+            ds[name + "_integrated_SI"].attrs["units"] = unit
+        for name in list(ds.data_vars):
+            if name.endswith("_integrated"):
+                base = name.split("_")[0]
+                ds[name].attrs["units"] = (
+                    self._GB_LABELS.get(base, "GENE units") + " m^2")
         ds.attrs.update(_xr.unit_attrs(params))
         ds.attrs["t_start"] = float(tw[0])
         ds.attrs["t_stop"] = float(tw[-1])
         ds.attrs["n_samples"] = int(tw.size)
         ds.attrs["si"] = units is not None
         ds.attrs["average"] = "trapezoidal in time"
+        if dVdx is not None:
+            ds.attrs["dVdx"] = dVdx
         return ds
 
     def print_summary(self, t=None, params: dict = None, file=None,
-                      std=True) -> str:
+                      std=True, dVdx=None) -> str:
         """
         Render :meth:`summary` as a text table and write it out.
 
@@ -564,6 +617,9 @@ class NrgReader:
             Where to write. A string is opened as a path. Defaults to stdout.
         std : bool, default True
             Include the standard-deviation column.
+        dVdx : float, optional
+            Flux-surface volume element; adds a ``flux x dVdx`` column in W /
+            1e19 s^-1 / N. Flux tube only -- see :meth:`summary`.
 
         Returns
         -------
@@ -572,7 +628,8 @@ class NrgReader:
         """
         import sys
 
-        ds = self.summary(t=t, params=params)
+        ds = self.summary(t=t, params=params, dVdx=dVdx)
+        integrated = "dVdx" in ds.attrs
         order = [n for n in ("Gamma_es", "Gamma_em", "Gamma_total",
                              "Q_es", "Q_em", "Q_total",
                              "Pi_es", "Pi_em", "Pi_total",
@@ -586,11 +643,16 @@ class NrgReader:
         if not ds.attrs["si"]:
             lines.append("  (no reference units in the parameter file "
                          "-- gyro-Bohm only)")
+        if integrated:
+            lines.append(f"  x dVdx = {ds.attrs['dVdx']:.6g} m^2")
 
         head = f"  {'quantity':<14}{'GENE units':>14}"
         if std:
             head += f"{'std':>12}"
-        head += f"{'SI':>16}  unit"
+        head += f"{'SI':>16}"
+        if integrated:
+            head += f"{'x dVdx':>16}"
+        head += "  unit"
         rule = "  " + "-" * (len(head) - 2)
 
         for spec in ds["species"].values:
@@ -603,12 +665,20 @@ class NrgReader:
                     key = name + "_std"
                     row += (f"{float(s[key]):>12.4g}" if key in ds
                             else f"{'':>12}")
-                si_key = name + "_SI"
+                si_key, int_key = name + "_SI", name + "_integrated_SI"
+                unit = ds[name].attrs.get("units", "")
                 if si_key in ds:
-                    row += f"{float(s[si_key]):>16.6g}  {ds[si_key].attrs.get('units', '')}"
+                    row += f"{float(s[si_key]):>16.6g}"
+                    unit = ds[si_key].attrs.get("units", "")
                 else:
-                    row += f"{'':>16}  {ds[name].attrs.get('units', '')}"
-                lines.append(row)
+                    row += f"{'':>16}"
+                if integrated:
+                    if int_key in ds:
+                        row += f"{float(s[int_key]):>16.6g}"
+                        unit += "  ->  " + ds[int_key].attrs.get("units", "")
+                    else:
+                        row += f"{'':>16}"
+                lines.append(row + "  " + unit)
 
         text = "\n".join(lines) + "\n"
         if isinstance(file, str):

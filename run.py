@@ -514,14 +514,45 @@ class _BoundNrg:
     def data(self):
         return self._reader.dataset(self.run.params.get(0))
 
-    def summary(self, t=None):
-        """Time-averaged traces in GENE units and SI; see NrgReader.summary."""
-        return self._reader.summary(t=t, params=self.run.params.get(0))
+    def _dVdx(self, integrate):
+        """
+        The scalar ``dVdx`` for the ``flux x dVdx`` columns, or ``None``.
 
-    def print_summary(self, t=None, file=None, std=True):
+        Flux tube only: ``_get_area`` gives a scalar there and a radial profile
+        for both global geometries, and ``nrg`` has no radial axis to integrate
+        a profile against. ``integrate=True`` on a global run is an error rather
+        than a silent omission, since the column would simply be missing.
+        """
+        if not integrate:
+            return None
+        if self.run.geometry_kind != "flux_tube":
+            raise ValueError(
+                f"integrate=True needs a scalar dVdx, which only a flux tube "
+                f"has; this run is {self.run.geometry_kind}. Use "
+                f"run.fluxes2d.dataset() -- its *_integrated variables keep "
+                f"the radial axis.")
+        return self.run.geom["area"]["dVdx"]
+
+    def summary(self, t=None, integrate=None):
+        """
+        Time-averaged traces in GENE units and SI; see NrgReader.summary.
+
+        *integrate* adds the ``flux x dVdx`` columns (W, 1e19 s^-1, N). It
+        defaults to on for a flux tube and off otherwise, so the columns appear
+        exactly where they are well defined.
+        """
+        if integrate is None:
+            integrate = self.run.geometry_kind == "flux_tube"
+        return self._reader.summary(t=t, params=self.run.params.get(0),
+                                    dVdx=self._dVdx(integrate))
+
+    def print_summary(self, t=None, file=None, std=True, integrate=None):
         """Render :meth:`summary` as a text table; see NrgReader.print_summary."""
+        if integrate is None:
+            integrate = self.run.geometry_kind == "flux_tube"
         return self._reader.print_summary(t=t, params=self.run.params.get(0),
-                                          file=file, std=std)
+                                          file=file, std=std,
+                                          dVdx=self._dVdx(integrate))
 
     def plot(self, t=None):
         # nrg plots the full time series; t is accepted for a uniform facade API.

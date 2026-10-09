@@ -216,3 +216,73 @@ class TestPrintSummary:
         reader, _ = constant
         assert "std" in reader.print_summary(std=True)
         assert "std" not in reader.print_summary(std=False)
+
+
+class TestIntegrated:
+    """``flux x dVdx`` -- the total through the surface. Flux tube only."""
+
+    DVDX = 2.5
+
+    def test_integrated_is_flux_times_dVdx(self, constant):
+        reader, _ = constant
+        ds = reader.summary(dVdx=self.DVDX)
+        for name in ("Gamma_es", "Gamma_em", "Q_es", "Q_em", "Pi_es", "Pi_em"):
+            assert float(ds[name + "_integrated"].sel(species="ions")) == (
+                pytest.approx(float(ds[name].sel(species="ions")) * self.DVDX))
+
+    def test_integrated_si_is_the_si_flux_times_dVdx(self, constant):
+        reader, _ = constant
+        ds = reader.summary(dVdx=self.DVDX)
+        assert float(ds.Q_total_integrated_SI.sel(species="ions")) == (
+            pytest.approx(float(ds.Q_total_SI.sel(species="ions")) * self.DVDX))
+
+    def test_integrated_units_drop_the_per_area(self, constant):
+        reader, _ = constant
+        ds = reader.summary(dVdx=self.DVDX)
+        assert ds["Q_es_integrated_SI"].attrs["units"] == "W"
+        assert ds["Gamma_es_integrated_SI"].attrs["units"] == "1e19 s^-1"
+        assert ds["Pi_es_integrated_SI"].attrs["units"] == "N"
+
+    def test_totals_are_integrated_too(self, constant):
+        reader, _ = constant
+        ds = reader.summary(dVdx=self.DVDX)
+        for base in ("Gamma", "Q", "Pi"):
+            assert base + "_total_integrated" in ds
+
+    def test_amplitudes_are_not_integrated(self, constant):
+        reader, _ = constant
+        ds = reader.summary(dVdx=self.DVDX)
+        for name in ("n_sq", "u_par_sq", "T_par_sq", "T_perp_sq"):
+            assert name + "_integrated" not in ds, (
+                f"{name} is not a flux; multiplying it by an area means nothing")
+
+    def test_absent_by_default(self, constant):
+        reader, _ = constant
+        ds = reader.summary()
+        assert not [v for v in ds.data_vars if v.endswith("_integrated")]
+        assert "dVdx" not in ds.attrs
+
+    def test_dVdx_recorded_in_attrs(self, constant):
+        reader, _ = constant
+        assert reader.summary(dVdx=self.DVDX).attrs["dVdx"] == pytest.approx(
+            self.DVDX)
+
+    def test_a_radial_profile_is_rejected(self, constant):
+        reader, _ = constant
+        with pytest.raises(ValueError, match="must be a scalar"):
+            reader.summary(dVdx=np.array([1.0, 2.0, 3.0]))
+
+    def test_no_si_units_means_no_integrated_si(self, tmp_path):
+        vals = np.ones((2, N_COLS, len(TIMES)))
+        reader = _reader(tmp_path, vals, units=False)
+        ds = reader.summary(dVdx=self.DVDX)
+        assert "Q_es_integrated" in ds          # gyro-Bohm x m^2 is still real
+        assert "Q_es_integrated_SI" not in ds
+
+    def test_table_gains_a_column(self, constant):
+        reader, _ = constant
+        text = reader.print_summary(dVdx=self.DVDX)
+        assert "x dVdx" in text
+        assert f"{self.DVDX:.6g} m^2" in text
+        assert "->  W" in text
+        assert "x dVdx" not in reader.print_summary()
