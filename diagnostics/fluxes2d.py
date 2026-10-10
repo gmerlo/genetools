@@ -1069,6 +1069,15 @@ class Fluxes2D(RunDiagnostic):
         Returns ``(maps, info)`` where *maps* is ``{species: {flux: (ny, nz)}}``,
         time-averaged over the window. The species factor is applied, as
         everywhere else in this class.
+
+        ``info["y_profiles"]`` holds the same fluxes reduced over z with the
+        Jacobian, ``sum_z f J / sum_z J`` at this radius — the binormal
+        counterpart of the radial profile `plot` draws, and comparable with it
+        term for term: averaging a y-profile over y with the weight
+        ``sum_z J(y, .)`` gives back exactly the flux-surface average at this
+        radius, which is the value on the x-plot. ``info["fsa"]`` carries that
+        number, so the two views can be checked against each other rather than
+        eyeballed.
         """
         self._require("xy_global")
         coord = self.coord
@@ -1096,18 +1105,39 @@ class Fluxes2D(RunDiagnostic):
                    * self._prefactor_3d(self._FLUXES_3D[v][0], name)
                 for v in wanted}
 
+        # The same Jacobian weighting the radial profile uses, with only the z
+        # sum left to do: (ny, nz) here, so no einsum gymnastics is needed.
+        Jx = np.asarray(self.geom["Jacobian"], dtype=float)[ix]     # (ny, nz)
+        wz = Jx.sum(axis=1)                                         # (ny,)
+        y_profiles, fsa = {}, {}
+        for name, per in maps.items():
+            y_profiles[name] = {v: (arr * Jx).sum(axis=1) / wz
+                                for v, arr in per.items()}
+            # sum_y (sum_z f J) / sum_yz J -- the flux-surface average at ix.
+            fsa[name] = {v: float((prof * wz).sum() / wz.sum())
+                         for v, prof in y_profiles[name].items()}
+
         info = {"ix": ix, "x_o_a": float(x_o_a[ix]), "x_requested": float(x0),
                 "times": times, "y": np.asarray(coord["y"], dtype=float),
-                "z": np.asarray(coord["z"], dtype=float)}
+                "z": np.asarray(coord["z"], dtype=float),
+                "y_profiles": y_profiles, "fsa": fsa}
         return maps, info
 
-    def plot_surface(self, x0, t=None, species=None, cmap="RdBu_r"):
+    def plot_surface(self, x0, t=None, species=None, cmap="RdBu_r",
+                     y_profile=True):
         """
         Draw the ``(y, z)`` flux maps on the surface nearest *x0* (in ``x/a``).
 
         One figure per species, one panel per flux. The colour scale is
         symmetric about zero: these change sign across a surface and a
         sequential map would hide that.
+
+        ``y_profile=True`` (the default) adds a row underneath with the map
+        reduced over z against the same Jacobian weight the radial profile uses,
+        so the binormal structure can be read on the same footing as the radial
+        one. The dashed line on it is the flux-surface average at this radius —
+        the y-average of the curve, and the point the ``plot()`` profile shows at
+        this ``x/a``.
         """
         maps, info = self.surface_maps(x0, t=t, species=species)
         y, z = info["y"], info["z"]
@@ -1120,22 +1150,45 @@ class Fluxes2D(RunDiagnostic):
             present = [v for v in self._FLUXES_3D if v in per]
             if not present:
                 continue
-            fig, axes = plt.subplots(1, len(present),
-                                     figsize=(4.6 * len(present), 3.8),
-                                     squeeze=False)
-            for ax, v in zip(axes[0], present):
+            nrow = 2 if y_profile else 1
+            # Constrained layout, not the tight_layout used elsewhere in this
+            # class: a colorbar anchored to two axes at once is not something
+            # tight_layout can place, and anchoring it to both is what keeps
+            # the map and the profile under it on the same y axis.
+            fig, axes = plt.subplots(
+                nrow, len(present), squeeze=False, sharex="col",
+                layout="constrained",
+                figsize=(5.0 * len(present), 3.8 + 2.6 * (nrow - 1)),
+                gridspec_kw={"height_ratios": [3, 2]} if y_profile else None)
+            for col, v in enumerate(present):
+                ax = axes[0][col]
                 arr = np.asarray(per[v], dtype=float)
                 vmax = float(np.max(np.abs(arr))) or 1.0
                 mesh = ax.pcolormesh(y, z, arr.T, shading="auto", cmap=cmap,
                                      vmin=-vmax, vmax=vmax)
-                ax.set_xlabel(r"$y/\rho_{\rm ref}$")
                 ax.set_ylabel(r"$z/\pi$")
                 ax.set_title(v, fontsize=9)
-                fig.colorbar(mesh, ax=ax)
+                # Anchor the colorbar to the whole column, not to the map
+                # alone: it then steals the same width from both rows and the
+                # two y axes stay aligned, which is the entire point of
+                # drawing them one above the other.
+                fig.colorbar(mesh, ax=[axes[r][col] for r in range(nrow)])
+                if not y_profile:
+                    ax.set_xlabel(r"$y/\rho_{\rm ref}$")
+                    continue
+                lax = axes[1][col]
+                lax.plot(y, info["y_profiles"][name][v], lw=1.2)
+                lax.axhline(info["fsa"][name][v], ls="--", color="k", lw=0.9,
+                            label="flux-surface average")
+                lax.axhline(0.0, color="0.7", lw=0.6)
+                lax.set_xlabel(r"$y/\rho_{\rm ref}$")
+                lax.set_ylabel(r"$\langle$" + v + r"$\rangle_z$", fontsize=9)
+                lax.grid(alpha=0.3)
+                if col == 0:
+                    lax.legend(fontsize=8)
             n_t = np.size(info["times"])
             fig.suptitle(f"{name} — flux surface $x/a$ = {info['x_o_a']:.4f}"
                          f"  ({n_t} snapshot{'s' if n_t != 1 else ''} averaged)")
-            fig.tight_layout()
             figs.append(fig)
         plt.show()
         return figs

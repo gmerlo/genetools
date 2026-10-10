@@ -734,3 +734,56 @@ class TestSpeciesPrefactor:
         for name in run.species:
             assert abs(diag._prefactor_3d("dens", name) - 1.0) > 0.5
             assert abs(diag._prefactor_3d("dens_temp", name) - 1.0) > 0.5
+
+
+class TestSurfaceYProfile:
+    """
+    The binormal counterpart of the radial profile, on one flux surface.
+
+    Its whole value is being comparable with the x-plot, which only holds if it
+    is reduced over z with the same Jacobian weight — so that is what is pinned
+    here, rather than the plotting.
+    """
+
+    def test_y_average_recovers_the_radial_profile(self, physical_run):
+        """
+        Averaging the y-profile over y with ``sum_z J`` must give the point the
+        radial profile shows at that x. A plain z-mean (no Jacobian) would not.
+        """
+        run = Run(physical_run.folder)
+        diag = Fluxes2D(run)
+        x_o_a = np.asarray(run.coords[0]["x_o_a"], dtype=float)
+        x0 = float(x_o_a[len(x_o_a) // 2])
+
+        _, info = diag.surface_maps(x0)
+        ds = diag.dataset()
+        J = run.geometry[0]["Jacobian"]
+        wz = J[info["ix"]].sum(axis=1)
+
+        for name, per in info["y_profiles"].items():
+            for flux, prof in per.items():
+                got = float((prof * wz).sum() / wz.sum())
+                assert got == pytest.approx(info["fsa"][name][flux], rel=1e-10)
+                want = float(diag._t_average(ds[flux].sel(species=name))
+                             .isel(x=info["ix"]))
+                assert got == pytest.approx(want, rel=1e-5), f"{name} {flux}"
+
+    def test_an_unweighted_z_mean_would_differ(self, physical_run):
+        """
+        Guards the guard: the fixture's Jacobian varies enough over z that
+        dropping it is a real error, not a rounding one.
+        """
+        run = Run(physical_run.folder)
+        diag = Fluxes2D(run)
+        maps, info = diag.surface_maps(0.5)
+        name = next(iter(maps))
+        flux = next(iter(maps[name]))
+        plain = maps[name][flux].mean(axis=1)
+        assert not np.allclose(plain, info["y_profiles"][name][flux], rtol=1e-3)
+
+    def test_profiles_match_the_maps_shape(self, noisy_run):
+        maps, info = Fluxes2D(Run(noisy_run.folder)).surface_maps(0.5)
+        for name, per in maps.items():
+            for flux, arr in per.items():
+                assert info["y_profiles"][name][flux].shape == (arr.shape[0],)
+                assert info["y_profiles"][name][flux].shape == info["y"].shape
