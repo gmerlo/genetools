@@ -5,6 +5,8 @@
 import os
 
 import h5py
+import warnings
+
 import numpy as np
 
 from genetools.io._zgrid import build_zgrid
@@ -105,8 +107,30 @@ def load_coord_xy_global(folder, ext, params):
         rad_bc_type = int(nonlocal_x.get("rad_bc_type", 0) or 0)
         dx_ = lx / nx if rad_bc_type == 0 else lx / (nx - 1)
         x = -0.5 * lx + np.arange(nx) * dx_ + x0 / rhostar
-    x_over_a = (stored["xval_a"] if "xval_a" in stored
-                and stored["xval_a"].size == nx else x * rhostar)
+    # GENE-3D writes xval_a = x0 -- a *constant*, for every radial point --
+    # when radial_dependence is .false. (coordinates.F90:95-99). Taken at face
+    # value that destroys the radial axis: every plot against x/a stacks on one
+    # point, and every radial window collapses to slice(0, 1), because
+    # argmin(|const - bound|) is 0 whatever the bound. The grid positions are
+    # still xval*rhostar, so reconstruct them and say so. Keyed off the array
+    # being degenerate rather than off the flag: it is the direct evidence, and
+    # it also catches a coord file written by a version that spells the flag
+    # differently.
+    stored_xa = stored.get("xval_a")
+    radially_local = (stored_xa is not None and stored_xa.size == nx
+                      and float(np.ptp(stored_xa)) == 0.0)
+    if stored_xa is not None and stored_xa.size == nx and not radially_local:
+        x_over_a = stored_xa
+    else:
+        x_over_a = x * rhostar
+    if radially_local:
+        warnings.warn(
+            f"this run wrote a constant xval_a = {float(stored_xa[0]):g}, which "
+            "GENE-3D does for radial_dependence = .false.; the radial axis is "
+            "reconstructed as xval*rhostar so that windows and plots against "
+            "x/a still work. The background profiles are all evaluated at x0, "
+            "so read x/a as a grid position, not as a distinct flux label.",
+            RuntimeWarning, stacklevel=2)
     dx = x[1] - x[0] if nx > 1 else 0.0
 
     # --- y ------------------------------------------------------------

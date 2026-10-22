@@ -50,7 +50,7 @@ GEOM_BFIELD = ["Bfield", "dBdx", "dBdy", "dBdz", "Jacobian", "K_x", "K_y"]
 # ---------------------------------------------------------------------------
 
 def gene3d_grids(nx0, ny0, nz0, lx, ly, x0, rhostar, n_pol=1,
-                 rad_bc_type=0):
+                 rad_bc_type=0, radial_dependence=True):
     """
     Return the ``(xval, xval_a, yval, zval)`` grids GENE-3D would write.
 
@@ -58,10 +58,18 @@ def gene3d_grids(nx0, ny0, nz0, lx, ly, x0, rhostar, n_pol=1,
     ``set_z_coordinate_vars``: the radial spacing depends on the radial
     boundary condition, ``yval`` starts at zero rather than being centred, and
     ``zval`` picks up a half-cell shift when ``nz0`` is odd.
+
+    **``xval_a`` is the scalar ``x0`` when ``radial_dependence`` is false**
+    (``coordinates.F90:95-99``) -- a constant array, not a radial coordinate.
+    This used to be written as ``xval*rhostar`` either way, so nothing read a
+    degenerate radial axis and the collapse it causes went unseen: every
+    window over ``x/a`` becomes ``slice(0, 1)``, since ``argmin`` of a constant
+    array is 0 whatever bound it is given.
     """
     dx = lx / nx0 if rad_bc_type == 0 else lx / (nx0 - 1)
     xval = -0.5 * lx + np.arange(nx0) * dx + x0 / rhostar
-    xval_a = xval * rhostar
+    xval_a = (xval * rhostar if radial_dependence
+              else np.full(nx0, float(x0)))
 
     yval = np.arange(ny0) * (ly / ny0)
 
@@ -375,7 +383,7 @@ def make_gene3d_run(tmp_path, ext=".dat", nx0=6, ny0=8, nz0=4, nv0=8, nw0=4,
                     write_vsp=False, write_srcmom=False,
                     write_profile_diag=False, nonlinear=True,
                     norm_flux_projection=True, physical=False,
-                    temps=None, denss=None):
+                    radial_dependence=True, temps=None, denss=None):
     """
     Build a complete synthetic GENE-3D run directory under *tmp_path*.
 
@@ -402,11 +410,13 @@ def make_gene3d_run(tmp_path, ext=".dat", nx0=6, ny0=8, nz0=4, nv0=8, nw0=4,
         minor_r=minor_r, major_R=major_R, species=species,
         magn_geometry=magn_geometry, n_pol=n_pol, nonlinear=nonlinear,
         norm_flux_projection=norm_flux_projection,
+        radial_dependence=radial_dependence,
         temps=temps, denss=denss))
 
     # --- coord<ext>.h5 ----------------------------------------------------
     xval, xval_a, yval, zval = gene3d_grids(
-        nx0, ny0, nz0, lx, ly, x0, rhostar, n_pol=n_pol)
+        nx0, ny0, nz0, lx, ly, x0, rhostar, n_pol=n_pol,
+        radial_dependence=radial_dependence)
     vp = np.linspace(-3.0, 3.0, nv0)
     vp_weight = np.full(nv0, vp[1] - vp[0])
     mu, mu_weight = np.polynomial.laguerre.laggauss(nw0)
@@ -487,8 +497,13 @@ def make_gene3d_run(tmp_path, ext=".dat", nx0=6, ny0=8, nz0=4, nv0=8, nw0=4,
             _put3d(cart, name, rng.standard_normal(shape))
 
     # --- background profiles (needed by the physical flux generator) ------
-    T_bg = 1.0 + 0.5 * (1.0 - xval_a)
-    n_bg = 1.0 + 0.3 * (1.0 - xval_a)
+    # Against the geometric position, not xval_a: the latter is the constant
+    # x0 for a radial_dependence = .false. run, which would make the shape flat
+    # and its gradient a division by zero. Identical to xval_a whenever the
+    # flag is on, so no existing number moves.
+    x_bg = xval * rhostar
+    T_bg = 1.0 + 0.5 * (1.0 - x_bg)
+    n_bg = 1.0 + 0.3 * (1.0 - x_bg)
 
     # --- field<ext>.h5 and mom_<spec><ext>.h5 -----------------------------
     times = np.arange(n_times, dtype=float) * 10.0
@@ -537,8 +552,8 @@ def make_gene3d_run(tmp_path, ext=".dat", nx0=6, ny0=8, nz0=4, nv0=8, nw0=4,
         # profiles.F90 writes my_Tref*sp%temp*sp%temp_prof, so the file column is
         # the species temperature times the normalised profile shape.
         T, n = T_bg * temps_l[s], n_bg * denss_l[s]
-        omt = -np.gradient(np.log(T), xval_a)
-        omn = -np.gradient(np.log(n), xval_a)
+        omt = -np.gradient(np.log(T), x_bg)
+        omn = -np.gradient(np.log(n), x_bg)
         profiles[spec] = {"x_o_a": xval_a, "x_o_rho_ref": xval,
                           "T": T, "n": n, "omt": omt, "omn": omn}
         header = ("#   x/a             x/rho_ref           T"
