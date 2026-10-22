@@ -343,3 +343,122 @@ class TestRadialWindow:
             xlim=(float(x[0]), float(x[0]))).compute()["spectra"]["phi"]
         assert one.shape == whole.shape
         np.testing.assert_allclose(one, whole, rtol=1e-6)
+
+
+class TestSharedTimeAxis:
+    """
+    Every quantity is transformed on the times all its source files share.
+
+    `istep_field` and `istep_mom` need not agree, so phi and a moment
+    generally arrive on different axes. Taking the times from whichever reader
+    came first pairs each moment sample with the wrong instant — and where the
+    moment file is the shorter one, raises out of `resample_uniform` instead.
+    """
+
+    @staticmethod
+    def _truncate_moments(folder, keep):
+        """Leave the moment file short, as a killed or still-running job does."""
+        with h5py.File(Path(folder) / "mom_ions.dat.h5", "r+") as f:
+            grp = f["mom_ions"]
+            for key in sorted(grp["n"].keys())[keep:]:
+                for var in grp:
+                    if var != "time" and key in grp[var]:
+                        del grp[var][key]
+            times = grp["time"][...]
+            del grp["time"]
+            grp.create_dataset("time", data=times[:keep], maxshape=(None,))
+
+    @pytest.fixture
+    def ragged_run(self, tmp_path):
+        folder = tmp_path / "ragged"
+        make_gene3d_run(folder, nx0=4, ny0=8, nz0=4, n_times=16, n_fields=1,
+                        species=("ions",))
+        self._truncate_moments(folder, keep=10)
+        return Run(str(folder))
+
+    @pytest.mark.filterwarnings("ignore:.*aliased.*:RuntimeWarning")
+    def test_a_short_moment_file_does_not_raise(self, ragged_run):
+        assert len(ragged_run.field.read_all_times()) == 16
+        assert len(ragged_run.mom("ions").read_all_times()) == 10
+        ds = ragged_run.frequency(quantities=("phi", "n")).dataset()
+        assert ds.attrs["n_times"] == 10
+        assert {"phi_power", "n_power"} <= set(ds.data_vars)
+
+    @pytest.mark.filterwarnings("ignore:.*aliased.*:RuntimeWarning")
+    def test_both_quantities_share_one_omega_axis(self, ragged_run):
+        """A single omega coordinate is only meaningful if dt was the same."""
+        ds = ragged_run.frequency(quantities=("phi", "n")).dataset()
+        assert ds["phi_power"].dims == ds["n_power"].dims == ("ky", "omega")
+        assert ds["phi_power"].shape == ds["n_power"].shape
+
+
+class TestRadialAverageIsWeighted:
+    """
+    The x reduction is a Jacobian-weighted average, and composes exactly.
+
+    Built on a phi whose inner and outer halves oscillate at different known
+    frequencies, so a wrong weight shows up as a shifted band rather than as a
+    shape difference nothing would notice.
+    """
+
+    @pytest.fixture
+    def split_run(self, tmp_path):
+        folder = tmp_path / "split"
+        make_gene3d_run(folder, nx0=8, ny0=16, nz0=4, n_times=128, n_fields=1,
+                        species=("ions",))
+        with h5py.File(folder / "field.dat.h5", "r+") as f:
+            grp = f["field"]
+            times = np.asarray(grp["time"][...], dtype=float)
+            keys = sorted(grp["phi"].keys())
+            nz, ny, nx = grp["phi"][keys[0]].shape
+            ly = 80.0
+            y = np.arange(ny) * (ly / ny)
+            k0 = 2 * np.pi * 2 / ly
+            for it, key in enumerate(keys):
+                arr = np.empty((nz, ny, nx))
+                for ix in range(nx):
+                    omega = 0.05 if ix < nx // 2 else 0.20
+                    arr[:, :, ix] = np.cos(k0 * y - omega * times[it])[None, :]
+                grp["phi"][key][...] = arr.astype(grp["phi"][key].dtype)
+        return Run(str(folder)), k0
+
+    @staticmethod
+    def _at_k0(run, k0, **kw):
+        ds = run.frequency(window_frac=0.5, **kw).dataset()
+        ky = np.asarray(ds["ky"])
+        i = int(np.argmin(np.abs(ky - k0)))
+        return np.asarray(ds["phi_power"])[i], np.asarray(ds["phi_peak"])[i, 0]
+
+    def test_each_half_reports_its_own_frequency(self, split_run):
+        run, k0 = split_run
+        x = np.asarray(run.coords[0]["x_o_a"])
+        half = x.size // 2
+        _, inner = self._at_k0(run, k0, xlim=(float(x[0]), float(x[half - 1])))
+        _, outer = self._at_k0(run, k0, xlim=(float(x[half]), float(x[-1])))
+        assert inner == pytest.approx(0.05, abs=0.01)
+        assert outer == pytest.approx(0.20, abs=0.01)
+
+    @pytest.mark.filterwarnings("ignore:.*aliased.*:RuntimeWarning")
+    def test_the_whole_domain_is_the_weighted_combination(self, split_run):
+        """
+        Exact composition: the full-domain spectrum is the sum of the two
+        halves weighted by their own `sum_z J`, not their plain mean.
+        """
+        run, k0 = split_run
+        x = np.asarray(run.coords[0]["x_o_a"])
+        z = np.asarray(run.coords[0]["z"])
+        half = x.size // 2
+        iz = int(np.argmin(np.abs(z)))
+        w = run.geometry[0]["Jacobian"].mean(axis=1)[:, iz]
+        w_in, w_out = w[:half].sum(), w[half:].sum()
+
+        whole, _ = self._at_k0(run, k0)
+        inner, _ = self._at_k0(run, k0, xlim=(float(x[0]), float(x[half - 1])))
+        outer, _ = self._at_k0(run, k0, xlim=(float(x[half]), float(x[-1])))
+
+        expect = (w_in * inner + w_out * outer) / (w_in + w_out)
+        np.testing.assert_allclose(whole, expect, rtol=1e-6)
+        # Guards the guard: the Jacobian varies enough that the plain mean is
+        # a visibly different answer, so this is not a tautology.
+        assert not np.allclose(whole, 0.5 * (inner + outer),
+                               rtol=1e-3, atol=whole.max() * 1e-4)

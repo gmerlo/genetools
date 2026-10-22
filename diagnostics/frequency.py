@@ -308,26 +308,32 @@ class Frequency(RunDiagnostic):
         weights = J.mean(axis=1)[xsl][:, zsl]            # (nx_sel, nz_sel)
 
         ky_full = np.asarray(coord["ky"], dtype=float)
-        out, times, info = {}, None, {}
-        for reader, names in self._sources(self.quantities, self.species):
-            all_times, idx = self._indices(reader, t)
+        out, info = {}, {}
+        # One time axis for every quantity, taken over the times all the
+        # source files share. istep_field and istep_mom need not agree, so
+        # phi and a moment generally arrive on different axes; resampling a
+        # moment onto the field's axis -- as taking the times from whichever
+        # reader came first did -- pairs each sample with the wrong instant,
+        # and where the moment file is the shorter one it raises IndexError
+        # out of resample_uniform instead.
+        sources = list(self._sources(self.quantities, self.species))
+        times, index_of = self._common_indices([r for r, _ in sources], t)
+        times = np.asarray(times, dtype=float)
+        for reader, names in sources:
+            idx = index_of[id(reader)]
             slots = {n: reader.index_of(n) for n in names}
             acc = {n: [] for n in names}
-            got = []
-            for time, arrays in reader.stream_selected(idx, variables=names):
-                got.append(time)
+            for _, arrays in reader.stream_selected(idx, variables=names):
                 for n in names:
                     # Transform in y, then keep only the window: the FFT needs
                     # the whole binormal axis, the time series does not need
                     # the whole box.
                     hat = g3.to_ky(arrays[slots[n]])
                     acc[n].append(hat[xsl][:, :, zsl])
-            if times is None:
-                times = np.asarray(got, dtype=float)
             for n in names:
                 out[n] = np.asarray(acc[n])              # (nt, nx, nky, nz)
 
-        if times is None or times.size < 2:
+        if times.size < 2:
             raise ValueError(
                 "a frequency spectrum needs at least two snapshots in the "
                 "window; widen t.")
