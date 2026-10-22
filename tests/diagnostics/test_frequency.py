@@ -131,6 +131,63 @@ class TestResample:
             resample_uniform(np.array([1.0]), np.zeros((1, 1)))
 
 
+class TestSubBinPeaks:
+    """
+    A peak must not be quantised to its FFT bin.
+
+    The bin centre is wrong by up to half a bin, a systematic
+    `omega_resolution/2` that at the default window length is several percent
+    of a turbulence frequency -- enough to read as the mode sitting somewhere
+    it does not.
+    """
+
+    @staticmethod
+    def _sweep(mode_fn, n_trials=200):
+        from genetools.diagnostics.frequency import welch
+        rng = np.random.default_rng(0)
+        dt, n, nperseg = 1.0, 512, 128
+        errs = []
+        for _ in range(n_trials):
+            omega_true = rng.uniform(0.05, 0.4)
+            t = np.arange(n) * dt
+            om, p, _ = welch(np.exp(-1j * omega_true * t), dt,
+                             nperseg=nperseg, noverlap=64, detrend=False)
+            errs.append(abs(mode_fn(om, p) - omega_true))
+        return np.mean(errs) / (2 * np.pi / nperseg)
+
+    def test_refinement_beats_the_bare_bin_by_an_order_of_magnitude(self):
+        refined = self._sweep(lambda om, p: spectral_peaks(om, p, 1)[0])
+        bare = self._sweep(lambda om, p: om[int(np.argmax(p))])
+        assert bare > 0.15, "bare bin should be ~a quarter bin out"
+        assert refined < 0.03, f"refined mean error {refined:.3f} bins"
+        assert refined < bare / 5
+
+    def test_an_exactly_on_bin_peak_is_not_moved(self):
+        """The refinement must be a no-op where the bin centre is right."""
+        omega = np.linspace(-1.0, 1.0, 21)
+        power = np.exp(-((omega - omega[14]) / 0.15) ** 2)
+        assert spectral_peaks(omega, power, 1)[0] == pytest.approx(
+            omega[14], abs=1e-9)
+
+    def test_it_stays_inside_its_own_bin(self):
+        """A maximum cannot lie outside the bin that holds it."""
+        rng = np.random.default_rng(3)
+        omega = np.linspace(-1.0, 1.0, 41)
+        d = omega[1] - omega[0]
+        for _ in range(50):
+            power = rng.uniform(0.1, 1.0, omega.size)
+            got = spectral_peaks(omega, power, 1)[0]
+            if np.isnan(got):
+                continue
+            assert np.min(np.abs(omega - got)) <= 0.5 * d + 1e-12
+
+    def test_non_positive_power_falls_back_to_the_bin(self):
+        omega = np.linspace(-1.0, 1.0, 11)
+        power = np.zeros_like(omega)
+        power[5] = 1.0
+        assert spectral_peaks(omega, power, 1)[0] == pytest.approx(omega[5])
+
+
 class TestPeaksAndMoments:
     def _spectrum(self, omega, centres, heights):
         return sum(h * np.exp(-((omega - c) / 0.3) ** 2)
