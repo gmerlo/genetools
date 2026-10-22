@@ -227,9 +227,18 @@ class Frequency(RunDiagnostic):
     species : str, optional
         Species supplying moment quantities (default: the first).
     xlim : (float, float), optional
-        Radial window in ``x/a``. Default: the whole domain. Restrict it when
-        the profiles vary enough that different surfaces rotate at different
-        rates — averaging those together broadens the band artificially.
+        Radial window in ``x/a``, inclusive; the nearest grid points are used.
+        Default: the whole domain. Restrict it when the profiles vary enough
+        that different surfaces rotate at different rates — averaging those
+        together broadens the band artificially, and ``q_width`` then reports
+        radial variation as though it were a frequency band.
+    buffer_frac : float or None, optional
+        What to trim when *xlim* is not given. ``0.0`` (the default) keeps the
+        whole domain, as this diagnostic always has. A float trims that
+        fraction from each end. ``None`` means **ask the run**: the Krook
+        buffer widths declared in its own ``&nonlocal_x``, per end, which is
+        the honest answer where a symmetric fraction is a guess. *xlim* beats
+        both, being an explicit request.
     zlim : (float, float), optional
         Parallel window. Default: **a cut** at the grid point nearest ``z = 0``,
         the outboard midplane, which is also what keeps the time series small
@@ -250,12 +259,13 @@ class Frequency(RunDiagnostic):
     supported = ("xy_global",)
 
     def __init__(self, run, quantities=("phi",), species=None,
-                 xlim=None, zlim=None, window_frac=0.25, overlap=0.5,
-                 detrend=True, n_peaks=2):
+                 xlim=None, zlim=None, buffer_frac=0.0, window_frac=0.25,
+                 overlap=0.5, detrend=True, n_peaks=2):
         super().__init__(run)
         self.quantities = tuple(quantities)
         self.species = species or (run.species[0] if run.species else None)
         self.xlim, self.zlim = xlim, zlim
+        self.buffer_frac = buffer_frac
         self.window_frac = float(window_frac)
         self.overlap = float(overlap)
         self.detrend = bool(detrend)
@@ -283,7 +293,14 @@ class Frequency(RunDiagnostic):
 
         coord, J = self.coord, self.geom["Jacobian"]
         nx, ny, nz = J.shape
-        xsl = g3.index_window(coord["x_o_a"], self.xlim, nx)
+        # params only when buffer_frac is None: radial_slice prefers the
+        # declared buffers whenever it is handed params, and passing them
+        # unconditionally would silently start trimming runs that this
+        # diagnostic has always averaged whole.
+        xsl = g3.radial_slice(
+            coord["x_o_a"], limits=self.xlim,
+            buffer_frac=self.buffer_frac,
+            params=self.params if self.buffer_frac is None else None)
         zsl = g3.index_window(coord["z"],
                               self.zlim if self.zlim is not None
                               else self._z_cut(coord["z"]), nz)
@@ -318,6 +335,14 @@ class Frequency(RunDiagnostic):
         nt = times.size
         sample = next(iter(out.values()))
         info["series_MiB"] = sample.nbytes / 1024 ** 2 * len(out)
+        # Both reductions happen below, so both windows belong in the output:
+        # a spectrum averaged over an unknown radial range cannot be compared
+        # with another one.
+        xw = np.asarray(coord["x_o_a"], dtype=float)[xsl]
+        zw = np.asarray(coord["z"], dtype=float)[zsl]
+        info["x_avg_range"] = [float(xw[0]), float(xw[-1])]
+        info["z_avg_range"] = [float(zw[0]), float(zw[-1])]
+        info["nx_averaged"] = int(xw.size)
 
         spectra, omega = {}, None
         for name, series in out.items():
@@ -457,10 +482,18 @@ class Frequency(RunDiagnostic):
             axes[1].set_ylabel(r"$\omega\;[c_s/L_{\rm ref}]$")
             axes[1].grid(True, alpha=0.3)
             axes[1].legend(fontsize=8)
-            fig.suptitle(f"{name} — fluctuation frequency "
-                         f"({ds.attrs.get('n_windows', '?')} windows, "
-                         f"resolution {ds.attrs.get('omega_resolution', 0):.3g},"
-                         f" Nyquist {nyq:.3g})" if nyq else name)
+            # The radial window belongs on the figure: the map is an average
+            # over it, and two spectra averaged over different ranges are not
+            # comparable however alike they look.
+            lo, hi = ds.attrs.get("x_avg_range", (None, None))
+            window = (rf"$x/a \in [{lo:.3f}, {hi:.3f}]$, "
+                      f"{ds.attrs.get('nx_averaged', '?')} surfaces"
+                      if lo is not None else "")
+            head = (f"{name} — fluctuation frequency "
+                    f"({ds.attrs.get('n_windows', '?')} windows, "
+                    f"resolution {ds.attrs.get('omega_resolution', 0):.3g},"
+                    f" Nyquist {nyq:.3g})" if nyq else name)
+            fig.suptitle(head + ("\n" + window if window else ""))
             fig.tight_layout()
             figs.append(fig)
         plt.show()

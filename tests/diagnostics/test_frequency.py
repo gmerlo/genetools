@@ -261,3 +261,85 @@ class TestEndToEnd:
                         species=("ions",))
         with pytest.raises(ValueError, match="at least two"):
             Run(str(folder)).frequency().compute()
+
+
+class TestRadialWindow:
+    """
+    Which surfaces the (ky, omega) map is an average over.
+
+    The spectrum is a Jacobian-weighted average over x, so the window is part
+    of the answer: two spectra averaged over different ranges are not
+    comparable, however alike they look. Hence both that the window can be
+    chosen and that the choice is recorded.
+    """
+
+    @staticmethod
+    def _kept(run, raw):
+        x = np.asarray(run.coords[0]["x_o_a"])
+        return x[raw["xslice"]]
+
+    def test_whole_domain_by_default(self, wave_run):
+        raw = wave_run.frequency().compute()
+        x = np.asarray(wave_run.coords[0]["x_o_a"])
+        assert self._kept(wave_run, raw).size == x.size
+
+    def test_xlim_restricts_the_average(self, wave_run):
+        x = np.asarray(wave_run.coords[0]["x_o_a"])
+        lo, hi = float(x[1]), float(x[-2])
+        raw = wave_run.frequency(xlim=(lo, hi)).compute()
+        kept = self._kept(wave_run, raw)
+        assert kept[0] == pytest.approx(lo)
+        assert kept[-1] == pytest.approx(hi)
+        assert kept.size == x.size - 2
+
+    @pytest.mark.filterwarnings("ignore:.*aliased.*:RuntimeWarning")
+    def test_buffer_frac_trims_each_end(self, tmp_path):
+        folder = tmp_path / "wide"
+        make_gene3d_run(folder, nx0=20, ny0=8, nz0=4, n_times=8, n_fields=1,
+                        species=("ions",))
+        run = Run(str(folder))
+        raw = run.frequency(buffer_frac=0.1).compute()
+        assert len(range(*raw["xslice"].indices(20))) == 16
+
+    @pytest.mark.filterwarnings("ignore:.*aliased.*:RuntimeWarning")
+    def test_buffer_frac_none_takes_the_declared_widths(self, tmp_path):
+        """
+        ``None`` asks the run, so an asymmetric ``&nonlocal_x`` is honoured —
+        the case a symmetric fraction cannot express.
+        """
+        folder = tmp_path / "declared"
+        make_gene3d_run(folder, nx0=20, ny0=8, nz0=4, n_times=8, n_fields=1,
+                        species=("ions",))
+        run = Run(str(folder))
+        run.params.get(0)["nonlocal_x"] = {"l_buffer_size": 0.10,
+                                           "u_buffer_size": 0.25}
+        raw = run.frequency(buffer_frac=None).compute()
+        assert raw["xslice"] == g3.buffer_slice(run.params.get(0), 20)
+        assert len(range(*raw["xslice"].indices(20))) == 20 - 2 - 5
+
+    def test_xlim_beats_buffer_frac(self, wave_run):
+        x = np.asarray(wave_run.coords[0]["x_o_a"])
+        raw = wave_run.frequency(xlim=(float(x[0]), float(x[-1])),
+                                 buffer_frac=0.25).compute()
+        assert self._kept(wave_run, raw).size == x.size
+
+    def test_the_window_used_is_recorded(self, wave_run):
+        x = np.asarray(wave_run.coords[0]["x_o_a"])
+        lo, hi = float(x[1]), float(x[-2])
+        ds = wave_run.frequency(xlim=(lo, hi)).dataset()
+        assert ds.attrs["x_avg_range"] == pytest.approx([lo, hi])
+        assert ds.attrs["nx_averaged"] == x.size - 2
+        assert len(ds.attrs["z_avg_range"]) == 2
+
+    def test_the_reduction_normalises_rather_than_sums(self, wave_run):
+        """
+        The fixture's phi is uniform in x, so narrowing the window must leave
+        the spectrum untouched. It would scale with the number of surfaces if
+        the x reduction summed instead of averaging.
+        """
+        x = np.asarray(wave_run.coords[0]["x_o_a"])
+        whole = wave_run.frequency().compute()["spectra"]["phi"]
+        one = wave_run.frequency(
+            xlim=(float(x[0]), float(x[0]))).compute()["spectra"]["phi"]
+        assert one.shape == whole.shape
+        np.testing.assert_allclose(one, whole, rtol=1e-6)
