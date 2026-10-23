@@ -338,7 +338,7 @@ class Frequency(RunDiagnostic):
         # diagnostic has always averaged whole.
         xsl = g3.radial_slice(
             coord["x_o_a"], limits=self.xlim,
-            buffer_frac=self.buffer_frac,
+            buffer_frac=self.buffer_frac, nx=nx,
             params=self.params if self.buffer_frac is None else None)
         zsl = g3.index_window(coord["z"],
                               self.zlim if self.zlim is not None

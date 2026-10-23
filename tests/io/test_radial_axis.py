@@ -87,22 +87,93 @@ class TestDegenerateAxisIsReconstructed:
         with pytest.warns(RuntimeWarning):
             local = _loaded(tmp_path, False)
         glob = _loaded(tmp_path, True)
-        for lim in [(0.2, 0.3), (0.4, 0.6), (0.6, 0.8)]:
+        for lim in [(0.25, 0.35), (0.4, 0.6), (0.6, 0.7)]:
             a = g3.radial_slice(local.coords[0]["x_o_a"], limits=lim)
             b = g3.radial_slice(glob.coords[0]["x_o_a"], limits=lim)
             assert a == b, lim
             assert len(range(*a.indices(8))) > 1, lim
 
-    def test_a_constant_axis_would_collapse_every_window(self):
+    def test_a_constant_axis_cannot_serve_a_window(self):
         """
-        Guards the guard: states plainly what the unfixed behaviour was, so the
-        test above is known to be testing something.
+        Guards the guard: on a constant axis every window either misses it
+        entirely (now an error) or collapses to the single repeated point.
+        Either way it cannot answer "which surfaces are in [lo, hi]", which is
+        why the axis is rebuilt rather than used.
         """
         const = np.full(8, X0)
-        for lim in [(0.2, 0.3), (0.4, 0.6), (0.6, 0.8)]:
-            assert g3.radial_slice(const, limits=lim) == slice(0, 1)
+        for lim in [(0.2, 0.3), (0.6, 0.8)]:
+            with pytest.raises(ValueError, match="outside this axis"):
+                g3.radial_slice(const, limits=lim)
+        assert g3.radial_slice(const, limits=(X0, X0)) == slice(0, 1)
 
     def test_no_warning_when_the_axis_is_genuine(self, tmp_path, recwarn):
         _loaded(tmp_path, True)
         assert not [w for w in recwarn
                     if "constant xval_a" in str(w.message)]
+
+
+class TestWindowGuards:
+    """
+    A window the grid cannot serve must say so.
+
+    Nearest-point selection answers *something* for any bound: ask for a range
+    the run does not cover and `argmin` pins both ends to the same edge index,
+    so the caller gets one surface from the far side of the box with no
+    indication the window was not honoured. Downstream that is
+    indistinguishable from having got what was asked for.
+    """
+
+    GRID = np.round(np.linspace(0.20, 0.80, 13), 4)
+
+    @pytest.mark.parametrize("lim", [(0.90, 1.00), (0.00, 0.10), (1.0, 2.0)])
+    def test_a_window_off_the_grid_raises(self, lim):
+        with pytest.raises(ValueError, match="outside this axis"):
+            g3.radial_slice(self.GRID, limits=lim)
+
+    def test_the_error_names_the_range_that_does_exist(self):
+        with pytest.raises(ValueError, match=r"\[0.2, 0.8\]"):
+            g3.radial_slice(self.GRID, limits=(0.9, 1.0))
+
+    def test_a_partly_overlapping_window_is_clipped_and_reported(self):
+        with pytest.warns(RuntimeWarning, match="clipped to the overlap"):
+            sl = g3.radial_slice(self.GRID, limits=(0.75, 0.95))
+        assert self.GRID[sl][0] == pytest.approx(0.75)
+        assert self.GRID[sl][-1] == pytest.approx(0.80)
+
+    def test_a_window_inside_the_grid_is_silent(self, recwarn):
+        sl = g3.radial_slice(self.GRID, limits=(0.35, 0.50))
+        assert self.GRID[sl].size == 4
+        assert not recwarn.list
+
+    def test_half_a_cell_of_slack_is_allowed(self, recwarn):
+        """
+        Nearest-point selection legitimately reaches half a cell past each end,
+        so asking for that much is the window landing on the edge point, not
+        overrunning the grid.
+        """
+        d = self.GRID[1] - self.GRID[0]
+        sl = g3.radial_slice(self.GRID, limits=(0.20 - 0.4 * d, 0.80 + 0.4 * d))
+        assert self.GRID[sl].size == self.GRID.size
+        assert not recwarn.list
+
+    def test_a_length_mismatch_raises(self):
+        """
+        The radial coordinate and the radial data axis are the same grid, so a
+        disagreement means a slice from one would be applied to the other --
+        silently empty or silently short, since numpy slices never raise.
+        """
+        with pytest.raises(ValueError, match="data axis has 8"):
+            g3.radial_slice(self.GRID, limits=(0.3, 0.5), nx=8)
+
+    def test_a_matching_length_is_accepted(self):
+        sl = g3.radial_slice(self.GRID, limits=(0.3, 0.5), nx=self.GRID.size)
+        assert self.GRID[sl].size == 5
+
+    def test_the_old_behaviour_was_a_silent_wrong_answer(self):
+        """Guards the guard: states what was being returned before."""
+        arr = self.GRID
+        lo = hi = 0.95
+        i0 = int(np.argmin(np.abs(arr - lo)))
+        i1 = int(np.argmin(np.abs(arr - hi)))
+        assert slice(i0, i1 + 1) == slice(12, 13)
+        assert arr[12] == pytest.approx(0.80), "0.80 returned for a 0.95 request"

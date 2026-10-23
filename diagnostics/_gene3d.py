@@ -285,6 +285,26 @@ def index_window(values, limits, n=None) -> slice:
     if n is not None and arr.size != n:
         return slice(None)
     lo, hi = float(limits[0]), float(limits[1])
+    if hi < lo:
+        lo, hi = hi, lo
+    # Nearest-point selection answers *something* for any bound, including a
+    # window that misses the grid entirely: argmin then pins both ends to the
+    # same edge index and the caller silently gets one surface from the far
+    # side of the box, labelled as though it were what was asked for. That is
+    # indistinguishable, downstream, from the window having been honoured.
+    g_lo, g_hi = float(np.min(arr)), float(np.max(arr))
+    span = arr[1] - arr[0] if arr.size > 1 else 0.0
+    pad = 0.5 * abs(float(span))
+    if hi < g_lo - pad or lo > g_hi + pad:
+        raise ValueError(
+            f"the window [{lo:g}, {hi:g}] lies outside this axis, which spans "
+            f"[{g_lo:g}, {g_hi:g}]. Nearest-point selection would return a "
+            "single edge point, which is not what was asked for.")
+    if lo < g_lo - pad or hi > g_hi + pad:
+        warnings.warn(
+            f"the window [{lo:g}, {hi:g}] extends past this axis, which spans "
+            f"[{g_lo:g}, {g_hi:g}]; it is clipped to the overlap.",
+            RuntimeWarning, stacklevel=2)
     i0 = int(np.argmin(np.abs(arr - lo)))
     i1 = int(np.argmin(np.abs(arr - hi)))
     if i1 < i0:
@@ -339,7 +359,8 @@ def buffer_slice(params, nx: int) -> slice:
     return slice(lo, nx - up) if (lo or up) else slice(None)
 
 
-def radial_slice(x_o_a, limits=None, buffer_frac=None, params=None) -> slice:
+def radial_slice(x_o_a, limits=None, buffer_frac=None, params=None,
+                 nx=None) -> slice:
     """
     Return a radial slice from *limits* in ``x/a``, or an inner-region fraction.
 
@@ -361,6 +382,14 @@ def radial_slice(x_o_a, limits=None, buffer_frac=None, params=None) -> slice:
     """
     x = np.asarray(x_o_a, dtype=float)
     n = x.size
+    # Unlike index_window's `n`, a disagreement here cannot be "a window in a
+    # coordinate this axis does not use" -- the radial grid and the radial data
+    # axis are the same grid. Slicing one by indices built from the other is
+    # silently empty or silently short, since numpy slices never raise.
+    if nx is not None and n != nx:
+        raise ValueError(
+            f"the radial coordinate has {n} points but the data axis has "
+            f"{nx}; a slice built from one cannot be applied to the other.")
     if limits is not None:
         return index_window(x, limits)
     if params is not None:
