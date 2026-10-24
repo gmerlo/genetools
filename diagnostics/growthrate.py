@@ -89,7 +89,11 @@ class GrowthRate(RunDiagnostic):
                 continue
             tt = times[good]
             gamma[j] = np.polyfit(tt, np.log(np.abs(amp[good])), 1)[0]
-            omega[j] = -np.polyfit(tt, np.unwrap(np.angle(amp[good])), 1)[0]
+            # +d(phase)/dt, which is Im[d ln phi/dt] -- GENE's own
+            # definition (convergence_monitoring.F90:196, written to
+            # omega<ext> at :280). This carried a bare minus and so came out
+            # mirrored against the omega file it is plotted beside.
+            omega[j] = np.polyfit(tt, np.unwrap(np.angle(amp[good])), 1)[0]
 
         return {"kind": "spectral", "ky": ky, "gamma": gamma, "omega": omega,
                 "window": (float(times[0]), float(times[-1]))}

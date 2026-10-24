@@ -45,14 +45,29 @@ Two deliberate departures from the IDL version:
 
 Sign convention
 ---------------
-GENE's ansatz is ``f ~ exp(i(k_x x + k_y y - omega t))``, so a mode at ``+k_y``
-has a time dependence ``exp(-i omega t)`` and positive omega means the wave
-travels in ``+y``. numpy's forward FFT carries the kernel ``exp(-i omega t)``,
-so its bin ``n`` holds this module's ``omega = -2 pi f_n``: the frequency axis
-is the *negated* ``fftfreq``. Getting this backwards silently mirrors the
-spectrum and reverses every reported propagation direction, so
-``test_travelling_wave_lands_at_positive_omega`` pins it against a wave built
-by hand from GENE's own ansatz.
+Taken from GENE, not derived from an ansatz. ``convergence_monitoring.F90``
+defines the frequency it prints and writes to ``omega<ext>`` operationally::
+
+    om_arr = log(phi_new/phi_old) / (dt*istep_omega)          ! :196
+    write (OMEGAFILE, fmt) kymin, real(om_conv), aimag(om_conv)   ! :280
+
+so ``gamma = Re[d ln phi/dt]`` and ``omega = +Im[d ln phi/dt]``, which is the
+coefficient in ``phi ~ exp(gamma t + i omega t)``. Every GENE tool reports that
+number, so this module reports it too: the axis is the **plain** ``fftfreq``,
+since a forward FFT (kernel ``exp(-i Omega t)``, the same in numpy and IDL)
+puts ``exp(+i Theta t)`` at ``Omega = +Theta``.
+
+The IDL diagnostic agrees, in both of its modes. ``frequency.pro:247`` is
+``IMAGINARY(ALOG(phi(t+dt)/phi(t))/dt)`` — GENE's expression verbatim — and its
+FFT mode builds the axis un-negated at ``:450`` and pairs it with
+``SHIFT(..., n/2-1)`` at ``:505``, which lands each bin on its own frequency.
+
+This module used to negate the axis, having derived the convention from the
+``exp(i(k.x - omega t))`` ansatz rather than reading what GENE publishes. That
+left every frequency here mirrored against GENE, ``omega<ext>`` and the IDL
+diagnostic, reversing every reported propagation direction while looking
+perfectly healthy. A consequence worth keeping in mind: in this convention a
+wave travelling in ``+y`` appears at **negative** omega for ``+k_y``.
 
 Memory
 ------
@@ -131,8 +146,9 @@ def welch(data, dt, nperseg, noverlap, detrend=True):
     ``-omega`` are the two propagation directions, and collapsing them would
     throw away which way the turbulence moves. Both halves are kept.
 
-    The frequency axis is the negated ``fftfreq`` — see the module docstring on
-    the sign convention.
+    The frequency axis is the plain ``fftfreq``, matching GENE's own
+    ``omega = Im[d ln phi/dt]`` — see the module docstring on the sign
+    convention.
     """
     n = data.shape[0]
     nperseg = int(min(max(nperseg, 2), n))
@@ -158,7 +174,7 @@ def welch(data, dt, nperseg, noverlap, detrend=True):
     if not count:                                  # pragma: no cover - guarded
         raise ValueError("no complete window fits in the record")
 
-    omega = -2.0 * np.pi * np.fft.fftfreq(nperseg, d=dt)
+    omega = 2.0 * np.pi * np.fft.fftfreq(nperseg, d=dt)
     order = np.argsort(omega)
     return omega[order], (total / count)[order], count
 

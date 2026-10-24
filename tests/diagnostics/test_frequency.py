@@ -34,12 +34,19 @@ from genetools.diagnostics.frequency import (        # noqa: E402
 
 class TestSignConvention:
     """
-    GENE's ansatz is ``exp(i(k_y y - omega t))``.
+    GENE's convention, read off the code rather than derived.
 
-    So the ``+k_y`` component of a wave travelling in ``+y`` varies as
-    ``exp(-i omega t)`` and must appear at ``+omega``. numpy's forward FFT
-    carries the same ``exp(-i omega t)`` kernel, which is why the frequency
-    axis has to be the *negated* fftfreq.
+    ``convergence_monitoring.F90:196`` builds ``log(phi_new/phi_old)/dt`` and
+    writes its imaginary part as ``omega`` (:280, into ``omega<ext>``), so
+    ``omega = +Im[d ln phi/dt]`` -- the coefficient in ``exp(+i omega t)``.
+    The IDL diagnostic matches in both modes: ``frequency.pro:247`` is the same
+    expression, and its FFT mode leaves the axis un-negated (:450, :505).
+
+    So the axis here is the plain ``fftfreq``, and **a wave travelling in +y
+    appears at negative omega for +k_y**: ``cos(k0 y - w t)`` has a ``+k0``
+    component going as ``exp(-i w t)``, whose ``Im[d ln phi/dt]`` is ``-w``.
+    This module used to negate the axis and so mirrored every frequency
+    against GENE, omega<ext> and IDL alike.
     """
 
     def _wave(self, omega0, ny=32, nt=512, mode=3):
@@ -57,21 +64,37 @@ class TestSignConvention:
                                noverlap=series.shape[0] // 8)
         return float(omega[int(np.argmax(power[:, 0]))])
 
-    def test_travelling_wave_lands_at_positive_omega(self):
+    def test_a_plus_y_wave_lands_at_negative_omega(self):
+        """
+        The load-bearing one. ``cos(k0 y - 4t)`` travels in +y; its +k0
+        component is ``exp(-4it)``, so GENE's ``Im[d ln phi/dt]`` is -4.
+        """
         series, dt = self._wave(omega0=4.0)
-        assert self._peak(series, dt) == pytest.approx(4.0, abs=0.25)
+        assert self._peak(series, dt) == pytest.approx(-4.0, abs=0.25)
 
     def test_reversing_the_wave_reverses_the_frequency(self):
         series, dt = self._wave(omega0=-4.0)
-        assert self._peak(series, dt) == pytest.approx(-4.0, abs=0.25)
+        assert self._peak(series, dt) == pytest.approx(4.0, abs=0.25)
+
+    def test_it_agrees_with_genes_own_expression(self):
+        """
+        Against ``Im[log(phi(t+dt)/phi(t))/dt]`` evaluated on the same series
+        -- the Fortran at convergence_monitoring.F90:196, in one line of numpy.
+        """
+        series, dt = self._wave(omega0=4.0)
+        phi = series[:, 0]
+        gene_omega = float(np.mean(np.imag(
+            np.log(phi[1:] / phi[:-1]) / dt)))
+        assert gene_omega == pytest.approx(-4.0, abs=0.05)
+        assert self._peak(series, dt) == pytest.approx(gene_omega, abs=0.25)
 
     def test_the_two_directions_are_not_symmetric(self):
         """A complex series has a one-sided spectrum; both halves are kept."""
         series, dt = self._wave(omega0=4.0)
         omega, power, _ = welch(series, dt, nperseg=128, noverlap=64)
-        pos = power[omega > 0].max()
-        neg = power[omega < 0].max()
-        assert pos > 20 * neg
+        hi = power[omega > 0].max()
+        lo = power[omega < 0].max()
+        assert lo > 20 * hi
 
 
 # ---------------------------------------------------------------------------
@@ -152,7 +175,9 @@ class TestSubBinPeaks:
             t = np.arange(n) * dt
             om, p, _ = welch(np.exp(-1j * omega_true * t), dt,
                              nperseg=nperseg, noverlap=64, detrend=False)
-            errs.append(abs(mode_fn(om, p) - omega_true))
+            # exp(-i w t) has Im[d ln phi/dt] = -w, so that is where
+            # GENE's convention puts it.
+            errs.append(abs(mode_fn(om, p) + omega_true))
         return np.mean(errs) / (2 * np.pi / nperseg)
 
     def test_refinement_beats_the_bare_bin_by_an_order_of_magnitude(self):
@@ -268,7 +293,8 @@ class TestEndToEnd:
         ky = np.asarray(ds["ky"])
         imode = int(np.argmin(np.abs(ky - ky[ky > 0].min() * 2)))
         peak = float(np.asarray(ds["phi_peak"])[imode, 0])
-        assert peak == pytest.approx(0.05, abs=0.02)
+        # The fixture's phi travels in +y, so GENE's omega is negative.
+        assert peak == pytest.approx(-0.05, abs=0.02)
 
     def test_dataset_carries_the_diagnostics_of_its_own_resolution(self,
                                                                   wave_run):
@@ -492,8 +518,8 @@ class TestRadialAverageIsWeighted:
         half = x.size // 2
         _, inner = self._at_k0(run, k0, xlim=(float(x[0]), float(x[half - 1])))
         _, outer = self._at_k0(run, k0, xlim=(float(x[half]), float(x[-1])))
-        assert inner == pytest.approx(0.05, abs=0.01)
-        assert outer == pytest.approx(0.20, abs=0.01)
+        assert inner == pytest.approx(-0.05, abs=0.01)
+        assert outer == pytest.approx(-0.20, abs=0.01)
 
     @pytest.mark.filterwarnings("ignore:.*aliased.*:RuntimeWarning")
     def test_the_whole_domain_is_the_weighted_combination(self, split_run):
