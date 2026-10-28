@@ -57,6 +57,20 @@ sets ``ly0da = 2 * nky0`` (and ``3 * nky0`` with the 3/2 dealiasing rule), so
 ``ny0 = 2 * nky0`` and the Nyquist bin GENE does not store is reconstructed as
 zero, which is what ``np.fft.irfft`` does when handed the shorter input.
 
+Movies
+------
+:meth:`Contours.animate` draws the same reductions as :meth:`Contours.plot`,
+but puts the time axis in the movie rather than across the page, so a long run
+becomes one file instead of a row of four thumbnails. The colour scale is fixed
+over the whole movie, not per frame: a self-normalising scale makes a quiet
+interval look exactly like a violent one, which is the one thing a movie is
+watched for.
+
+``.gif`` needs only Pillow, which matplotlib already requires. Every video
+container goes through ``ffmpeg``, a system program rather than a Python
+package, so a filename with no suffix gets ``.mp4`` when ffmpeg is on PATH and
+``.gif`` when it is not.
+
 Memory
 ------
 One snapshot at a time is read, transformed and reduced; only the reductions are
@@ -66,9 +80,11 @@ and its ``(nx, 2*nky, nz)`` real counterpart hold the same number of bytes.
 """
 
 from collections import namedtuple
+from pathlib import Path
 
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib import animation
 
 from genetools._xr import make_dataset, unit_attrs
 from genetools.diagnostics._base import RunDiagnostic
@@ -102,6 +118,12 @@ _RETIRED = {
     "del_zonal": "no replacement; filter the dataset from .dataset() instead",
     "zero_range": "no replacement; filter the dataset from .dataset() instead",
 }
+
+#: Movie container -> the matplotlib writer that produces it. Pillow ships
+#: with matplotlib; every video container needs the ffmpeg *program*.
+_WRITERS = {".mp4": "ffmpeg", ".mov": "ffmpeg", ".avi": "ffmpeg",
+            ".mkv": "ffmpeg", ".webm": "ffmpeg",
+            ".gif": "pillow", ".html": "html", ".htm": "html"}
 
 #: The reduction options, frozen so it can key the snapshot cache.
 _Selection = namedtuple(
@@ -164,6 +186,12 @@ class Contours(RunDiagnostic):
     n_max : int
         :meth:`plot` only — at most this many times are drawn, evenly spaced
         through the window, so a long run does not open hundreds of axes.
+        :meth:`animate` takes it too, but defaults to every snapshot: a movie
+        has somewhere to put them.
+
+    See Also
+    --------
+    animate : the same reductions as a movie over the time window.
     """
 
     name = "contours"
@@ -599,8 +627,178 @@ class Contours(RunDiagnostic):
         plt.show()
         return figs
 
+    # ------------------------------------------------------------------
+    # Movie
+    # ------------------------------------------------------------------
+
+    def animate(self, t=None, filename=None, fps=8, dpi=120, n_max=None,
+                vmax=None, writer=None, **kw):
+        """
+        The reductions of :meth:`plot` as a movie over the time window.
+
+        Same options, same geometries: where :meth:`plot` spends the horizontal
+        direction on a handful of times and so shows four of them, this keeps
+        one panel per reduction and advances them through *every* snapshot in
+        the window.
+
+        Parameters
+        ----------
+        t : (float, float), optional
+            Time window, as everywhere else. The movie covers all of it.
+        filename : str or pathlib.Path, optional
+            Where to write it. ``None`` builds the animation and shows it
+            without saving. A name with no suffix gets ``.mp4`` when ffmpeg is
+            installed and ``.gif`` when it is not; with several quantities the
+            quantity name is appended to the stem, one file each.
+        fps : int, optional
+            Frames per second (default 8). The movie's length is
+            ``n_frames / fps`` seconds, so this, not the run, sets the pace.
+        dpi : int, optional
+            Resolution of the saved frames (default 120).
+        n_max : int, optional
+            Draw at most this many snapshots, evenly spaced through the
+            window. The default is every one of them -- unlike :meth:`plot`,
+            where the page sets a limit of four.
+        vmax : float, optional
+            Fix the symmetric colour scale. The default takes it from the
+            largest value *in the whole movie*, so the panels are comparable
+            frame to frame; a per-frame scale would renormalise the quiet
+            intervals up to full contrast and hide the very intermittency the
+            movie is being watched for. Passing a number is how to compare two
+            movies against each other.
+        writer : str, optional
+            Override the matplotlib writer chosen from the suffix.
+        **kw
+            Every :meth:`plot` option except ``t_avg``, which averages the
+            time axis away and so leaves nothing to animate.
+
+        Returns
+        -------
+        list of matplotlib.animation.FuncAnimation
+            One per quantity. **Keep the returned object alive**: matplotlib
+            holds only a weak reference to an animation, so a bare
+            ``run.contours.animate(...)`` in a script is collected before it
+            can play. Saving happens inside this call, so that only matters
+            when ``filename`` is ``None``.
+
+        Examples
+        --------
+        >>> run.contours.animate(filename="phi.gif", reductions=("xy",))
+        >>> anim = run.contours.animate(t=(500, 2000), fps=15)[0]
+        """
+        reductions, sel = self._split_kw(kw)
+        if sel.t_avg:
+            raise ValueError(
+                "t_avg=True averages the time axis away, leaving a single "
+                "frame to animate; drop it and pass t=(start, stop) to choose "
+                "the window the movie covers.")
+        raw = self.compute(t, **kw)
+        ds = self.dataset(t, **kw)
+        quantities = [q for q in sel.quantities
+                      if any(f"{q}_{r}" in ds for r in reductions)]
+        if not quantities:
+            raise ValueError("No reduction available to animate.")
+
+        n_total = ds.sizes["time"]
+        frames = self._frame_indices(n_total, n_max)
+        if frames.size < 2:
+            raise ValueError(
+                f"a movie needs at least two snapshots; this window holds "
+                f"{n_total} and n_max={n_max} keeps {frames.size}. Widen t, "
+                "or use plot() for a single time.")
+        if frames.size < n_total:
+            print(f"contours: animating {frames.size} of {n_total} times.")
+
+        fixed = self._fixed_values(raw["limits"])
+        labels = {self._x_axis(sel): raw["labels"]["x"],
+                  self._y_axis(sel): raw["labels"]["y"], "z": "z"}
+        anims = []
+        for name in quantities:
+            reds = [r for r in reductions if f"{name}_{r}" in ds]
+            anim = self._movie(ds, name, reds, frames, fixed, labels, sel,
+                               vmax, fps)
+            if filename is not None:
+                path = self._movie_path(filename, name, len(quantities))
+                anim.save(str(path), writer=_make_writer(path, writer, fps),
+                          dpi=dpi)
+                print(f"Saved {path}")
+            anims.append(anim)
+        if filename is None:
+            plt.show()
+        return anims
+
+    def _movie(self, ds, name, reds, frames, fixed, labels, sel, vmax, fps):
+        """
+        Build the figure for one quantity and the callback that advances it.
+
+        One column: the reductions stack so they share the radial axis, as in
+        :meth:`plot`, and time is what moves.
+        """
+        fig, axes = plt.subplots(len(reds), 1,
+                                 figsize=(5.8, 3.6 * len(reds)),
+                                 squeeze=False)
+        panels = []
+        for row, red in enumerate(reds):
+            da = ds[f"{name}_{red}"].isel(time=frames)
+            # One scale for the whole movie -- see the `vmax` note in animate.
+            scale = (float(np.max(np.abs(np.asarray(da)))) or 1.0
+                     if vmax is None else float(vmax))
+            ax = axes[row][0]
+            first = da.isel(time=0)
+            artist = (self._draw_plane(fig, ax, ds, first, scale, labels)
+                      if len(red) == 2
+                      else self._draw_line(ax, ds, first, scale, labels))
+            panels.append((red, ax, np.asarray(da),
+                           np.asarray(da["time"]), artist, len(red) == 2))
+        fig.suptitle(self._title(name, sel))
+        fig.tight_layout()
+
+        def draw(k):
+            touched = []
+            for red, ax, values, times, artist, is_plane in panels:
+                frame = values[k]
+                if is_plane:
+                    # QuadMesh wants the same orientation _draw_plane gave it.
+                    artist.set_array(frame.T)
+                else:
+                    artist.set_ydata(frame)
+                ax.set_title(self._panel_title(red, fixed, float(times[k])),
+                             fontsize=9)
+                touched.append(artist)
+            return touched
+
+        # blit=False: the panel titles carry the time, and a blitted animation
+        # redraws only the artists it is handed, leaving every frame labelled
+        # with the first one's time.
+        return animation.FuncAnimation(fig, draw, frames=len(frames),
+                                       interval=1000.0 / float(fps),
+                                       blit=False)
+
+    @staticmethod
+    def _frame_indices(n_total, n_max):
+        """Which snapshots the movie draws: all of them, or *n_max* spaced."""
+        if n_max is None or n_max >= n_total:
+            return np.arange(n_total)
+        return np.unique(
+            np.linspace(0, n_total - 1, max(int(n_max), 1)).astype(int))
+
+    @staticmethod
+    def _movie_path(filename, name, n_quantities):
+        """Resolve the output path, one file per quantity."""
+        path = Path(filename)
+        if not path.suffix:
+            path = path.with_suffix(_default_suffix())
+        if n_quantities > 1:
+            path = path.with_name(f"{path.stem}_{name}{path.suffix}")
+        return path
+
     def _draw_plane(self, fig, ax, ds, frame, vmax, labels):
-        """pcolormesh of a 2-D reduction, with the radial axis horizontal."""
+        """
+        pcolormesh of a 2-D reduction, with the radial axis horizontal.
+
+        Returns the mesh so :meth:`animate` can refill it frame by frame
+        rather than redrawing the axes.
+        """
         dims = frame.dims
         # dims[0] is the radial axis: put it horizontal.
         h, v = np.asarray(ds[dims[0]]), np.asarray(ds[dims[1]])
@@ -609,15 +807,22 @@ class Contours(RunDiagnostic):
         ax.set_xlabel(_AXIS_LABELS.get(labels.get(dims[0], dims[0]), dims[0]))
         ax.set_ylabel(_AXIS_LABELS.get(labels.get(dims[1], dims[1]), dims[1]))
         fig.colorbar(mesh, ax=ax)
+        return mesh
 
     @staticmethod
     def _draw_line(ax, ds, frame, vmax, labels):
-        """Line plot of a 1-D reduction, on the scale shared across the row."""
+        """
+        Line plot of a 1-D reduction, on the scale shared across the row.
+
+        Returns the line, for the same reason :meth:`_draw_plane` returns its
+        mesh.
+        """
         dim = frame.dims[0]
-        ax.plot(np.asarray(ds[dim]), np.asarray(frame))
+        line, = ax.plot(np.asarray(ds[dim]), np.asarray(frame))
         ax.set_xlabel(_AXIS_LABELS.get(labels.get(dim, dim), dim))
         ax.set_ylim(-vmax, vmax)
         ax.grid(True, alpha=0.3)
+        return line
 
     def _title(self, name, sel):
         """Figure title: the quantity, its species and whether it is squared."""
@@ -661,6 +866,37 @@ class Contours(RunDiagnostic):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _default_suffix():
+    """``.mp4`` when ffmpeg is there to write it, ``.gif`` when it is not."""
+    return ".mp4" if animation.writers.is_available("ffmpeg") else ".gif"
+
+
+def _make_writer(path, writer, fps):
+    """
+    The matplotlib writer for *path*, or an error saying what is missing.
+
+    matplotlib's own failure for an absent ffmpeg is a ``RuntimeError`` deep
+    in the save, after every frame has been rendered; this one fires before
+    the first and names the fix.
+    """
+    suffix = Path(path).suffix.lower()
+    if writer is None:
+        writer = _WRITERS.get(suffix)
+        if writer is None:
+            raise ValueError(
+                f"no movie writer is known for '{suffix}'; use one of "
+                f"{sorted(_WRITERS)}, or name the writer explicitly.")
+    if not animation.writers.is_available(writer):
+        hint = ("it needs the ffmpeg program on PATH, which is a system "
+                "package rather than a Python one -- or write a '.gif', "
+                "which needs only Pillow"
+                if writer == "ffmpeg" else
+                f"registered writers: {sorted(animation.writers.list())}")
+        raise RuntimeError(
+            f"matplotlib's '{writer}' movie writer is not available: {hint}.")
+    return animation.writers[writer](fps=fps)
+
 
 def _apply(var, xsl, ysl, zsl, keep):
     """Apply the index windows, leaving the axes named in *keep* unrestricted."""

@@ -17,11 +17,15 @@ geometry difference in this module is carried by ``_x_is_spectral`` and
 ``_y_is_spectral``.
 """
 
+from pathlib import Path
+
 import numpy as np
 import pytest
+from matplotlib import animation
 
 from genetools.diagnostics.contours import (
-    Contours, _RETIRED, _ALL, _inverse_y, _inverse_x,
+    Contours, _RETIRED, _ALL, _inverse_y, _inverse_x, _make_writer,
+    _default_suffix,
 )
 
 
@@ -316,3 +320,81 @@ class TestLimits:
         fixed = Contours._fixed_values({"x": None, "y": (0.0, 0.0),
                                         "z": (-1.0, 1.0)})
         assert fixed == {"y": 0.0}
+
+
+# ---------------------------------------------------------------------------
+# Movies
+# ---------------------------------------------------------------------------
+
+class TestFrameSelection:
+    """`animate` keeps every snapshot unless asked not to."""
+
+    def test_the_default_is_every_time(self):
+        np.testing.assert_array_equal(Contours._frame_indices(10, None),
+                                      np.arange(10))
+
+    def test_n_max_above_the_count_still_keeps_them_all(self):
+        np.testing.assert_array_equal(Contours._frame_indices(4, 99),
+                                      np.arange(4))
+
+    def test_n_max_spaces_the_frames_through_the_window(self):
+        picks = Contours._frame_indices(10, 3)
+        np.testing.assert_array_equal(picks, [0, 4, 9])
+
+    def test_the_ends_are_always_kept(self):
+        for n_total in (5, 17, 101):
+            picks = Contours._frame_indices(n_total, 4)
+            assert picks[0] == 0 and picks[-1] == n_total - 1
+
+    def test_the_frames_are_strictly_increasing(self):
+        """Duplicates from the rounding would replay the same snapshot."""
+        picks = Contours._frame_indices(5, 4)
+        assert list(picks) == sorted(set(picks))
+
+
+class TestMoviePath:
+
+    def test_a_bare_name_gets_a_suffix_that_can_be_written(self):
+        path = Contours._movie_path("phi", "phi", 1)
+        assert path.suffix in (".mp4", ".gif")
+        assert path.suffix == _default_suffix()
+
+    def test_one_quantity_keeps_the_name_asked_for(self):
+        assert str(Contours._movie_path("out/phi.gif", "phi", 1)) \
+            == "out/phi.gif"
+
+    def test_several_quantities_get_a_file_each(self):
+        """Otherwise the second quantity silently overwrites the first."""
+        a = Contours._movie_path("m.gif", "phi", 2)
+        b = Contours._movie_path("m.gif", "n", 2)
+        assert (a.name, b.name) == ("m_phi.gif", "m_n.gif")
+
+
+class TestWriterChoice:
+    """
+    The writer is resolved before the first frame is rendered.
+
+    matplotlib's own failure for a missing ffmpeg arrives at the end of
+    `save`, after every frame has been drawn -- on a long movie that is
+    minutes of work thrown away with an error that does not say what to
+    install.
+    """
+
+    def test_a_gif_needs_nothing_beyond_pillow(self):
+        assert _make_writer(Path("a.gif"), None, 8) is not None
+
+    def test_an_unknown_container_names_the_ones_that_work(self):
+        with pytest.raises(ValueError, match="no movie writer is known"):
+            _make_writer(Path("a.xyz"), None, 8)
+
+    def test_a_missing_ffmpeg_says_so_and_offers_the_gif(self, monkeypatch):
+        monkeypatch.setattr(animation.writers, "is_available",
+                            lambda name: False)
+        with pytest.raises(RuntimeError, match="ffmpeg program on PATH"):
+            _make_writer(Path("a.mp4"), None, 8)
+
+    def test_an_explicit_writer_overrides_the_suffix(self):
+        assert _make_writer(Path("a.mp4"), "pillow", 8) is not None
+
+    def test_the_suffix_is_read_case_insensitively(self):
+        assert _make_writer(Path("a.GIF"), None, 8) is not None

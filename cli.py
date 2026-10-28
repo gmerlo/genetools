@@ -14,6 +14,7 @@ Examples
     genetools /run --nrg
     genetools /run --spectra --t 500 2000 --save spectra.png
     genetools /run --contours --quantities phi --reductions all
+    genetools /run --contours --movie phi.gif --reductions xy
     genetools . --profiles --no-show
 
 GENE-3D runs use the same flags, plus a few of their own:
@@ -146,6 +147,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Plot SI-converted values where available.")
     p.add_argument("--t-avg", action="store_true",
                    help="Average over the time window (GENE-3D contours).")
+    p.add_argument("--movie", default=None, metavar="FILE",
+                   help="Write the contours as a movie over the time window "
+                        "instead of figures (contours). A '.gif' always "
+                        "works; a '.mp4' needs ffmpeg on PATH.")
+    p.add_argument("--fps", type=int, default=8,
+                   help="Frames per second for --movie (default 8).")
     p.add_argument("--reductions", nargs="+", default=None,
                    metavar="RED",
                    help="Contour reductions to draw: any of xy xz yz x y z, "
@@ -209,7 +216,8 @@ def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     name = _selected_diagnostic(args)
 
-    headless = args.no_show or args.save is not None
+    headless = (args.no_show or args.save is not None
+                or args.movie is not None)
     import matplotlib
     if headless:
         matplotlib.use("Agg")
@@ -232,6 +240,11 @@ def main(argv=None) -> int:
             print(f"genetools: {reason}", file=sys.stderr)
             return 2
 
+        if args.movie is not None and name != "contours":
+            print("genetools: --movie is only available for --contours",
+                  file=sys.stderr)
+            return 2
+
         accessor = DIAGNOSTICS[name]
         diag = getattr(run, accessor)
         if name in PARAMETRIZED:
@@ -241,11 +254,20 @@ def main(argv=None) -> int:
                       file=sys.stderr)
                 return 2
             diag = diag(**construct)
-        diag.plot(**_plot_kwargs(name, args))
+        if args.movie is not None:
+            # The movie is written here, not by _save_figures: its frames are
+            # the time axis, which a per-figure PNG dump cannot express.
+            diag.animate(filename=args.movie, fps=args.fps,
+                         **_plot_kwargs(name, args))
+        else:
+            diag.plot(**_plot_kwargs(name, args))
     except Exception as exc:  # surface a clean message, not a traceback
         print(f"genetools: error: {exc}", file=sys.stderr)
         return 1
 
+    if args.movie is not None:
+        plt.close("all")
+        return 0
     if args.save is not None:
         _save_figures(plt, args.save, name)
     elif not args.no_show:

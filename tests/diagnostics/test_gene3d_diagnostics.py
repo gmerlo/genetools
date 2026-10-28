@@ -655,6 +655,135 @@ class TestContourReductions3D:
         assert set(ds.data_vars) == {"phi_xy", "phi_xz", "n_xy", "n_xz"}
 
 
+class TestContourMovie:
+    """
+    `animate` writes the time axis into a file rather than across the page.
+
+    A ``.gif`` is written rather than a ``.mp4`` because Pillow comes with
+    matplotlib while ffmpeg is a system program: the test has to run wherever
+    the package installs.
+    """
+
+    def _gif(self, run, tmp_path, **kw):
+        out = tmp_path / "movie.gif"
+        anims = g3.Contours(run).animate(filename=str(out), dpi=50, **kw)
+        return out, anims
+
+    def test_every_snapshot_becomes_a_frame(self, run3d, tmp_path, headless):
+        from PIL import Image
+        _, run = run3d
+        out, anims = self._gif(run, tmp_path, reductions=("xy",))
+        assert len(anims) == 1
+        n_times = g3.Contours(run).dataset(reductions=("xy",)).sizes["time"]
+        with Image.open(out) as im:
+            assert im.n_frames == n_times
+
+    def test_the_frames_are_not_all_the_same_picture(self, run3d, tmp_path,
+                                                     headless):
+        """
+        The one failure a movie hides: an updater that redraws the first
+        snapshot every frame still produces a file of the right length.
+        """
+        from PIL import Image
+        _, run = run3d
+        out, _ = self._gif(run, tmp_path, reductions=("xy",))
+        with Image.open(out) as im:
+            im.seek(0)
+            first = np.asarray(im.convert("RGB"))
+            im.seek(im.n_frames - 1)
+            last = np.asarray(im.convert("RGB"))
+        assert not np.array_equal(first, last)
+
+    def test_n_max_thins_the_frames(self, run3d, tmp_path, headless):
+        from PIL import Image
+        _, run = run3d
+        out, _ = self._gif(run, tmp_path, reductions=("xy",), n_max=3)
+        with Image.open(out) as im:
+            assert im.n_frames == 3
+
+    def test_a_file_per_quantity(self, run3d, tmp_path, headless):
+        _, run = run3d
+        base = tmp_path / "m.gif"
+        g3.Contours(run).animate(filename=str(base), dpi=50, n_max=2,
+                                 quantities=("phi", "n"), reductions=("xy",))
+        assert (tmp_path / "m_phi.gif").exists()
+        assert (tmp_path / "m_n.gif").exists()
+        assert not base.exists()
+
+    def test_the_colour_scale_spans_the_whole_movie(self, run3d, tmp_path,
+                                                    headless):
+        """
+        Not the first frame, and not each frame on its own: a per-frame scale
+        renormalises a quiet interval up to full contrast, which is exactly
+        the thing a movie is watched to see.
+
+        The movie is written rather than left in memory because matplotlib
+        holds only a weak reference to an unrendered animation and warns at
+        collection -- the footgun `animate`'s docstring points at.
+        """
+        _, run = run3d
+        diag = g3.Contours(run)
+        # Every frame, not a thinned set: the scale spans the movie that is
+        # actually drawn, so thinning it would change the expected number.
+        self._gif(run, tmp_path, reductions=("xy",))
+        ds = diag.dataset(reductions=("xy",))
+        expected = float(np.max(np.abs(np.asarray(ds["phi_xy"]))))
+        mesh = headless.gcf().axes[0].collections[0]
+        assert mesh.get_clim() == pytest.approx((-expected, expected))
+
+    def test_an_explicit_vmax_is_honoured(self, run3d, tmp_path, headless):
+        _, run = run3d
+        self._gif(run, tmp_path, reductions=("xy",), n_max=2, vmax=0.25)
+        mesh = headless.gcf().axes[0].collections[0]
+        assert mesh.get_clim() == pytest.approx((-0.25, 0.25))
+
+    def test_a_time_averaged_selection_refuses(self, run3d, headless):
+        _, run = run3d
+        with pytest.raises(ValueError, match="t_avg"):
+            g3.Contours(run).animate(t_avg=True, reductions=("xy",))
+
+    def test_a_single_frame_refuses(self, run3d, headless):
+        """`t=(t0, t0)` is a plot, not a movie, and says so."""
+        _, run = run3d
+        t0 = float(g3.Contours(run).dataset(reductions=("xy",))["time"][0])
+        with pytest.raises(ValueError, match="at least two snapshots"):
+            g3.Contours(run).animate(t=(t0, t0), reductions=("xy",))
+
+    def test_the_cli_writes_one(self, run3d, tmp_path, headless):
+        """
+        `--movie` bypasses --save: the time axis is the frames, which a
+        per-figure PNG dump cannot express.
+        """
+        from genetools.cli import main
+        g, _ = run3d
+        out = tmp_path / "cli.gif"
+        rc = main([str(g.folder), "--contours", "--movie", str(out),
+                   "--reductions", "xy", "--fps", "4"])
+        assert rc == 0
+        assert out.stat().st_size > 0
+
+    def test_the_cli_refuses_a_movie_of_another_diagnostic(self, run3d,
+                                                           tmp_path, capsys):
+        from genetools.cli import main
+        g, _ = run3d
+        rc = main([str(g.folder), "--nrg", "--movie", str(tmp_path / "x.gif")])
+        assert rc == 2
+        assert "only available for --contours" in capsys.readouterr().err
+
+    def test_the_lines_animate_too(self, run3d, tmp_path, headless):
+        """A 1-D reduction updates its ydata, not a mesh."""
+        from PIL import Image
+        _, run = run3d
+        out, _ = self._gif(run, tmp_path, reductions=("x", "xy"), n_max=3)
+        with Image.open(out) as im:
+            assert im.n_frames == 3
+            im.seek(0)
+            first = np.asarray(im.convert("RGB"))
+            im.seek(2)
+            last = np.asarray(im.convert("RGB"))
+        assert not np.array_equal(first, last)
+
+
 # ---------------------------------------------------------------------------
 # Growth rate and frequency
 # ---------------------------------------------------------------------------
